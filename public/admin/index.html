@@ -1,0 +1,1384 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>StroWallet Admin</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #070b15;
+        --panel: #0d1326;
+        --panel-2: #0f182f;
+        --accent: #1cd4a1;
+        --accent-2: #7dd3ff;
+        --text: #eef3ff;
+        --muted: #9fb2d0;
+        --border: #1f2742;
+        --danger: #ff6b6b;
+        --shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+        font-family: "Manrope", "Segoe UI", sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background:
+          radial-gradient(
+            circle at 12% 20%,
+            rgba(28, 212, 161, 0.16),
+            transparent 22%
+          ),
+          radial-gradient(
+            circle at 85% 10%,
+            rgba(125, 211, 255, 0.16),
+            transparent 20%
+          ),
+          radial-gradient(
+            circle at 40% 80%,
+            rgba(28, 212, 161, 0.12),
+            transparent 28%
+          ),
+          var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+      }
+      header {
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 28px 24px 12px;
+        display: flex;
+        gap: 16px;
+        align-items: flex-start;
+        justify-content: space-between;
+        flex-wrap: wrap;
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-weight: 700;
+        letter-spacing: -0.4px;
+      }
+      p.lead {
+        margin: 0;
+        color: var(--muted);
+      }
+      .pill {
+        padding: 7px 12px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .pill.good {
+        color: var(--accent);
+        border-color: rgba(28, 212, 161, 0.5);
+      }
+      .pill.bad {
+        color: var(--danger);
+        border-color: rgba(255, 107, 107, 0.5);
+      }
+      .panel-bar {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+        background: linear-gradient(
+          135deg,
+          rgba(28, 212, 161, 0.12),
+          rgba(125, 211, 255, 0.12)
+        );
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px 12px;
+        box-shadow: var(--shadow);
+      }
+      .grid {
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 12px 24px 48px;
+        display: grid;
+        gap: 16px;
+        grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      }
+      .card {
+        background: linear-gradient(150deg, var(--panel), var(--panel-2));
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 18px;
+        box-shadow: var(--shadow);
+      }
+      .card h2 {
+        margin: 0 0 6px;
+        font-size: 18px;
+      }
+      .card p.sub {
+        margin: 0 0 12px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .row {
+        display: grid;
+        gap: 10px;
+      }
+      .row.inline {
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+      }
+      label {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      input,
+      select,
+      textarea {
+        width: 100%;
+        padding: 11px 12px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: #0c1427;
+        color: var(--text);
+        font-size: 14px;
+        transition: border 120ms ease;
+      }
+      input:focus,
+      select:focus,
+      textarea:focus {
+        outline: none;
+        border-color: rgba(28, 212, 161, 0.6);
+      }
+      button {
+        border: none;
+        border-radius: 10px;
+        padding: 12px 14px;
+        background: linear-gradient(135deg, var(--accent), #16b485);
+        color: #03120d;
+        font-weight: 700;
+        cursor: pointer;
+        box-shadow: 0 10px 24px rgba(28, 212, 161, 0.28);
+        transition:
+          transform 120ms ease,
+          box-shadow 120ms ease,
+          opacity 120ms ease;
+      }
+      button.secondary {
+        background: linear-gradient(135deg, var(--accent-2), #4fb5ff);
+        color: #041018;
+        box-shadow: 0 10px 24px rgba(79, 181, 255, 0.24);
+      }
+      button.danger {
+        background: linear-gradient(135deg, var(--danger), #ff8b8b);
+        color: #2d0606;
+        box-shadow: 0 10px 24px rgba(255, 107, 107, 0.24);
+      }
+      button:disabled {
+        opacity: 0.65;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+      }
+      button:hover:not(:disabled) {
+        transform: translateY(-1px);
+      }
+      .status {
+        margin-top: 8px;
+        font-size: 13px;
+        color: var(--muted);
+        white-space: pre-line;
+        min-height: 18px;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        padding: 6px 10px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--border);
+        color: var(--muted);
+      }
+      .divider {
+        border: 0;
+        border-top: 1px solid var(--border);
+        opacity: 0.5;
+        margin: 12px 0;
+      }
+      .data-box {
+        background: #0c1427;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px;
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 13px;
+        color: var(--muted);
+        white-space: pre-line;
+      }
+      .toolbar {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .tag {
+        padding: 4px 8px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid var(--border);
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .toast {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        min-width: 220px;
+        background: #0f182f;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 12px 14px;
+        box-shadow: var(--shadow);
+        opacity: 0;
+        transform: translateY(6px);
+        transition:
+          opacity 160ms ease,
+          transform 160ms ease;
+        z-index: 50;
+      }
+      .toast.show {
+        opacity: 1;
+        transform: translateY(0);
+      }
+      .toast.good {
+        border-color: rgba(28, 212, 161, 0.6);
+      }
+      .toast.bad {
+        border-color: rgba(255, 107, 107, 0.6);
+      }
+      .mono {
+        font-family: "SFMono-Regular", Consolas, monospace;
+      }
+      .req-card {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px;
+        background: #0c1427;
+        margin-bottom: 10px;
+      }
+      .req-line {
+        margin: 2px 0;
+        color: var(--text);
+      }
+      .txn-card {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px;
+        background: #0c1427;
+        margin-bottom: 10px;
+      }
+      .pill.small {
+        padding: 2px 6px;
+        font-size: 12px;
+      }
+      @media (max-width: 820px) {
+        header {
+          padding: 20px 16px 8px;
+        }
+        .grid {
+          padding: 8px 16px 32px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>StroWallet Admin</h1>
+        <p class="lead">
+          Manage USDT pricing, fees, limits, balances, and card top-ups.
+        </p>
+        <div class="panel-bar">
+          <span id="tokenStatus" class="pill">Token: missing</span>
+          <span class="pill">Env: <span id="envHost"></span></span>
+          <span class="pill" id="configMeta">Config: loading...</span>
+          <span class="pill" id="fakeTopupStatus">Fake Top-up: ...</span>
+          <label
+            style="
+              margin-left: 12px;
+              display: flex;
+              align-items: center;
+              gap: 8px;
+              font-size: 13px;
+            "
+          >
+            <input type="checkbox" id="fakeTopupToggle" style="margin: 0" />
+            Enable Fake Top-up
+          </label>
+        </div>
+      </div>
+      <div style="min-width: 260px; max-width: 320px; width: 100%">
+        <div class="row">
+          <label for="adminToken">Admin token (x-admin-token)</label>
+          <input id="adminToken" placeholder="Paste token" autocomplete="off" />
+          <div class="toolbar">
+            <button id="saveToken">Save Token</button>
+            <button id="testToken" class="secondary" type="button">Test</button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="card">
+        <div
+          class="toolbar"
+          style="justify-content: space-between; margin-bottom: 8px"
+        >
+          <div>
+            <h2>Pricing & Limits</h2>
+            <p class="sub">Live config applied to deposits and top-ups.</p>
+          </div>
+          <div class="toolbar">
+            <button id="refreshConfig" type="button" class="secondary">
+              Refresh
+            </button>
+            <button id="copyConfig" type="button">Copy JSON</button>
+          </div>
+        </div>
+        <form id="configForm" class="row">
+          <div class="row inline">
+            <div>
+              <label>USDT Rate (ETB per 1 USDT)</label>
+              <input id="usdtRate" type="number" step="0.0001" required />
+            </div>
+            <div>
+              <label>Updated By (optional)</label>
+              <input id="updatedBy" type="text" />
+            </div>
+          </div>
+          <div class="row inline">
+            <div>
+              <label>Deposit Percent Fee (%)</label>
+              <input
+                id="depositPercentFee"
+                type="number"
+                step="0.01"
+                min="0"
+                required
+              />
+            </div>
+            <div>
+              <label>Deposit Flat Fee (ETB)</label>
+              <input
+                id="depositFlatFee"
+                type="number"
+                step="0.01"
+                min="0"
+                required
+              />
+            </div>
+          </div>
+          <div class="row inline">
+            <div>
+              <label>Top-up Percent Fee (%)</label>
+              <input
+                id="topupPercentFee"
+                type="number"
+                step="0.01"
+                min="0"
+                required
+              />
+            </div>
+            <div>
+              <label>Top-up Flat Fee (USDT)</label>
+              <input
+                id="topupFlatFee"
+                type="number"
+                step="0.01"
+                min="0"
+                required
+              />
+            </div>
+          </div>
+          <div class="row inline">
+            <div>
+              <label>Top-up Min (USDT)</label>
+              <input id="topupMin" type="number" step="0.01" min="0" />
+            </div>
+            <div>
+              <label>Top-up Max (USDT)</label>
+              <input id="topupMax" type="number" step="0.01" min="0" />
+            </div>
+          </div>
+          <div class="toolbar">
+            <button type="submit">Save Pricing</button>
+            <span class="tag" id="configSummary">—</span>
+          </div>
+          <div id="configStatus" class="status"></div>
+        </form>
+      </section>
+
+      <section class="card">
+        <div
+          class="toolbar"
+          style="justify-content: space-between; margin-bottom: 6px"
+        >
+          <div>
+            <h2>Audit Log</h2>
+            <p class="sub">Recent runtime config and simulated actions.</p>
+          </div>
+          <div class="toolbar">
+            <button id="loadAudit" type="button" class="secondary">
+              Load Audit
+            </button>
+          </div>
+        </div>
+        <div id="auditList" class="data-box">No audit entries loaded.</div>
+        <div class="status" id="auditStatus"></div>
+      </section>
+
+      <section class="card">
+        <div
+          class="toolbar"
+          style="justify-content: space-between; margin-bottom: 6px"
+        >
+          <div>
+            <h2>Quotes</h2>
+            <p class="sub">Preview before you confirm with users.</p>
+          </div>
+        </div>
+        <form id="quoteDeposit" class="row">
+          <label>Deposit Amount (ETB)</label>
+          <input
+            id="depositAmountEtb"
+            type="number"
+            step="0.01"
+            min="0"
+            required
+          />
+          <div class="toolbar">
+            <button type="submit" class="secondary">Get Deposit Quote</button>
+            <span class="tag" id="depositHint">Net USDT and fee breakdown</span>
+          </div>
+          <div id="depositQuote" class="data-box">Awaiting input</div>
+        </form>
+        <hr class="divider" />
+        <form id="quoteTopup" class="row">
+          <label>Top-up Amount (USDT)</label>
+          <input
+            id="topupAmountUsdt"
+            type="number"
+            step="0.01"
+            min="0"
+            required
+          />
+          <div class="toolbar">
+            <button type="submit" class="secondary">Get Top-up Quote</button>
+            <span class="tag" id="topupHint">Total USDT charge incl. fees</span>
+          </div>
+          <div id="topupQuote" class="data-box">Awaiting input</div>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>User Balance</h2>
+        <p class="sub">Check a user's virtual USDT balance.</p>
+        <form id="balanceForm" class="row">
+          <label>User ID</label>
+          <input id="balanceUserId" type="text" required />
+          <div class="toolbar">
+            <button type="submit">Fetch Balance</button>
+            <span class="tag">Read-only</span>
+          </div>
+          <div id="balanceStatus" class="data-box">—</div>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>Manual Deposit</h2>
+        <p class="sub">Credit a user's wallet directly (admin only).</p>
+        <form id="manualDepositForm" class="row">
+          <label>User ID</label>
+          <input
+            id="mdUserId"
+            type="text"
+            placeholder="Telegram user/chat id"
+            required
+          />
+          <label>Amount (USDT)</label>
+          <input
+            id="mdAmountUsdt"
+            type="number"
+            step="0.01"
+            min="0"
+            placeholder="e.g. 10"
+            required
+          />
+          <label>Note (optional)</label>
+          <input id="mdNote" type="text" placeholder="Reason or reference" />
+          <div class="toolbar">
+            <button type="submit">Deposit</button>
+            <span class="tag">Instant credit</span>
+          </div>
+          <div class="status" id="manualDepositStatus">—</div>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>Top-up Card</h2>
+        <p class="sub">Deduct USDT balance and fund a card via StroWallet.</p>
+        <form id="topupForm" class="row">
+          <label>User ID</label>
+          <input id="tuUserId" type="text" required />
+          <label>Card ID</label>
+          <input id="tuCardId" type="text" required />
+          <label>Amount (USDT)</label>
+          <input id="tuAmountUsdt" type="number" step="0.01" min="0" required />
+          <label>Mode (optional, e.g., sandbox)</label>
+          <input id="tuMode" type="text" placeholder="sandbox" />
+          <div class="toolbar">
+            <button type="submit">Top-up Card</button>
+            <button id="clearTopup" type="button" class="secondary">
+              Clear
+            </button>
+          </div>
+          <div id="topupStatus" class="data-box">—</div>
+        </form>
+      </section>
+
+      <section class="card">
+        <div
+          class="toolbar"
+          style="justify-content: space-between; margin-bottom: 6px"
+        >
+          <div>
+            <h2>Card Requests</h2>
+            <p class="sub">Approve or decline user card requests.</p>
+          </div>
+          <div class="toolbar">
+            <label style="color: var(--muted); font-size: 13px">Status</label>
+            <select id="requestStatus" style="max-width: 120px">
+              <option value="pending" selected>pending</option>
+              <option value="approved">approved</option>
+              <option value="declined">declined</option>
+            </select>
+            <button id="loadRequests" type="button" class="secondary">
+              Load
+            </button>
+          </div>
+        </div>
+        <div id="requestList" class="row">No requests yet. Load to view.</div>
+        <div class="status" id="requestStatusText"></div>
+      </section>
+
+      <section class="card">
+        <div
+          class="toolbar"
+          style="justify-content: space-between; margin-bottom: 6px"
+        >
+          <div>
+            <h2>Deposit Requests</h2>
+            <p class="sub">User deposit transactions only (latest first).</p>
+          </div>
+          <div class="toolbar">
+            <label style="color: var(--muted); font-size: 13px">Limit</label>
+            <select id="recentLimit" style="max-width: 90px">
+              <option>10</option>
+              <option selected>20</option>
+              <option>50</option>
+              <option>100</option>
+            </select>
+            <button id="loadRecent" type="button" class="secondary">
+              Load
+            </button>
+          </div>
+        </div>
+        <div id="recentList" class="data-box">
+          No data yet. Load to view recent deposits.
+        </div>
+        <div class="status" id="recentStatus"></div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+
+    <script>
+      const els = {
+        adminToken: document.getElementById("adminToken"),
+        saveToken: document.getElementById("saveToken"),
+        testToken: document.getElementById("testToken"),
+        tokenStatus: document.getElementById("tokenStatus"),
+        envHost: document.getElementById("envHost"),
+        configMeta: document.getElementById("configMeta"),
+        configForm: document.getElementById("configForm"),
+        refreshConfig: document.getElementById("refreshConfig"),
+        copyConfig: document.getElementById("copyConfig"),
+        configStatus: document.getElementById("configStatus"),
+        configSummary: document.getElementById("configSummary"),
+        depositForm: document.getElementById("quoteDeposit"),
+        topupQuoteForm: document.getElementById("quoteTopup"),
+        balanceForm: document.getElementById("balanceForm"),
+        manualDepositForm: document.getElementById("manualDepositForm"),
+        topupForm: document.getElementById("topupForm"),
+        depositQuote: document.getElementById("depositQuote"),
+        topupQuote: document.getElementById("topupQuote"),
+        balanceStatus: document.getElementById("balanceStatus"),
+        manualDepositStatus: document.getElementById("manualDepositStatus"),
+        topupStatus: document.getElementById("topupStatus"),
+        clearTopup: document.getElementById("clearTopup"),
+        loadRecent: document.getElementById("loadRecent"),
+        recentList: document.getElementById("recentList"),
+        recentStatus: document.getElementById("recentStatus"),
+        recentLimit: document.getElementById("recentLimit"),
+        requestList: document.getElementById("requestList"),
+        requestStatusText: document.getElementById("requestStatusText"),
+        loadRequests: document.getElementById("loadRequests"),
+        requestStatus: document.getElementById("requestStatus"),
+        fakeTopupToggle: document.getElementById("fakeTopupToggle"),
+        fakeTopupStatus: document.getElementById("fakeTopupStatus"),
+        toast: document.getElementById("toast"),
+      };
+
+      const inputs = {
+        usdtRate: document.getElementById("usdtRate"),
+        updatedBy: document.getElementById("updatedBy"),
+        depositPercentFee: document.getElementById("depositPercentFee"),
+        depositFlatFee: document.getElementById("depositFlatFee"),
+        topupPercentFee: document.getElementById("topupPercentFee"),
+        topupFlatFee: document.getElementById("topupFlatFee"),
+        topupMin: document.getElementById("topupMin"),
+        topupMax: document.getElementById("topupMax"),
+        depositAmountEtb: document.getElementById("depositAmountEtb"),
+        topupAmountUsdt: document.getElementById("topupAmountUsdt"),
+        balanceUserId: document.getElementById("balanceUserId"),
+        mdUserId: document.getElementById("mdUserId"),
+        mdAmountUsdt: document.getElementById("mdAmountUsdt"),
+        mdNote: document.getElementById("mdNote"),
+        tuUserId: document.getElementById("tuUserId"),
+        tuCardId: document.getElementById("tuCardId"),
+        tuAmountUsdt: document.getElementById("tuAmountUsdt"),
+        tuMode: document.getElementById("tuMode"),
+      };
+
+      let lastConfig = null;
+
+      function showToast(msg, kind = "info") {
+        const t = els.toast;
+        t.textContent = msg;
+        t.className =
+          "toast " +
+          (kind === "success" ? "good" : kind === "error" ? "bad" : "");
+        requestAnimationFrame(() => t.classList.add("show"));
+        setTimeout(() => t.classList.remove("show"), 2400);
+      }
+
+      function updateTokenStatus() {
+        const token = (els.adminToken.value || "").trim();
+        if (token) {
+          els.tokenStatus.textContent = "Token: saved";
+          els.tokenStatus.className = "pill good";
+        } else {
+          els.tokenStatus.textContent = "Token: missing";
+          els.tokenStatus.className = "pill bad";
+          stopLoops();
+        }
+        // enable/disable fakeTopup toggle depending on token presence
+        try {
+          if (els.fakeTopupToggle)
+            els.fakeTopupToggle.disabled = !Boolean(token);
+        } catch (_) {}
+      }
+
+      function headers() {
+        const h = { "Content-Type": "application/json" };
+        const token = (els.adminToken.value || "").trim();
+        if (token) h["x-admin-token"] = token;
+        return h;
+      }
+
+      function hasToken() {
+        return Boolean((els.adminToken.value || "").trim());
+      }
+
+      async function safeFetch(url, options = {}) {
+        const res = await fetch(url, {
+          ...options,
+          headers: { ...headers(), ...(options.headers || {}) },
+        });
+        let data = null;
+        try {
+          data = await res.json();
+        } catch (_) {}
+        if (!res.ok) {
+          const message = data?.message || data?.error || "Request failed";
+          const err = new Error(message);
+          err.status = res.status;
+          // Attach payload so UI can show validation detail
+          err.data = data;
+          throw err;
+        }
+        return data;
+      }
+
+      let latestTxns = [];
+
+      function renderRecent(items) {
+        latestTxns = items || [];
+        const container = els.recentList;
+        container.innerHTML = "";
+        if (!items || !items.length) {
+          container.textContent = "No transactions found.";
+          return;
+        }
+
+        items.forEach((t) => {
+          const cardId = t.cardId || t.metadata?.cardId || t.metadata?.card_id;
+          const amount =
+            t.amountEtb != null
+              ? `${fmt(t.amountEtb, 2)} Birr`
+              : t.amountUsdt != null
+                ? `${fmt(t.amountUsdt)} USDT`
+                : t.amount != null
+                  ? `${fmt(t.amount)} USDT`
+                  : "-";
+          const when = t.createdAt
+            ? new Date(t.createdAt).toLocaleString()
+            : "n/a";
+
+          const card = document.createElement("div");
+          card.className = "txn-card";
+          card.dataset.id = t._id || t.transactionNumber || "";
+          const statusLabel =
+            t.status === "pending" || t.status === "waiting"
+              ? "waiting.."
+              : t.status || "-";
+          card.innerHTML = `
+            <div class="mono req-line">${when}</div>
+            <div class="req-line">🧑 User: ${t.userId}</div>
+            <div class="req-line">💳 Card: ${cardId || "-"}</div>
+            <div class="req-line">💰 Amount: ${amount}</div>
+            <div class="req-line status-line">🏷️ Type: ${
+              t.transactionType || "-"
+            } | Status: ${statusLabel}</div>
+            <div class="req-line">Txn: ${t.transactionNumber || "-"}</div>
+            <div class="req-line">Ref: ${t.referenceNumber || "-"}</div>
+            <div class="toolbar" style="margin-top: 6px">
+              <span class="pill small">${t.paymentMethod || "-"}</span>
+              <div style="flex:1"></div>
+              <button class="secondary" data-action="decline" data-id="${
+                card.dataset.id
+              }">Decline</button>
+              <button data-action="approve" data-id="${
+                card.dataset.id
+              }">Approve</button>
+            </div>
+          `;
+          container.appendChild(card);
+        });
+      }
+
+      let latestRequests = [];
+      let recentPoll = null;
+      let requestPoll = null;
+
+      function stopLoops() {
+        if (recentPoll) {
+          clearInterval(recentPoll);
+          recentPoll = null;
+        }
+        if (requestPoll) {
+          clearInterval(requestPoll);
+          requestPoll = null;
+        }
+      }
+
+      function startLoopsIfReady() {
+        if (!hasToken()) return;
+        if (!recentPoll)
+          recentPoll = setInterval(() => els.loadRecent.click(), 10000);
+        if (!requestPoll)
+          requestPoll = setInterval(() => loadRequests(), 10000);
+      }
+
+      function kickOffInitialLoad() {
+        if (!hasToken()) {
+          els.configStatus.textContent = "Missing admin token";
+          els.recentStatus.textContent = "Missing admin token";
+          els.requestStatusText.textContent = "Missing admin token";
+          return;
+        }
+        loadConfig();
+        els.loadRecent.click();
+        loadRequests();
+        startLoopsIfReady();
+      }
+
+      function renderRequests(items) {
+        latestRequests = items || [];
+        const container = els.requestList;
+        container.innerHTML = "";
+        if (!items || !items.length) {
+          container.textContent = "No requests found for this status.";
+          return;
+        }
+
+        items.forEach((r) => {
+          const wrapper = document.createElement("div");
+          wrapper.className = "req-card";
+          const when = r.createdAt
+            ? new Date(r.createdAt).toLocaleString()
+            : "n/a";
+          const email = r.customerEmail || "(missing email)";
+          const amount = r.amount || "0";
+          wrapper.innerHTML = `
+          <div class="mono req-line">id=${r._id} | userId=${
+            r.userId
+          } | status=${r.status} | ${when}</div>
+          <div class="req-line">Name: ${r.nameOnCard || "-"} | Type: ${
+            r.cardType || "virtual"
+          } | Amount: ${amount}</div>
+          <div class="req-line">Email: ${email}${
+            r.mode ? ` | Mode: ${r.mode}` : ""
+          }</div>
+          ${
+            r.adminNote
+              ? `<div class="req-line">Admin note: ${r.adminNote}</div>`
+              : ""
+          }
+          ${
+            r.decisionReason
+              ? `<div class="req-line">Reason: ${r.decisionReason}</div>`
+              : ""
+          }
+          ${r.cardId ? `<div class="req-line">Card ID: ${r.cardId}</div>` : ""}
+        `;
+
+          if (r.status === "pending") {
+            const actions = document.createElement("div");
+            actions.className = "toolbar";
+            const approve = document.createElement("button");
+            approve.textContent = "Approve";
+            approve.dataset.action = "approve";
+            approve.dataset.id = r._id;
+            const decline = document.createElement("button");
+            decline.textContent = "Decline";
+            decline.className = "secondary";
+            decline.dataset.action = "decline";
+            decline.dataset.id = r._id;
+            actions.appendChild(approve);
+            actions.appendChild(decline);
+            wrapper.appendChild(actions);
+          }
+
+          container.appendChild(wrapper);
+        });
+      }
+
+      function setLoading(btn, isLoading) {
+        if (!btn) return;
+        btn.disabled = isLoading;
+        btn.dataset.loading = isLoading ? "1" : "";
+        if (isLoading) {
+          btn.dataset.prevText = btn.textContent;
+          btn.textContent = "Working...";
+        } else if (btn.dataset.prevText) {
+          btn.textContent = btn.dataset.prevText;
+        }
+      }
+
+      function fmt(num, digits = 4) {
+        const n = Number(num);
+        if (Number.isFinite(n)) return n.toFixed(digits);
+        return String(num || "");
+      }
+
+      async function loadConfig() {
+        if (!hasToken()) {
+          els.configStatus.textContent = "Missing admin token";
+          return;
+        }
+        setLoading(els.refreshConfig, true);
+        els.configStatus.textContent = "Loading...";
+        try {
+          const data = await safeFetch("/api/wallet/config");
+          const c = data.config || data;
+          lastConfig = c;
+          inputs.usdtRate.value = c.usdtRate ?? "";
+          inputs.depositPercentFee.value = c.depositPercentFee ?? 0;
+          inputs.depositFlatFee.value = c.depositFlatFee ?? 0;
+          inputs.topupPercentFee.value = c.topupPercentFee ?? 0;
+          inputs.topupFlatFee.value = c.topupFlatFee ?? 0;
+          inputs.topupMin.value = c.topupMin ?? "";
+          inputs.topupMax.value = c.topupMax ?? "";
+          els.configStatus.textContent = "Config loaded";
+          els.configSummary.textContent = `Rate ${c.usdtRate} ETB | Deposit fee ${c.depositPercentFee}% + ${c.depositFlatFee} ETB | Top-up fee ${c.topupPercentFee}% + ${c.topupFlatFee} USDT`;
+          const updatedAt = c.updatedAt
+            ? new Date(c.updatedAt).toLocaleString()
+            : "n/a";
+          els.configMeta.textContent = `Config: last update ${updatedAt}`;
+        } catch (err) {
+          els.configStatus.textContent = err.message;
+          showToast(err.message, "error");
+        } finally {
+          setLoading(els.refreshConfig, false);
+        }
+      }
+
+      els.refreshConfig.addEventListener("click", loadConfig);
+      els.copyConfig.addEventListener("click", () => {
+        if (!lastConfig) return showToast("No config loaded", "error");
+        navigator.clipboard
+          .writeText(JSON.stringify(lastConfig, null, 2))
+          .then(() => showToast("Config copied", "success"));
+      });
+
+      els.configForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        setLoading(els.configForm.querySelector('button[type="submit"]'), true);
+        els.configStatus.textContent = "Saving...";
+        const body = {
+          usdtRate: Number(inputs.usdtRate.value),
+          depositPercentFee: Number(inputs.depositPercentFee.value),
+          depositFlatFee: Number(inputs.depositFlatFee.value),
+          topupPercentFee: Number(inputs.topupPercentFee.value),
+          topupFlatFee: Number(inputs.topupFlatFee.value),
+          topupMin: inputs.topupMin.value
+            ? Number(inputs.topupMin.value)
+            : undefined,
+          topupMax: inputs.topupMax.value
+            ? Number(inputs.topupMax.value)
+            : undefined,
+          updatedBy: inputs.updatedBy.value || undefined,
+        };
+        try {
+          const data = await safeFetch("/api/wallet/config", {
+            method: "PUT",
+            body: JSON.stringify(body),
+          });
+          els.configStatus.textContent = "Saved";
+          lastConfig = data.config;
+          els.configSummary.textContent = `Rate ${data.config.usdtRate} ETB | Deposit fee ${data.config.depositPercentFee}% + ${data.config.depositFlatFee} ETB | Top-up fee ${data.config.topupPercentFee}% + ${data.config.topupFlatFee} USDT`;
+          showToast("Config saved", "success");
+        } catch (err) {
+          els.configStatus.textContent = err.message;
+          showToast(err.message, "error");
+        } finally {
+          setLoading(
+            els.configForm.querySelector('button[type="submit"]'),
+            false,
+          );
+        }
+      });
+
+      els.depositForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const btn = els.depositForm.querySelector('button[type="submit"]');
+        setLoading(btn, true);
+        els.depositQuote.textContent = "Loading...";
+        try {
+          const amountEtb = Number(inputs.depositAmountEtb.value);
+          const data = await safeFetch("/api/wallet/deposit/quote", {
+            method: "POST",
+            body: JSON.stringify({ amountEtb }),
+          });
+          const q = data.quote;
+          els.depositQuote.textContent = `Net: ${fmt(
+            q.creditedUsdt,
+          )} USDT\nFee: ${fmt(q.feeEtb, 2)} ETB\nRate: ${fmt(
+            q.rate,
+            4,
+          )} ETB/USDT`;
+          showToast("Deposit quote ready", "success");
+        } catch (err) {
+          els.depositQuote.textContent = err.message;
+          showToast(err.message, "error");
+        } finally {
+          setLoading(btn, false);
+        }
+      });
+
+      els.topupQuoteForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const btn = els.topupQuoteForm.querySelector('button[type="submit"]');
+        setLoading(btn, true);
+        els.topupQuote.textContent = "Loading...";
+        try {
+          const amountUsdt = Number(inputs.topupAmountUsdt.value);
+          const data = await safeFetch("/api/wallet/topup/quote", {
+            method: "POST",
+            body: JSON.stringify({ amountUsdt }),
+          });
+          const q = data.quote;
+          els.topupQuote.textContent = `Charge: ${fmt(
+            q.totalChargeUsdt,
+          )} USDT\nFee: ${fmt(q.feeUsdt)} USDT`;
+          showToast("Top-up quote ready", "success");
+        } catch (err) {
+          els.topupQuote.textContent = err.message;
+          showToast(err.message, "error");
+        } finally {
+          setLoading(btn, false);
+        }
+      });
+
+      els.manualDepositForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const btn = els.manualDepositForm.querySelector(
+          'button[type="submit"]',
+        );
+        setLoading(btn, true);
+        els.manualDepositStatus.textContent = "Processing...";
+        try {
+          const body = {
+            userId: inputs.mdUserId.value.trim(),
+            amountUsdt: Number(inputs.mdAmountUsdt.value),
+            note: inputs.mdNote.value.trim() || undefined,
+          };
+          const data = await safeFetch("/api/wallet/deposit/manual", {
+            method: "POST",
+            body: JSON.stringify(body),
+          });
+          els.manualDepositStatus.textContent = `Deposited. New balance: ${data.newBalance}`;
+          showToast("Deposit completed", "success");
+        } catch (err) {
+          els.manualDepositStatus.textContent = err.message;
+          showToast(err.message, "error");
+        } finally {
+          setLoading(btn, false);
+        }
+      });
+
+      els.balanceForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        if (!hasToken()) {
+          els.balanceStatus.textContent = "Missing admin token";
+          return;
+        }
+        const btn = els.balanceForm.querySelector('button[type="submit"]');
+        setLoading(btn, true);
+        els.balanceStatus.textContent = "Loading...";
+        try {
+          const userId = inputs.balanceUserId.value.trim();
+          const data = await safeFetch(
+            `/api/wallet/balance/${encodeURIComponent(userId)}`,
+          );
+          els.balanceStatus.textContent = `Balance: ${data.balance} ${
+            data.currency || "USDT"
+          }`;
+          showToast("Balance fetched", "success");
+        } catch (err) {
+          els.balanceStatus.textContent = err.message;
+          showToast(err.message, "error");
+        } finally {
+          setLoading(btn, false);
+        }
+      });
+
+      els.topupForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const btn = els.topupForm.querySelector('button[type="submit"]');
+        setLoading(btn, true);
+        els.topupStatus.textContent = "Processing...";
+        const body = {
+          userId: inputs.tuUserId.value.trim(),
+          cardId: inputs.tuCardId.value.trim(),
+          amountUsdt: Number(inputs.tuAmountUsdt.value),
+          mode: inputs.tuMode.value.trim() || undefined,
+        };
+        try {
+          const data = await safeFetch("/api/wallet/topup", {
+            method: "POST",
+            body: JSON.stringify(body),
+          });
+          els.topupStatus.textContent = `Top-up ok. Charged ${data.chargedUsdt} USDT. New balance: ${data.newBalance}`;
+          showToast("Top-up completed", "success");
+        } catch (err) {
+          els.topupStatus.textContent = err.message;
+          showToast(err.message, "error");
+        } finally {
+          setLoading(btn, false);
+        }
+      });
+
+      els.clearTopup.addEventListener("click", () => {
+        inputs.tuUserId.value = "";
+        inputs.tuCardId.value = "";
+        inputs.tuAmountUsdt.value = "";
+        inputs.tuMode.value = "";
+        els.topupStatus.textContent = "—";
+      });
+
+      els.loadRecent.addEventListener("click", async () => {
+        const limit = Number(els.recentLimit.value) || 20;
+        if (!hasToken()) {
+          els.recentStatus.textContent = "Missing admin token";
+          return;
+        }
+        els.recentStatus.textContent = "Loading...";
+        try {
+          const data = await safeFetch(
+            `/api/wallet/transactions/recent?limit=${limit}`,
+          );
+          const list = Array.isArray(data)
+            ? data
+            : data.items || data.transactions || [];
+          renderRecent(list);
+          els.recentStatus.textContent = `Showing latest ${
+            els.recentList.children.length
+          }`;
+        } catch (err) {
+          const msg = err?.message || "Failed to load";
+          els.recentStatus.textContent = msg;
+          showToast(msg, "error");
+        }
+      });
+
+      els.recentList.addEventListener("click", async (ev) => {
+        const target = ev.target;
+        const action = target?.dataset?.action;
+        const id = target?.dataset?.id;
+        if (!action || !id) return;
+        const card = target.closest(".txn-card");
+        const statusLine = card?.querySelector(".req-line.status-line");
+        const approveBtn = card?.querySelector("button[data-action='approve']");
+        const declineBtn = card?.querySelector("button[data-action='decline']");
+
+        const btn = target;
+        setLoading(btn, true);
+        try {
+          await safeFetch(
+            `/api/wallet/transactions/${encodeURIComponent(id)}/decision`,
+            {
+              method: "POST",
+              body: JSON.stringify({ action }),
+            },
+          );
+
+          if (action === "approve") {
+            if (card) card.remove();
+            latestTxns = latestTxns.filter(
+              (t) => (t._id || t.transactionNumber || "") !== id,
+            );
+            els.recentStatus.textContent = `Showing latest ${
+              els.recentList.children.length
+            }`;
+            showToast("Marked approved", "success");
+            return;
+          }
+
+          if (statusLine) {
+            statusLine.textContent = `🏷️ Type: deposit | Status: declined`;
+          }
+          if (declineBtn) {
+            declineBtn.disabled = true;
+            declineBtn.textContent = "Declined";
+          }
+          if (approveBtn) approveBtn.disabled = true;
+
+          showToast("Marked declined", "info");
+        } catch (err) {
+          showToast(err?.message || "Action failed", "error");
+        } finally {
+          setLoading(btn, false);
+        }
+      });
+
+      async function loadRequests() {
+        if (!hasToken()) {
+          els.requestStatusText.textContent = "Missing admin token";
+          return;
+        }
+        const status = els.requestStatus.value;
+        els.requestStatusText.textContent = "Loading...";
+        try {
+          const data = await safeFetch(
+            `/api/card-requests?status=${encodeURIComponent(status)}`,
+          );
+          renderRequests(data.requests || []);
+          els.requestStatusText.textContent = `Loaded ${
+            data.requests?.length || 0
+          } (${status})`;
+        } catch (err) {
+          const msg = err?.message || "Failed to load requests";
+          els.requestStatusText.textContent = msg;
+          showToast(msg, "error");
+        }
+      }
+
+      els.loadRequests.addEventListener("click", loadRequests);
+
+      // Audit log loader
+      const auditListEl = document.getElementById("auditList");
+      const auditStatusEl = document.getElementById("auditStatus");
+      const loadAuditBtn = document.getElementById("loadAudit");
+      async function loadAudit() {
+        if (!hasToken()) {
+          auditStatusEl.textContent = "Missing admin token";
+          return;
+        }
+        auditStatusEl.textContent = "Loading...";
+        try {
+          const data = await safeFetch("/api/wallet/audit");
+          const items = data.items || [];
+          if (!items.length) {
+            auditListEl.textContent = "No audit entries found.";
+            auditStatusEl.textContent = "Ready";
+            return;
+          }
+          auditListEl.innerHTML = items
+            .map(
+              (a) =>
+                `\n              <div style="margin-bottom:8px">\n                <div class="mono">${new Date(a.createdAt).toLocaleString()}</div>\n                <div>${a.key} — ${JSON.stringify(a.newValue)}</div>\n                <div style="color:var(--muted)">by: ${a.changedBy || "system"} ${a.reason ? " | " + a.reason : ""}</div>\n              </div>`,
+            )
+            .join("\n");
+          auditStatusEl.textContent = `Loaded ${items.length} entries`;
+        } catch (err) {
+          auditStatusEl.textContent = err.message || "Failed to load audit";
+        }
+      }
+      if (loadAuditBtn) loadAuditBtn.addEventListener("click", loadAudit);
+
+      els.requestStatus.addEventListener("change", () => {
+        loadRequests();
+      });
+
+      els.requestList.addEventListener("click", async (ev) => {
+        const target = ev.target;
+        const action = target?.dataset?.action;
+        const id = target?.dataset?.id;
+        if (!action || !id) return;
+        const req = latestRequests.find((r) => r._id === id);
+        if (!req) return showToast("Request not found in list", "error");
+
+        if (action === "approve") {
+          const nameOnCard =
+            prompt("Name on card", req.nameOnCard || "") || undefined;
+          const cardType =
+            prompt("Card type", req.cardType || "virtual") || undefined;
+          const amount =
+            prompt("Initial load amount (optional)", req.amount || "0") ||
+            undefined;
+          const customerEmail =
+            prompt("Customer email (required)", req.customerEmail || "") ||
+            undefined;
+          const mode =
+            prompt("Mode (blank for live, or sandbox)", req.mode || "") ||
+            undefined;
+          try {
+            await safeFetch(`/api/card-requests/${id}/approve`, {
+              method: "POST",
+              body: JSON.stringify({
+                nameOnCard,
+                cardType,
+                amount: amount || "0",
+                customerEmail,
+                mode,
+              }),
+            });
+            showToast("Approved", "success");
+            loadRequests();
+          } catch (err) {
+            const msg = err?.message || "Approve failed";
+            const detail = err?.data?.data || err?.data;
+            const extra = detail ? `: ${JSON.stringify(detail)}` : "";
+            showToast(msg + extra, "error");
+          }
+        }
+
+        if (action === "decline") {
+          const reason = prompt("Reason (optional)") || undefined;
+          try {
+            await safeFetch(`/api/card-requests/${id}/decline`, {
+              method: "POST",
+              body: JSON.stringify({ reason }),
+            });
+            showToast("Declined", "success");
+            loadRequests();
+          } catch (err) {
+            const msg = err?.message || "Decline failed";
+            showToast(msg, "error");
+          }
+        }
+      });
+
+      els.saveToken.addEventListener("click", () => {
+        localStorage.setItem("adminToken", (els.adminToken.value || "").trim());
+        updateTokenStatus();
+        showToast("Token saved", "success");
+        kickOffInitialLoad();
+      });
+
+      els.testToken.addEventListener("click", async () => {
+        const btn = els.testToken;
+        setLoading(btn, true);
+        try {
+          if (!hasToken()) throw new Error("Missing admin token");
+          await safeFetch("/api/wallet/config");
+          showToast("Token valid", "success");
+          updateTokenStatus();
+          kickOffInitialLoad();
+        } catch (err) {
+          showToast(err.message, "error");
+        } finally {
+          setLoading(btn, false);
+        }
+      });
+
+      els.adminToken.addEventListener("input", updateTokenStatus);
+
+      function initEnv() {
+        els.envHost.textContent = window.location.origin.replace(
+          /^https?:\/\//,
+          "",
+        );
+        const stored = localStorage.getItem("adminToken");
+        if (stored) els.adminToken.value = stored;
+        updateTokenStatus();
+        // load fake topup runtime value
+        (async function loadFakeTopup() {
+          try {
+            if (!hasToken()) return;
+            const data = await safeFetch("/api/wallet/fake-topup");
+            els.fakeTopupToggle.checked = !!data.value;
+            els.fakeTopupStatus.textContent =
+              "Fake Top-up: " + (data.value ? "ON" : "OFF");
+          } catch (err) {
+            els.fakeTopupStatus.textContent = "Fake Top-up: error";
+          }
+        })();
+        els.fakeTopupToggle.addEventListener("change", async () => {
+          const value = !!els.fakeTopupToggle.checked;
+          try {
+            await safeFetch("/api/wallet/fake-topup", {
+              method: "PUT",
+              body: JSON.stringify({ value }),
+            });
+            els.fakeTopupStatus.textContent =
+              "Fake Top-up: " + (value ? "ON" : "OFF");
+            showToast(
+              "Fake Top-up " + (value ? "enabled" : "disabled"),
+              "success",
+            );
+          } catch (err) {
+            console.error("Fake topup update error", err);
+            const msg = err?.message || "Failed to update Fake Top-up";
+            const detail = err?.data || null;
+            els.fakeTopupStatus.textContent =
+              msg + (detail ? `: ${JSON.stringify(detail)}` : "");
+            showToast(msg, "error");
+          }
+        });
+      }
+
+      initEnv();
+      kickOffInitialLoad();
+    </script>
+  </body>
+</html>
