@@ -6,6 +6,7 @@
   "scripts": {
     "test": "jest",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "reset-users": "node scripts/reset-users.js",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js"
   },

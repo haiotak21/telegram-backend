@@ -295,4 +295,66 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
   }
 });
 
+// Admin: reset all existing users to start fresh (zero balances, unlink cards, archive transactions)
+router.post("/reset-users", requireAdmin, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const body = (req.body || {}) as { removeTransactions?: boolean };
+    const removeTransactions = !!body.removeTransactions;
+
+    // Zero all user balances
+    const usersResult = await User.updateMany({}, { $set: { balance: 0, currency: "USDT" } }, { session });
+
+    // Unlink cardIds for all TelegramLink records
+    const linksResult = await TelegramLink.updateMany({}, { $set: { cardIds: [] } }, { session });
+
+    // Archive transactions by marking them cancelled and adding metadata
+    const archiveUpdate: any = { $set: { status: "cancelled" }, $setOnInsert: {} };
+    const now = new Date();
+    // Add metadata flag for auditing
+    const txs = await Transaction.updateMany(
+      { status: { $ne: "cancelled" } },
+      { $set: { status: "cancelled", metadata: { ...(req.body?.metadata || {}), archivedBy: "admin_reset", archivedAt: now } } },
+      { session }
+    );
+
+    if (removeTransactions) {
+      // optionally remove transactions entirely (destructive)
+      await Transaction.deleteMany({}, { session });
+    }
+
+    // Record runtime audit entry
+    try {
+      await RuntimeAudit.create(
+        [
+          {
+            key: "reset_users",
+            oldValue: null,
+            newValue: { usersZeroed: usersResult.modifiedCount ?? usersResult.nModified ?? null, linksCleared: linksResult.modifiedCount ?? linksResult.nModified ?? null, transactionsArchived: txs.modifiedCount ?? txs.nModified ?? null, removedTransactions: removeTransactions },
+            changedBy: req.headers["x-admin-token"] as string | undefined,
+            reason: "Admin requested reset of all user accounts to migrate to new system",
+          },
+        ],
+        { session }
+      );
+    } catch (e) {
+      console.warn("Failed to write runtime audit for reset-users", e?.message || e);
+    }
+
+    await session.commitTransaction();
+    session.endSession();
+
+    res.json({ success: true, message: "All users reset. Existing balances cleared and links unlinked.", usersZeroed: usersResult.modifiedCount ?? usersResult.nModified ?? null, linksCleared: linksResult.modifiedCount ?? linksResult.nModified ?? null, transactionsArchived: txs.modifiedCount ?? txs.nModified ?? null, removedTransactions: removeTransactions });
+  } catch (err: any) {
+    try {
+      await session.abortTransaction();
+    } catch {}
+    session.endSession();
+    const status = err?.status || 500;
+    const message = err?.message || "Failed to reset users";
+    res.status(status).json({ success: false, message });
+  }
+});
+
 export default router;

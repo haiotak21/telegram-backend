@@ -605,6 +605,22 @@
         </div>
         <div class="status" id="recentStatus"></div>
       </section>
+
+      <section class="card">
+        <h2>Reset All Users</h2>
+        <p class="sub">Zero all balances, unlink cards, and archive transactions. Use cautiously.</p>
+        <div class="row">
+          <label>Delete all transactions?</label>
+          <select id="resetRemoveTx">
+            <option value="false" selected>No</option>
+            <option value="true">Yes (destructive)</option>
+          </select>
+          <div class="toolbar">
+            <button id="resetUsersBtn" class="danger">Reset All Users</button>
+          </div>
+          <div id="resetUsersStatus" class="status">—</div>
+        </div>
+      </section>
     </main>
 
     <div id="toast" class="toast"></div>
@@ -643,6 +659,9 @@
         requestStatus: document.getElementById("requestStatus"),
         fakeTopupToggle: document.getElementById("fakeTopupToggle"),
         fakeTopupStatus: document.getElementById("fakeTopupStatus"),
+        resetUsersBtn: document.getElementById("resetUsersBtn"),
+        resetRemoveTx: document.getElementById("resetRemoveTx"),
+        resetUsersStatus: document.getElementById("resetUsersStatus"),
         toast: document.getElementById("toast"),
       };
 
@@ -818,6 +837,26 @@
         els.loadRecent.click();
         loadRequests();
         startLoopsIfReady();
+      }
+
+      // Reset users handler
+      if (els.resetUsersBtn) {
+        els.resetUsersBtn.addEventListener("click", async () => {
+          if (!hasToken()) return showToast("Missing admin token", "error");
+          const confirmMsg = `Type RESET to confirm clearing all user balances and unlinking cards. This may be destructive.`;
+          const r = prompt(confirmMsg);
+          if (r !== "RESET") return showToast("Reset cancelled", "info");
+          const removeTx = (els.resetRemoveTx && els.resetRemoveTx.value === "true") || false;
+          els.resetUsersStatus.textContent = "Working...";
+          try {
+            const data = await safeFetch("/api/wallet/reset-users", { method: "POST", body: JSON.stringify({ removeTransactions: removeTx }) });
+            els.resetUsersStatus.textContent = data.message || "Reset completed";
+            showToast("Reset completed", "success");
+          } catch (err) {
+            els.resetUsersStatus.textContent = err?.message || "Reset failed";
+            showToast(err?.message || "Reset failed", "error");
+          }
+        });
       }
 
       function renderRequests(items) {
