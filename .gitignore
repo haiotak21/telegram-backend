@@ -1,0 +1,19 @@
+node_modules/
+**/node_modules/
+dist/
+build/
+.env
+.env.*
+.DS_Store
+.vscode/
+.idea/
+coverage/
+reports/
+.nyc_output/
+*.log
+/.cache/
+/.pnp/
+/.pnp.js
+verifier/**/node_modules/
+"telebirr verify"/**/node_modules/
+public/admin/*-local.html
