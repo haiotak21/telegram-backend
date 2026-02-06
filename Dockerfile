@@ -20,6 +20,7 @@ COPY ["verifier/telebirr verify", "./verifier/telebirr verify"]
 RUN corepack enable && corepack prepare pnpm@9.12.3 --activate
 RUN pnpm install --frozen-lockfile --prod
 COPY --from=build /app/dist ./dist
+COPY public ./public
 COPY .env.example ./
 EXPOSE 3000
 CMD ["node", "dist/index.js"]
