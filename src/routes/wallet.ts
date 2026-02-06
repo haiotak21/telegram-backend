@@ -325,27 +325,46 @@ router.post("/reset-users", requireAdmin, async (req, res) => {
     }
 
     // Record runtime audit entry
+    const getModifiedCount = (result: { modifiedCount?: number } | null | undefined) => {
+      if (!result) return null;
+      if (typeof result.modifiedCount === "number") return result.modifiedCount;
+      return (result as any).nModified ?? null;
+    };
+
     try {
       await RuntimeAudit.create(
         [
           {
             key: "reset_users",
             oldValue: null,
-            newValue: { usersZeroed: usersResult.modifiedCount ?? usersResult.nModified ?? null, linksCleared: linksResult.modifiedCount ?? linksResult.nModified ?? null, transactionsArchived: txs.modifiedCount ?? txs.nModified ?? null, removedTransactions: removeTransactions },
+            newValue: {
+              usersZeroed: getModifiedCount(usersResult),
+              linksCleared: getModifiedCount(linksResult),
+              transactionsArchived: getModifiedCount(txs),
+              removedTransactions: removeTransactions,
+            },
             changedBy: req.headers["x-admin-token"] as string | undefined,
             reason: "Admin requested reset of all user accounts to migrate to new system",
           },
         ],
         { session }
       );
-    } catch (e) {
-      console.warn("Failed to write runtime audit for reset-users", e?.message || e);
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.warn("Failed to write runtime audit for reset-users", message);
     }
 
     await session.commitTransaction();
     session.endSession();
 
-    res.json({ success: true, message: "All users reset. Existing balances cleared and links unlinked.", usersZeroed: usersResult.modifiedCount ?? usersResult.nModified ?? null, linksCleared: linksResult.modifiedCount ?? linksResult.nModified ?? null, transactionsArchived: txs.modifiedCount ?? txs.nModified ?? null, removedTransactions: removeTransactions });
+    res.json({
+      success: true,
+      message: "All users reset. Existing balances cleared and links unlinked.",
+      usersZeroed: getModifiedCount(usersResult),
+      linksCleared: getModifiedCount(linksResult),
+      transactionsArchived: getModifiedCount(txs),
+      removedTransactions: removeTransactions,
+    });
   } catch (err: any) {
     try {
       await session.abortTransaction();

@@ -2,6 +2,7 @@
 FROM node:20-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json* ./
+COPY verifier/custom-cbe-verifier ./verifier/custom-cbe-verifier
 RUN npm ci --only=production=false || npm i
 COPY tsconfig.json ./
 COPY src ./src
@@ -12,6 +13,7 @@ FROM node:20-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json* ./
+COPY verifier/custom-cbe-verifier ./verifier/custom-cbe-verifier
 RUN npm ci --only=production || npm i --omit=dev
 COPY --from=build /app/dist ./dist
 COPY .env.example ./

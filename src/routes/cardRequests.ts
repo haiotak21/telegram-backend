@@ -141,7 +141,8 @@ router.post("/", async (req, res) => {
     let reqAmount = Number(body.amount);
     if (!Number.isFinite(reqAmount) || reqAmount < 3) reqAmount = 3;
     // Enforce cardType to be visa or mastercard
-    let reqCardType = asString(body.cardType).toLowerCase();
+    let reqCardTypeRaw = asString(body.cardType);
+    let reqCardType = reqCardTypeRaw ? reqCardTypeRaw.toLowerCase() : "visa";
     if (reqCardType !== "visa" && reqCardType !== "mastercard") reqCardType = "visa";
     const request = await CardRequest.create({
       userId,
