@@ -1,22 +1,24 @@
 # Build stage
 FROM node:20-alpine AS build
 WORKDIR /app
-COPY package.json package-lock.json* ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml* ./
 COPY verifier/custom-cbe-verifier ./verifier/custom-cbe-verifier
 COPY ["verifier/telebirr verify", "./verifier/telebirr verify"]
-RUN npm ci --only=production=false || npm i
+RUN corepack enable && corepack prepare pnpm@9.12.3 --activate
+RUN pnpm install --frozen-lockfile
 COPY tsconfig.json ./
 COPY src ./src
-RUN npm run build
+RUN pnpm run build
 
 # Runtime stage
 FROM node:20-alpine
 WORKDIR /app
 ENV NODE_ENV=production
-COPY package.json package-lock.json* ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml* ./
 COPY verifier/custom-cbe-verifier ./verifier/custom-cbe-verifier
 COPY ["verifier/telebirr verify", "./verifier/telebirr verify"]
-RUN npm ci --only=production || npm i --omit=dev
+RUN corepack enable && corepack prepare pnpm@9.12.3 --activate
+RUN pnpm install --frozen-lockfile --prod
 COPY --from=build /app/dist ./dist
 COPY .env.example ./
 EXPOSE 3000
