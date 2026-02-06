@@ -3,6 +3,7 @@ FROM node:20-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json* ./
 COPY verifier/custom-cbe-verifier ./verifier/custom-cbe-verifier
+COPY ["verifier/telebirr verify", "./verifier/telebirr verify"]
 RUN npm ci --only=production=false || npm i
 COPY tsconfig.json ./
 COPY src ./src
@@ -14,6 +15,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json* ./
 COPY verifier/custom-cbe-verifier ./verifier/custom-cbe-verifier
+COPY ["verifier/telebirr verify", "./verifier/telebirr verify"]
 RUN npm ci --only=production || npm i --omit=dev
 COPY --from=build /app/dist ./dist
 COPY .env.example ./
