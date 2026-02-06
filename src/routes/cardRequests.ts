@@ -8,6 +8,17 @@ const router = express.Router();
 
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
 
+function getDefaultMode() {
+  return process.env.STROWALLET_DEFAULT_MODE || (process.env.NODE_ENV !== "production" ? "sandbox" : undefined);
+}
+
+function normalizeMode(mode?: string) {
+  if (!mode) return undefined;
+  const m = String(mode).toLowerCase();
+  if (m === "live") return undefined;
+  return m;
+}
+
 function asString(val: any): string | undefined {
   if (val === undefined || val === null) return undefined;
   return String(val);
@@ -62,6 +73,30 @@ function buildBitvcardClient() {
   });
 }
 
+function extractCardInfo(respData: any) {
+  const cardId =
+    respData?.card_id ||
+    respData?.id ||
+    respData?.data?.card_id ||
+    respData?.data?.id ||
+    respData?.response?.card_id ||
+    respData?.response?.id ||
+    respData?.response?.cardId;
+  const cardNumber =
+    respData?.card_number ||
+    respData?.data?.card_number ||
+    respData?.response?.card_number ||
+    respData?.response?.cardNumber;
+  const cvc =
+    respData?.cvc ||
+    respData?.cvv ||
+    respData?.data?.cvc ||
+    respData?.data?.cvv ||
+    respData?.response?.cvc ||
+    respData?.response?.cvv;
+  return { cardId, cardNumber, cvc };
+}
+
 router.post("/", async (req, res) => {
   try {
     const body = req.body || {};
@@ -76,18 +111,45 @@ router.post("/", async (req, res) => {
         return res.status(400).json({ success: false, message: "User already has a card linked" });
       }
     }
-    const existing = await CardRequest.findOne({ userId, status: { $in: ["pending", "approved"] } }).lean();
+    // Only block if there is a pending/approved request that is not declined and is not for a card that is unlinked
+    const existing = await CardRequest.findOne({
+      userId,
+      status: { $in: ["pending", "approved"] },
+      // Only block if cardId is present and still linked, or if status is pending
+    }).lean();
+    let block = false;
     if (existing) {
+      // If status is pending, always block
+      if (existing.status === "pending") block = true;
+      // If status is approved, only block if cardId is still linked
+      else if (existing.status === "approved" && existing.cardId) {
+        // Check if cardId is still linked in TelegramLink
+        if (Number.isFinite(chatIdNum)) {
+          const link = await TelegramLink.findOne({ chatId: chatIdNum }).lean();
+          if (link?.cardIds?.includes(existing.cardId)) block = true;
+        } else {
+          // If not a telegram user, conservatively block
+          block = true;
+        }
+      }
+    }
+    if (block) {
       return res.status(400).json({ success: false, message: "You already have an active or approved card request" });
     }
 
+    // Enforce minimum amount of 3
+    let reqAmount = Number(body.amount);
+    if (!Number.isFinite(reqAmount) || reqAmount < 3) reqAmount = 3;
+    // Enforce cardType to be visa or mastercard
+    let reqCardType = asString(body.cardType).toLowerCase();
+    if (reqCardType !== "visa" && reqCardType !== "mastercard") reqCardType = "visa";
     const request = await CardRequest.create({
       userId,
       nameOnCard: asString(body.nameOnCard),
-      cardType: asString(body.cardType),
-      amount: body.amount != null ? String(body.amount) : undefined,
+      cardType: reqCardType,
+      amount: reqAmount.toString(),
       customerEmail: asEmail(body.customerEmail),
-      mode: asString(body.mode),
+      mode: normalizeMode(getDefaultMode()),
       metadata: body.metadata,
       status: "pending",
     });
@@ -126,7 +188,7 @@ router.post("/:id/approve", requireAdmin, async (req, res) => {
     const parsedAmount = Number(amountStr);
     const amount = Number.isFinite(parsedAmount) && parsedAmount > 0 ? parsedAmount.toString() : undefined;
     const customerEmail = asEmail(body.customerEmail) || request.customerEmail || link?.customerEmail;
-    const mode = asString(body.mode) || request.mode;
+    const mode = normalizeMode(getDefaultMode());
 
     if (!customerEmail) {
       return res.status(400).json({ success: false, message: "customerEmail is required to create a card" });
@@ -153,9 +215,26 @@ router.post("/:id/approve", requireAdmin, async (req, res) => {
     const resp = await bitvcard.post("create-card/", payload);
     const respData = resp.data as any;
 
-    const cardId = respData?.card_id || respData?.id || respData?.data?.card_id || respData?.data?.id;
-    const cardNumber = respData?.card_number || respData?.data?.card_number;
-    const cvc = respData?.cvc || respData?.cvv || respData?.data?.cvc || respData?.data?.cvv;
+    const cardId =
+      respData?.card_id ||
+      respData?.id ||
+      respData?.data?.card_id ||
+      respData?.data?.id ||
+      respData?.response?.card_id ||
+      respData?.response?.id ||
+      respData?.response?.cardId;
+    const cardNumber =
+      respData?.card_number ||
+      respData?.data?.card_number ||
+      respData?.response?.card_number ||
+      respData?.response?.cardNumber;
+    const cvc =
+      respData?.cvc ||
+      respData?.cvv ||
+      respData?.data?.cvc ||
+      respData?.data?.cvv ||
+      respData?.response?.cvc ||
+      respData?.response?.cvv;
 
     if (!cardId) {
       return res.status(502).json({ success: false, message: "Card creation succeeded but no card_id returned", data: respData });

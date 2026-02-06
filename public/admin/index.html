@@ -517,8 +517,8 @@
             id="mdAmountUsdt"
             type="number"
             step="0.01"
-            min="0"
-            placeholder="e.g. 10"
+            min="3"
+            placeholder="e.g. 10 (min 3)"
             required
           />
           <label>Note (optional)</label>
@@ -560,7 +560,7 @@
         >
           <div>
             <h2>Card Requests</h2>
-            <p class="sub">Approve or decline user card requests.</p>
+            <p class="sub">View card requests and status updates.</p>
           </div>
           <div class="toolbar">
             <label style="color: var(--muted); font-size: 13px">Status</label>
@@ -576,6 +576,38 @@
         </div>
         <div id="requestList" class="row">No requests yet. Load to view.</div>
         <div class="status" id="requestStatusText"></div>
+      </section>
+
+      <section class="card">
+        <div
+          class="toolbar"
+          style="justify-content: space-between; margin-bottom: 6px"
+        >
+          <div>
+            <h2>KYC Status</h2>
+            <p class="sub">
+              Search users by Telegram ID, email, or StroWallet customer ID.
+            </p>
+          </div>
+          <div class="toolbar">
+            <button id="kycRefreshAll" type="button" class="secondary">
+              Refresh All
+            </button>
+          </div>
+        </div>
+        <div class="row">
+          <label>Search (telegram ID, email, or customer ID)</label>
+          <div class="toolbar">
+            <input
+              id="kycSearch"
+              type="text"
+              placeholder="e.g. 12345 or user@email.com"
+            />
+            <button id="kycSearchBtn" type="button">Search</button>
+          </div>
+        </div>
+        <div class="data-box" id="kycTable">No data yet. Search to view.</div>
+        <div class="status" id="kycStatusText"></div>
       </section>
 
       <section class="card">
@@ -607,8 +639,70 @@
       </section>
 
       <section class="card">
+        <div
+          class="toolbar"
+          style="justify-content: space-between; margin-bottom: 6px"
+        >
+          <div>
+            <h2>Card Management</h2>
+            <p class="sub">View cards, refresh, freeze/unfreeze, and fund.</p>
+          </div>
+          <div class="toolbar">
+            <button id="cardRefreshAll" type="button" class="secondary">
+              Refresh All
+            </button>
+          </div>
+        </div>
+        <div class="row">
+          <label>Search (telegram ID, email, or card ID)</label>
+          <div class="toolbar">
+            <input
+              id="cardSearch"
+              type="text"
+              placeholder="e.g. 12345 or card_id"
+            />
+            <button id="cardSearchBtn" type="button">Search</button>
+          </div>
+        </div>
+        <div class="data-box" id="cardTable">No cards yet. Search to view.</div>
+        <div class="status" id="cardStatusText"></div>
+      </section>
+
+      <section class="card">
+        <div
+          class="toolbar"
+          style="justify-content: space-between; margin-bottom: 6px"
+        >
+          <div>
+            <h2>Card Transactions (Webhook)</h2>
+            <p class="sub">Shows locally stored StroWallet card transactions.</p>
+          </div>
+          <div class="toolbar">
+            <button id="cardTxnRefresh" type="button" class="secondary">
+              Load
+            </button>
+          </div>
+        </div>
+        <div class="row inline">
+          <div>
+            <label>Telegram User ID</label>
+            <input id="cardTxnUserId" type="text" placeholder="e.g. 123456" />
+          </div>
+          <div>
+            <label>Card ID</label>
+            <input id="cardTxnCardId" type="text" placeholder="card_id" />
+          </div>
+        </div>
+        <div class="data-box" id="cardTxnTable">No data yet. Load to view.</div>
+        <div class="status" id="cardTxnStatus"></div>
+      </section>
+
+      <section class="card">
         <h2>Reset All Users</h2>
-        <p class="sub">Zero all balances, unlink cards, and archive transactions. Use cautiously.</p>
+        <p class="sub">
+          Zero all balances, unlink cards, and archive transactions. Use
+          cautiously.
+        </p>
         <div class="row">
           <label>Delete all transactions?</label>
           <select id="resetRemoveTx">
@@ -657,6 +751,21 @@
         requestStatusText: document.getElementById("requestStatusText"),
         loadRequests: document.getElementById("loadRequests"),
         requestStatus: document.getElementById("requestStatus"),
+        kycSearch: document.getElementById("kycSearch"),
+        kycSearchBtn: document.getElementById("kycSearchBtn"),
+        kycRefreshAll: document.getElementById("kycRefreshAll"),
+        kycTable: document.getElementById("kycTable"),
+        kycStatusText: document.getElementById("kycStatusText"),
+        cardSearch: document.getElementById("cardSearch"),
+        cardSearchBtn: document.getElementById("cardSearchBtn"),
+        cardRefreshAll: document.getElementById("cardRefreshAll"),
+        cardTable: document.getElementById("cardTable"),
+        cardStatusText: document.getElementById("cardStatusText"),
+        cardTxnRefresh: document.getElementById("cardTxnRefresh"),
+        cardTxnUserId: document.getElementById("cardTxnUserId"),
+        cardTxnCardId: document.getElementById("cardTxnCardId"),
+        cardTxnTable: document.getElementById("cardTxnTable"),
+        cardTxnStatus: document.getElementById("cardTxnStatus"),
         fakeTopupToggle: document.getElementById("fakeTopupToggle"),
         fakeTopupStatus: document.getElementById("fakeTopupStatus"),
         resetUsersBtn: document.getElementById("resetUsersBtn"),
@@ -806,6 +915,8 @@
       let latestRequests = [];
       let recentPoll = null;
       let requestPoll = null;
+      let kycCache = [];
+      let cardCache = [];
 
       function stopLoops() {
         if (recentPoll) {
@@ -831,11 +942,20 @@
           els.configStatus.textContent = "Missing admin token";
           els.recentStatus.textContent = "Missing admin token";
           els.requestStatusText.textContent = "Missing admin token";
+          if (els.kycStatusText)
+            els.kycStatusText.textContent = "Missing admin token";
+          if (els.cardStatusText)
+            els.cardStatusText.textContent = "Missing admin token";
+          if (els.cardTxnStatus)
+            els.cardTxnStatus.textContent = "Missing admin token";
           return;
         }
         loadConfig();
         els.loadRecent.click();
         loadRequests();
+        loadKycUsers();
+        loadCards();
+        loadCardTransactions();
         startLoopsIfReady();
       }
 
@@ -846,11 +966,16 @@
           const confirmMsg = `Type RESET to confirm clearing all user balances and unlinking cards. This may be destructive.`;
           const r = prompt(confirmMsg);
           if (r !== "RESET") return showToast("Reset cancelled", "info");
-          const removeTx = (els.resetRemoveTx && els.resetRemoveTx.value === "true") || false;
+          const removeTx =
+            (els.resetRemoveTx && els.resetRemoveTx.value === "true") || false;
           els.resetUsersStatus.textContent = "Working...";
           try {
-            const data = await safeFetch("/api/wallet/reset-users", { method: "POST", body: JSON.stringify({ removeTransactions: removeTx }) });
-            els.resetUsersStatus.textContent = data.message || "Reset completed";
+            const data = await safeFetch("/api/wallet/reset-users", {
+              method: "POST",
+              body: JSON.stringify({ removeTransactions: removeTx }),
+            });
+            els.resetUsersStatus.textContent =
+              data.message || "Reset completed";
             showToast("Reset completed", "success");
           } catch (err) {
             els.resetUsersStatus.textContent = err?.message || "Reset failed";
@@ -899,25 +1024,178 @@
           ${r.cardId ? `<div class="req-line">Card ID: ${r.cardId}</div>` : ""}
         `;
 
-          if (r.status === "pending") {
-            const actions = document.createElement("div");
-            actions.className = "toolbar";
-            const approve = document.createElement("button");
-            approve.textContent = "Approve";
-            approve.dataset.action = "approve";
-            approve.dataset.id = r._id;
-            const decline = document.createElement("button");
-            decline.textContent = "Decline";
-            decline.className = "secondary";
-            decline.dataset.action = "decline";
-            decline.dataset.id = r._id;
-            actions.appendChild(approve);
-            actions.appendChild(decline);
-            wrapper.appendChild(actions);
-          }
-
           container.appendChild(wrapper);
         });
+      }
+
+      function renderKycUsers(items) {
+        kycCache = items || [];
+        const container = els.kycTable;
+        if (!items || !items.length) {
+          container.textContent = "No users found.";
+          return;
+        }
+
+        const rows = items
+          .map((u) => {
+            const name =
+              [u.firstName, u.lastName].filter(Boolean).join(" ") || "-";
+            const submitted = u.submittedAt
+              ? new Date(u.submittedAt).toLocaleString()
+              : "-";
+            const status =
+              u.kycStatus === "declined"
+                ? "rejected"
+                : u.kycStatus || "not_started";
+            return `
+              <div class="req-card" data-id="${u.telegramUserId}">
+                <div class="mono req-line">Telegram ID: ${u.telegramUserId || "-"}</div>
+                <div class="req-line">Name: ${name}</div>
+                <div class="req-line">Email: ${u.customerEmail || "-"}</div>
+                <div class="req-line">Customer ID: ${u.strowalletCustomerId || "-"}</div>
+                <div class="req-line">KYC Type: ${u.idType || "-"}</div>
+                <div class="req-line">Status: ${status}</div>
+                <div class="req-line">Submitted: ${submitted}</div>
+                <div class="toolbar" style="margin-top:6px">
+                  <div style="flex:1"></div>
+                  <button class="secondary" data-action="refresh" data-id="${u.telegramUserId}">Refresh</button>
+                </div>
+              </div>
+            `;
+          })
+          .join("\n");
+
+        container.innerHTML = rows;
+      }
+
+      async function loadKycUsers() {
+        if (!hasToken()) {
+          els.kycStatusText.textContent = "Missing admin token";
+          return;
+        }
+        const q = (els.kycSearch.value || "").trim();
+        els.kycStatusText.textContent = "Loading...";
+        try {
+          const url = q
+            ? `/api/admin/users?search=${encodeURIComponent(q)}`
+            : "/api/admin/users";
+          const data = await safeFetch(url);
+          renderKycUsers(data.users || []);
+          els.kycStatusText.textContent = `Loaded ${data.users?.length || 0}`;
+        } catch (err) {
+          const msg = err?.message || "Failed to load KYC users";
+          els.kycStatusText.textContent = msg;
+          showToast(msg, "error");
+        }
+      }
+
+      function renderCards(items) {
+        cardCache = items || [];
+        const container = els.cardTable;
+        if (!items || !items.length) {
+          container.textContent = "No cards found.";
+          return;
+        }
+        const rows = items
+          .map((c) => {
+            const updated = c.updatedAt
+              ? new Date(c.updatedAt).toLocaleString()
+              : "-";
+            const status = c.status || "unknown";
+            return `
+              <div class="req-card" data-id="${c.cardId}">
+                <div class="mono req-line">Card ID: ${c.cardId}</div>
+                <div class="req-line">User ID: ${c.userId || "-"}</div>
+                <div class="req-line">Name: ${c.nameOnCard || "-"}</div>
+                <div class="req-line">Type: ${c.cardType || "-"}</div>
+                <div class="req-line">Email: ${c.customerEmail || "-"}</div>
+                <div class="req-line">Status: ${status}</div>
+                <div class="req-line">Updated: ${updated}</div>
+                <div class="toolbar" style="margin-top:6px">
+                  <button class="secondary" data-action="refresh" data-id="${c.cardId}">Refresh</button>
+                  <button class="secondary" data-action="toggle" data-status="${status}" data-id="${c.cardId}">${status === "frozen" ? "Unfreeze" : "Freeze"}</button>
+                  <button class="secondary" data-action="fund" data-id="${c.cardId}">Fund</button>
+                  <button class="secondary" data-action="txns" data-id="${c.cardId}">Transactions</button>
+                </div>
+              </div>
+            `;
+          })
+          .join("\n");
+        container.innerHTML = rows;
+      }
+
+      function renderCardTransactions(items) {
+        const container = els.cardTxnTable;
+        if (!items || !items.length) {
+          container.textContent = "No card transactions found.";
+          return;
+        }
+        const rows = items
+          .map((t) => {
+            const when = t.createdAt ? new Date(t.createdAt).toLocaleString() : "-";
+            const direction = t.direction === "debit" ? "-" : "+";
+            const amount = `${direction}${Number(t.amount || 0).toFixed(2)} ${t.currency || "USD"}`;
+            const desc = t.description || "Card transaction";
+            const cardId = t.cardId || "-";
+            return `
+              <div class="req-card">
+                <div class="mono req-line">${when}</div>
+                <div class="req-line">User ID: ${t.userId || "-"}</div>
+                <div class="req-line">Card ID: ${cardId}</div>
+                <div class="req-line">Amount: ${amount}</div>
+                <div class="req-line">Description: ${desc}</div>
+                <div class="req-line">Status: ${t.status || "-"}</div>
+              </div>
+            `;
+          })
+          .join("\n");
+        container.innerHTML = rows;
+      }
+
+      async function loadCardTransactions() {
+        if (!hasToken()) {
+          els.cardTxnStatus.textContent = "Missing admin token";
+          return;
+        }
+        els.cardTxnStatus.textContent = "Loading...";
+        try {
+          const params = new URLSearchParams();
+          const userId = (els.cardTxnUserId.value || "").trim();
+          const cardId = (els.cardTxnCardId.value || "").trim();
+          if (userId) params.set("userId", userId);
+          if (cardId) params.set("cardId", cardId);
+          const url = params.toString()
+            ? `/api/admin/transactions?${params.toString()}`
+            : "/api/admin/transactions";
+          const data = await safeFetch(url);
+          renderCardTransactions(data.transactions || []);
+          els.cardTxnStatus.textContent = `Loaded ${data.transactions?.length || 0}`;
+        } catch (err) {
+          const msg = err?.message || "Failed to load card transactions";
+          els.cardTxnStatus.textContent = msg;
+          showToast(msg, "error");
+        }
+      }
+
+      async function loadCards() {
+        if (!hasToken()) {
+          els.cardStatusText.textContent = "Missing admin token";
+          return;
+        }
+        const q = (els.cardSearch.value || "").trim();
+        els.cardStatusText.textContent = "Loading...";
+        try {
+          const url = q
+            ? `/api/admin/cards?search=${encodeURIComponent(q)}`
+            : "/api/admin/cards";
+          const data = await safeFetch(url);
+          renderCards(data.cards || []);
+          els.cardStatusText.textContent = `Loaded ${data.cards?.length || 0}`;
+        } catch (err) {
+          const msg = err?.message || "Failed to load cards";
+          els.cardStatusText.textContent = msg;
+          showToast(msg, "error");
+        }
       }
 
       function setLoading(btn, isLoading) {
@@ -971,6 +1249,9 @@
       }
 
       els.refreshConfig.addEventListener("click", loadConfig);
+      if (els.cardTxnRefresh) {
+        els.cardTxnRefresh.addEventListener("click", loadCardTransactions);
+      }
       els.copyConfig.addEventListener("click", () => {
         if (!lastConfig) return showToast("No config loaded", "error");
         navigator.clipboard
@@ -1252,6 +1533,78 @@
       }
 
       els.loadRequests.addEventListener("click", loadRequests);
+      if (els.kycSearchBtn) {
+        els.kycSearchBtn.addEventListener("click", loadKycUsers);
+      }
+      if (els.kycSearch) {
+        els.kycSearch.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            loadKycUsers();
+          }
+        });
+      }
+      if (els.kycRefreshAll) {
+        els.kycRefreshAll.addEventListener("click", async () => {
+          if (!hasToken()) return showToast("Missing admin token", "error");
+          if (!kycCache.length) return showToast("No users to refresh", "info");
+          setLoading(els.kycRefreshAll, true);
+          try {
+            await Promise.all(
+              kycCache.map((u) =>
+                safeFetch(
+                  `/api/admin/users/${encodeURIComponent(u.telegramUserId)}/kyc-status?refresh=true`,
+                ),
+              ),
+            );
+            await loadKycUsers();
+            showToast("KYC statuses refreshed", "success");
+          } catch (err) {
+            showToast(err?.message || "Refresh failed", "error");
+          } finally {
+            setLoading(els.kycRefreshAll, false);
+          }
+        });
+      }
+
+      if (els.cardSearchBtn) {
+        els.cardSearchBtn.addEventListener("click", loadCards);
+      }
+      if (els.cardSearch) {
+        els.cardSearch.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            loadCards();
+          }
+        });
+      }
+      if (els.cardRefreshAll) {
+        els.cardRefreshAll.addEventListener("click", async () => {
+          if (!hasToken()) return showToast("Missing admin token", "error");
+          if (!cardCache.length)
+            return showToast("No cards to refresh", "info");
+          setLoading(els.cardRefreshAll, true);
+          try {
+            await Promise.all(
+              cardCache.map((c) =>
+                safeFetch(
+                  `/api/admin/cards/${encodeURIComponent(c.cardId)}/refresh`,
+                  {
+                    method: "POST",
+                    body: JSON.stringify({}),
+                  },
+                ),
+              ),
+            );
+            await loadCards();
+            showToast("Cards refreshed", "success");
+          } catch (err) {
+            showToast(err?.message || "Refresh failed", "error");
+          } finally {
+            setLoading(els.cardRefreshAll, false);
+          }
+        });
+      }
 
       // Audit log loader
       const auditListEl = document.getElementById("auditList");
@@ -1346,6 +1699,80 @@
           }
         }
       });
+
+      if (els.kycTable) {
+        els.kycTable.addEventListener("click", async (ev) => {
+          const target = ev.target;
+          const action = target?.dataset?.action;
+          const id = target?.dataset?.id;
+          if (action !== "refresh" || !id) return;
+          setLoading(target, true);
+          try {
+            await safeFetch(
+              `/api/admin/users/${encodeURIComponent(id)}/kyc-status?refresh=true`,
+            );
+            await loadKycUsers();
+            showToast("KYC status refreshed", "success");
+          } catch (err) {
+            showToast(err?.message || "Refresh failed", "error");
+          } finally {
+            setLoading(target, false);
+          }
+        });
+      }
+
+      if (els.cardTable) {
+        els.cardTable.addEventListener("click", async (ev) => {
+          const target = ev.target;
+          const action = target?.dataset?.action;
+          const id = target?.dataset?.id;
+          if (!action || !id) return;
+          setLoading(target, true);
+          try {
+            if (action === "refresh") {
+              await safeFetch(
+                `/api/admin/cards/${encodeURIComponent(id)}/refresh`,
+                { method: "POST", body: JSON.stringify({}) },
+              );
+              await loadCards();
+              showToast("Card refreshed", "success");
+            } else if (action === "toggle") {
+              const status = target?.dataset?.status;
+              const next = status === "frozen" ? "unfreeze" : "freeze";
+              await safeFetch(
+                `/api/admin/cards/${encodeURIComponent(id)}/action`,
+                {
+                  method: "POST",
+                  body: JSON.stringify({ action: next }),
+                },
+              );
+              await loadCards();
+              showToast(`Card ${next}d`, "success");
+            } else if (action === "fund") {
+              const amount = prompt("Enter amount to fund") || "";
+              if (!amount) return;
+              await safeFetch(
+                `/api/admin/cards/${encodeURIComponent(id)}/fund`,
+                {
+                  method: "POST",
+                  body: JSON.stringify({ amount }),
+                },
+              );
+              showToast("Card funded", "success");
+            } else if (action === "txns") {
+              const data = await safeFetch(
+                `/api/admin/cards/${encodeURIComponent(id)}/transactions`,
+              );
+              const payload = data.data || data;
+              alert(JSON.stringify(payload, null, 2));
+            }
+          } catch (err) {
+            showToast(err?.message || "Action failed", "error");
+          } finally {
+            setLoading(target, false);
+          }
+        });
+      }
 
       els.saveToken.addEventListener("click", () => {
         localStorage.setItem("adminToken", (els.adminToken.value || "").trim());

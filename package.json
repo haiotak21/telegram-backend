@@ -17,6 +17,7 @@
   "dependencies": {
     "axios": "^1.13.2",
     "cbe-verifier-custom": "file:verifier/custom-cbe-verifier",
+    "cloudinary": "^2.9.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
@@ -24,6 +25,7 @@
     "mongoose": "^8.20.4",
     "morgan": "^1.10.1",
     "node-telegram-bot-api": "^0.65.1",
+    "sharp": "^0.34.5",
     "zod": "^4.2.1"
   },
   "devDependencies": {

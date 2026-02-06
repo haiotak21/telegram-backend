@@ -16,6 +16,23 @@ const bitvcard = axios.create({
   },
 });
 
+function getDefaultMode() {
+  return process.env.STROWALLET_DEFAULT_MODE || (process.env.NODE_ENV !== "production" ? "sandbox" : undefined);
+}
+
+function normalizeMode(mode?: string) {
+  if (!mode) return undefined;
+  const m = String(mode).toLowerCase();
+  if (m === "live") return undefined;
+  return m;
+}
+
+function applyDefaultMode<T extends { mode?: string }>(body: T): T {
+  const defaultMode = normalizeMode(getDefaultMode());
+  if (!body?.mode && defaultMode) return { ...body, mode: defaultMode } as T;
+  return body;
+}
+
 function pickCardId(req: express.Request) {
   const v =
     (req.body as any)?.card_id ??
@@ -54,8 +71,9 @@ function normalizeError(e: any) {
   if (typeof (axios as any).isAxiosError === "function" && (axios as any).isAxiosError(e)) {
     const ae = e as AxiosError<any>;
     const status = ae.response?.status ?? 400;
-    const msg = ae.response?.data?.error || ae.message || "Request failed";
-    return { status, body: { ok: false, error: String(msg) } };
+    const payload = ae.response?.data;
+    const msg = payload?.message || payload?.error || ae.message || "Request failed";
+    return { status, body: { ok: false, error: String(msg), data: payload } };
   }
   const status = e?.status ?? 400;
   const msg = e?.message ?? "Request error";
@@ -76,18 +94,18 @@ const UrlOrBase64 = z
   .string()
   .refine((v) => {
     if (!v || typeof v !== "string") return false;
+    // Data URI (e.g. data:image/png;base64,...) or raw base64 blob
+    const dataUri = /^data:[^;\s]+;base64,[A-Za-z0-9+/=\s]+$/i;
+    if (dataUri.test(v)) return true;
     // Try URL
     try {
       // new URL will throw if invalid
       // accept relative/absolute http(s) urls only
       const u = new URL(v);
-      return u.protocol === "http:" || u.protocol === "https:";
+      return u.protocol === "http:" || u.protocol === "https:" || u.protocol === "data:";
     } catch (err) {
       // not a URL -> test data URI or long base64 blob heuristics
     }
-    // Data URI (e.g. data:image/png;base64,...) or raw base64 blob
-    const dataUri = /^data:\w+\/[\w+.-]+;base64,[A-Za-z0-9+/=\s]+$/i;
-    if (dataUri.test(v)) return true;
     // Raw base64: require a reasonably long string to reduce false positives
     const rawBase64 = /^[A-Za-z0-9+/=\s]{50,}$/;
     return rawBase64.test(v);
@@ -108,7 +126,7 @@ const CreateCustomerSchema = z.object({
   zipCode: z.string().min(1),
   city: z.string().min(1),
   country: z.string().min(1),
-  idType: z.enum(["BVN", "NIN", "PASSPORT"]),
+  idType: z.enum(["NIN", "PASSPORT", "DRIVING_LICENSE"]),
 });
 
 router.post("/create-user", async (req, res) => {
@@ -119,7 +137,31 @@ router.post("/create-user", async (req, res) => {
     const resp = await bitvcard.post("create-user/", payload, {
       headers: { "Content-Type": "application/json" },
     });
-    return res.status(200).json({ ok: true, data: resp.data });
+    const data = resp.data;
+    const customerId =
+      data?.response?.customerId ||
+      data?.response?.customer_id ||
+      data?.customerId ||
+      data?.customer_id;
+    if (!customerId && body.customerEmail) {
+      try {
+        const lookup = await bitvcard.get("getcardholder/", {
+          params: { public_key, customerEmail: body.customerEmail },
+        });
+        const lookupData = lookup.data;
+        const lookupId =
+          lookupData?.data?.customerId ||
+          lookupData?.data?.customer_id ||
+          lookupData?.customerId ||
+          lookupData?.customer_id;
+        if (lookupId) {
+          data.response = { ...(data.response || {}), customerId: lookupId };
+        }
+      } catch {
+        // ignore lookup failures
+      }
+    }
+    return res.status(200).json({ ok: true, data });
   } catch (e) {
     const { status, body } = normalizeError(e);
     return res.status(status).json(body);
@@ -223,7 +265,7 @@ const CreateCardSchema = z.object({
 
 router.post("/create-card", async (req, res) => {
   try {
-    const body = CreateCardSchema.parse(req.body || {});
+    const body = applyDefaultMode(CreateCardSchema.parse(req.body || {}));
     const public_key = requirePublicKey();
     const payload = { ...body, public_key };
     const resp = await bitvcard.post("create-card/", payload);
@@ -243,7 +285,7 @@ const FundCardSchema = z.object({
 
 router.post("/fund-card", async (req, res) => {
   try {
-    const body = FundCardSchema.parse(req.body || {});
+    const body = applyDefaultMode(FundCardSchema.parse(req.body || {}));
     const public_key = requirePublicKey();
     const payload = { ...body, public_key };
     const resp = await bitvcard.post("fund-card/", payload);
@@ -262,7 +304,7 @@ const FetchCardDetailSchema = z.object({
 
 router.post("/fetch-card-detail", async (req, res) => {
   try {
-    const body = FetchCardDetailSchema.parse(req.body || {});
+    const body = applyDefaultMode(FetchCardDetailSchema.parse(req.body || {}));
     const public_key = requirePublicKey();
     const payload = { ...body, public_key };
     const resp = await bitvcard.post("fetch-card-detail/", payload);
@@ -282,7 +324,7 @@ const CardTransactionsSchema = z.object({
 
 router.post("/card-transactions", async (req, res) => {
   try {
-    const body = CardTransactionsSchema.parse(req.body || {});
+    const body = applyDefaultMode(CardTransactionsSchema.parse(req.body || {}));
     const public_key = requirePublicKey();
     const payload = { ...body, public_key };
     const resp = await bitvcard.post("card-transactions/", payload);
@@ -328,7 +370,7 @@ router.get("/apicard-transactions", async (req, res) => {
       take,
       public_key,
     };
-    const mode = typeof req.query.mode === "string" ? req.query.mode : undefined;
+    const mode = normalizeMode(typeof req.query.mode === "string" ? req.query.mode : getDefaultMode());
     const developer_code = typeof req.query.developer_code === "string" ? req.query.developer_code : undefined;
     if (mode) params.mode = mode;
     if (developer_code) params.developer_code = developer_code;
@@ -357,7 +399,7 @@ router.post("/apicard-transactions", async (req, res) => {
       take,
       public_key,
     };
-    const mode = (req.body as any)?.mode ?? (req.query as any)?.mode;
+    const mode = normalizeMode((req.body as any)?.mode ?? (req.query as any)?.mode ?? getDefaultMode());
     const developer_code = (req.body as any)?.developer_code ?? (req.query as any)?.developer_code;
     if (mode) params.mode = mode;
     if (developer_code) params.developer_code = developer_code;

@@ -1,8 +1,8 @@
 import mongoose, { Schema, Document, Model } from "mongoose";
 
 export type TransactionStatus = "pending" | "completed" | "failed" | "cancelled";
-export type TransactionType = "deposit" | "withdrawal" | "manual_deposit" | "system" | "verification";
-export type PaymentMethodType = "telebirr" | "cbe" | "system";
+export type TransactionType = "deposit" | "withdrawal" | "manual_deposit" | "system" | "verification" | "card";
+export type PaymentMethodType = "telebirr" | "cbe" | "system" | "strowallet";
 
 export interface ITransaction extends Document {
   userId: string;
@@ -27,8 +27,8 @@ export interface ITransaction extends Document {
 const TransactionSchema = new Schema<ITransaction>(
   {
     userId: { type: String, required: true, index: true },
-    transactionType: { type: String, enum: ["deposit", "withdrawal", "manual_deposit", "system", "verification"], required: true, default: "deposit" },
-    paymentMethod: { type: String, enum: ["telebirr", "cbe", "system"], required: true },
+    transactionType: { type: String, enum: ["deposit", "withdrawal", "manual_deposit", "system", "verification", "card"], required: true, default: "deposit" },
+    paymentMethod: { type: String, enum: ["telebirr", "cbe", "system", "strowallet"], required: true },
     amount: { type: Number, required: true },
     currency: { type: String },
     amountEtb: { type: Number },

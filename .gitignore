@@ -17,3 +17,6 @@ reports/
 verifier/**/node_modules/
 "telebirr verify"/**/node_modules/
 public/admin/*-local.html
+public/uploads/
+cloudflared.exe
+cacert.pem

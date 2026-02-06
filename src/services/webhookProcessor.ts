@@ -1,4 +1,7 @@
 import { WebhookEvent } from "../models/WebhookEvent";
+import Card from "../models/Card";
+import Transaction from "../models/Transaction";
+import User from "../models/User";
 import { notifyByCardId, notifyByEmail } from "./botService";
 
 function extractField(obj: any, keys: string[]): string | undefined {
@@ -40,6 +43,132 @@ export async function processStroWalletEvent(payload: any) {
 
   if (cardId) await notifyByCardId(cardId, message);
   if (customerEmail) await notifyByEmail(customerEmail, message);
+
+  if (type === "card.created" && cardId) {
+    const data = payload?.data || payload;
+    const userId = await resolveUserId(customerEmail, cardId);
+    await Card.findOneAndUpdate(
+      { cardId },
+      {
+        $set: {
+          cardId,
+          customerEmail: customerEmail || data?.customerEmail,
+          userId: userId || undefined,
+          nameOnCard: data?.name_on_card || data?.nameOnCard || data?.name,
+          cardType: data?.card_type || data?.cardType || data?.brand,
+          status: data?.status || data?.state || "active",
+          last4: data?.last4 || data?.card_last4 || data?.cardLast4,
+          currency: data?.currency || data?.ccy,
+          balance: data?.balance || data?.available_balance,
+          availableBalance: data?.available_balance,
+          lastSync: new Date(),
+        },
+      },
+      { upsert: true, new: true }
+    );
+  }
+
+  if ((type === "card.frozen" || type === "card.unfrozen" || type === "card.unfreeze") && cardId) {
+    const nextStatus = type === "card.frozen" ? "frozen" : "active";
+    await Card.findOneAndUpdate(
+      { cardId },
+      { $set: { status: nextStatus, lastSync: new Date() } },
+      { upsert: true, new: true }
+    );
+  }
+
+  if (type === "card.funded" && cardId) {
+    const data = payload?.data || payload;
+    const amountRaw = extractField(payload, ["amount", "transactionAmount", "total", "value"]);
+    const amount = amountRaw ? Number(amountRaw) : undefined;
+    const currency = extractField(payload, ["currency", "ccy", "iso_currency"]);
+    const card = await Card.findOneAndUpdate(
+      { cardId },
+      {
+        $set: {
+          balance: data?.balance || data?.available_balance || data?.availableBalance || undefined,
+          availableBalance: data?.available_balance || data?.availableBalance || undefined,
+          currency: currency || data?.currency || data?.ccy,
+          lastSync: new Date(),
+        },
+      },
+      { new: true }
+    );
+    if (amount != null && card?.userId) {
+      await User.findOneAndUpdate(
+        { userId: card.userId },
+        { $inc: { balance: amount } },
+        { new: true }
+      );
+    }
+  }
+
+  if (type === "transaction.posted" && cardId) {
+    const data = payload?.data || payload;
+    const amountRaw = extractField(payload, ["amount", "transactionAmount", "total", "value"]);
+    const amountValue = amountRaw ? Number(amountRaw) : undefined;
+    const description = extractField(payload, ["description", "merchant", "merchant_name", "narration"]);
+    const statusRaw = extractField(payload, ["status", "result", "state"]);
+    const status = normalizeTxnStatus(statusRaw);
+    const txnId = extractField(payload, ["transactionId", "transaction_id", "id", "eventId", "ref"]);
+    const directionRaw = extractField(payload, ["direction", "type", "transaction_type", "drCr"]);
+    const direction = normalizeDirection(directionRaw, amountValue);
+
+    const card = await Card.findOne({ cardId }).lean();
+    const userId = card?.userId || (await resolveUserId(customerEmail || card?.customerEmail, cardId));
+
+    if (userId && amountValue != null) {
+      await Transaction.findOneAndUpdate(
+        { userId, transactionType: "card", transactionNumber: txnId || `${eventId}-${cardId}` },
+        {
+          $set: {
+            userId,
+            transactionType: "card",
+            paymentMethod: "strowallet",
+            amount: Math.abs(amountValue),
+            currency: extractField(payload, ["currency", "ccy", "iso_currency"]) || "USD",
+            status,
+            transactionNumber: txnId || undefined,
+            metadata: {
+              cardId,
+              direction,
+              description,
+              rawStatus: statusRaw,
+            },
+            responseData: data,
+          },
+        },
+        { upsert: true, new: true }
+      );
+    }
+  }
+}
+
+async function resolveUserId(customerEmail?: string, cardId?: string) {
+  if (cardId) {
+    const card = await Card.findOne({ cardId }).lean();
+    if (card?.userId) return card.userId;
+  }
+  if (customerEmail) {
+    const user = await User.findOne({ customerEmail }).lean();
+    if (user?.userId) return user.userId;
+  }
+  return undefined;
+}
+
+function normalizeTxnStatus(raw?: string) {
+  const v = (raw || "").toLowerCase();
+  if (v.includes("fail") || v.includes("decline") || v.includes("deny")) return "failed";
+  if (v.includes("pending") || v.includes("review")) return "pending";
+  return "completed";
+}
+
+function normalizeDirection(raw?: string, amount?: number) {
+  const v = (raw || "").toLowerCase();
+  if (v.includes("debit") || v.includes("out") || v.includes("dr")) return "debit";
+  if (v.includes("credit") || v.includes("in") || v.includes("cr")) return "credit";
+  if (amount != null) return amount < 0 ? "debit" : "credit";
+  return "debit";
 }
 
 function formatMessage(type: string, payload: any) {

@@ -6,6 +6,16 @@ import { enforceTopupLimits, loadPricingConfig, quoteTopup } from "./pricingServ
 import { getFakeTopup } from "./runtimeConfigService";
 
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
+function getDefaultMode() {
+  return process.env.STROWALLET_DEFAULT_MODE || (process.env.NODE_ENV !== "production" ? "sandbox" : undefined);
+}
+
+function normalizeMode(mode?: string) {
+  if (!mode) return undefined;
+  const m = String(mode).toLowerCase();
+  if (m === "live") return undefined;
+  return m;
+}
 
 function requirePublicKey() {
   const key = process.env.STROWALLET_PUBLIC_KEY;
@@ -19,7 +29,8 @@ function requirePublicKey() {
 
 async function fundCard(cardId: string, amount: number, mode?: string) {
   const public_key = requirePublicKey();
-  const payload = { card_id: cardId, amount: amount.toString(), public_key, mode };
+  const resolvedMode = normalizeMode(mode ?? getDefaultMode());
+  const payload = { card_id: cardId, amount: amount.toString(), public_key, mode: resolvedMode };
   const resp = await axios.post(`${BITVCARD_BASE}fund-card/`, payload, { timeout: 20000 });
   return resp.data;
 }

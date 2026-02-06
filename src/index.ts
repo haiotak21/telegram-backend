@@ -12,8 +12,9 @@ import depositsRouter from "./routes/deposits";
 import walletRouter from "./routes/wallet";
 import cardRequestsRouter from "./routes/cardRequests";
 import validateRouter from "./routes/validate";
+import adminRouter from "./routes/admin";
 import { connectDB, disconnectDB } from "./db";
-import { initBot } from "./services/botService";
+import { initBot, pollPendingKycUpdates } from "./services/botService";
 import { processStroWalletEvent } from "./services/webhookProcessor";
 
 dotenv.config();
@@ -24,6 +25,22 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 // Connect DB and init bot
 connectDB().catch((e) => console.error("DB init failed:", e));
 initBot();
+
+const kycPollIntervalMs = Number(process.env.KYC_POLL_INTERVAL_MS || 600000);
+let kycPollRunning = false;
+if (Number.isFinite(kycPollIntervalMs) && kycPollIntervalMs > 0) {
+  setInterval(async () => {
+    if (kycPollRunning) return;
+    kycPollRunning = true;
+    try {
+      await pollPendingKycUpdates();
+    } catch (e) {
+      console.warn("KYC poll failed", e);
+    } finally {
+      kycPollRunning = false;
+    }
+  }, kycPollIntervalMs);
+}
 
 // Webhook route uses raw body parser; declare before json middleware
 app.post(
@@ -59,7 +76,7 @@ app.post(
 // Global middlewares
 app.use(cors());
 app.use(morgan("dev"));
-app.use(express.json());
+app.use(express.json({ limit: "25mb" }));
 
 // Health check
 app.get("/health", (_req, res) => {
@@ -72,12 +89,16 @@ app.use("/api/payments", paymentsRouter);
 app.use("/api/payment", depositsRouter);
 app.use("/api/wallet", walletRouter);
 app.use("/api/card-requests", cardRequestsRouter);
+app.use("/api/admin", adminRouter);
 app.use("/api", validateRouter);
 app.use("/", paymentLegacyRouter);
 
 // Admin dashboard static assets
 const adminDir = path.resolve(process.cwd(), "public", "admin");
 app.use("/admin", express.static(adminDir));
+// Uploaded KYC images
+const uploadsDir = path.resolve(process.cwd(), "public", "uploads");
+app.use("/uploads", express.static(uploadsDir));
 // Express 5 path-to-regexp requires a parameter name for wildcard; use regex for catch-all
 app.get(/^\/admin\/.*$/, (_req, res) => {
   res.sendFile(path.join(adminDir, "index.html"));
