@@ -13,6 +13,7 @@ import walletRouter from "./routes/wallet";
 import cardRequestsRouter from "./routes/cardRequests";
 import validateRouter from "./routes/validate";
 import adminRouter from "./routes/admin";
+import debugRouter from "./routes/debug";
 import { connectDB, disconnectDB } from "./db";
 import { initBot, pollPendingKycUpdates } from "./services/botService";
 import { processStroWalletEvent } from "./services/webhookProcessor";
@@ -90,6 +91,7 @@ app.use("/api/payment", depositsRouter);
 app.use("/api/wallet", walletRouter);
 app.use("/api/card-requests", cardRequestsRouter);
 app.use("/api/admin", adminRouter);
+app.use("/debug", debugRouter);
 app.use("/api", validateRouter);
 app.use("/", paymentLegacyRouter);
 
