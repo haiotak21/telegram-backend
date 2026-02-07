@@ -162,6 +162,16 @@ export function initBot() {
     console.warn("TELEGRAM_BOT_TOKEN not set; bot disabled");
     return;
   }
+  const pollingEnabled = String(process.env.TELEGRAM_POLLING_ENABLED ?? "true").toLowerCase() !== "false";
+  const replicaId = process.env.RAILWAY_REPLICA_ID || process.env.REPLICA_ID;
+  if (replicaId && replicaId !== "0") {
+    console.warn(`Skipping Telegram bot polling on replica ${replicaId}`);
+    return;
+  }
+  if (!pollingEnabled) {
+    console.warn("TELEGRAM_POLLING_ENABLED is false; bot polling disabled");
+    return;
+  }
   bot = new TelegramBot(token, { polling: true });
   console.log("Telegram bot started");
 
