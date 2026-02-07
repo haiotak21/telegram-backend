@@ -131,6 +131,7 @@ const CARD_REQUEST_BASE_AMOUNT_ETB = Number(process.env.CARD_REQUEST_BASE_AMOUNT
 // Tracks the last amount a user selected per payment method so we can validate against receipt
 const depositSelections = new Map<number, { method: PaymentMethod; amount: number }>();
 const cardRequestSelections = new Map<number, { amountEtb: number; feeEtb: number; totalEtb: number }>();
+const recentCallbackActions = new Map<number, { action: string; at: number }>();
 
 const MENU_BUTTON: InlineKeyboardButton = { text: "📋 Menu", callback_data: "MENU" };
 const MENU_KEYBOARD: InlineKeyboardButton[][] = [
@@ -418,6 +419,14 @@ export function initBot() {
     const action = query.data as string | undefined;
     if (!chatId || !action) return;
 
+    const now = Date.now();
+    const last = recentCallbackActions.get(chatId);
+    if (last && last.action === action && now - last.at < 1500) {
+      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      return;
+    }
+    recentCallbackActions.set(chatId, { action, at: now });
+
     if (action.startsWith("KYC_IDTYPE::")) {
       const idType = action.replace("KYC_IDTYPE::", "") as KycIdType;
       const session = kycSessions.get(chatId);
@@ -517,20 +526,18 @@ export function initBot() {
 
     if (action === "MENU") {
       await bot!.answerCallbackQuery(query.id).catch(() => {});
-      return sendMenu(chatId);
+      return sendMenu(chatId, query.message);
     }
 
     if (action === "MENU_VERIFY") {
-      await bot!.sendMessage(chatId, "Choose payment method to verify:", {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: "Telebirr", callback_data: "VERIFY_METHOD::telebirr" },
-              { text: "CBE", callback_data: "VERIFY_METHOD::cbe" },
-            ],
-            [MENU_BUTTON],
+      await editOrSend(chatId, query.message, "Choose payment method to verify:", {
+        inline_keyboard: [
+          [
+            { text: "Telebirr", callback_data: "VERIFY_METHOD::telebirr" },
+            { text: "CBE", callback_data: "VERIFY_METHOD::cbe" },
           ],
-        },
+          [MENU_BUTTON],
+        ],
       });
       return;
     }
@@ -1097,10 +1104,30 @@ function buildProfileCard(msg: any, link?: ITelegramLink | null, cardCount = 0) 
   return lines.join("\n");
 }
 
-async function sendMenu(chatId: number) {
+async function sendMenu(chatId: number, message?: any) {
   if (!bot) return;
-  await bot.sendMessage(chatId, "Main menu", {
-    reply_markup: { inline_keyboard: MENU_KEYBOARD },
+  await editOrSend(chatId, message, "Main menu", { inline_keyboard: MENU_KEYBOARD });
+}
+
+async function editOrSend(chatId: number, message: any, text: string, replyMarkup?: any, parseMode?: string) {
+  if (!bot) return;
+  const messageId = message?.message_id;
+  if (messageId) {
+    try {
+      await bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: replyMarkup,
+        parse_mode: parseMode,
+        disable_web_page_preview: true,
+      });
+      return;
+    } catch {}
+  }
+  await bot.sendMessage(chatId, text, {
+    reply_markup: replyMarkup,
+    parse_mode: parseMode,
+    disable_web_page_preview: true,
   });
 }
 
@@ -1300,7 +1327,7 @@ async function handleMenuSelection(action: string, chatId: number, message?: any
     case "MENU_USER_INFO":
       return sendUserInfo(chatId);
     case "MENU_DEPOSIT":
-      return sendDepositInfo(chatId);
+      return sendDepositInfo(chatId, message);
     case "MENU_WALLET":
       return sendWalletSummary(chatId);
     case "MENU_INVITE":
@@ -1312,9 +1339,9 @@ async function handleMenuSelection(action: string, chatId: number, message?: any
   }
 }
 
-async function sendDepositInfo(chatId: number) {
-  await bot!.sendMessage(chatId, "Choose a payment method to deposit:", {
-    reply_markup: { inline_keyboard: buildDepositMethodKeyboard() },
+async function sendDepositInfo(chatId: number, message?: any) {
+  await editOrSend(chatId, message, "Choose a payment method to deposit:", {
+    inline_keyboard: buildDepositMethodKeyboard(),
   });
 }
 

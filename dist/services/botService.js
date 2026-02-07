@@ -74,6 +74,7 @@ const CARD_REQUEST_BASE_AMOUNT_ETB = Number(process.env.CARD_REQUEST_BASE_AMOUNT
 // Tracks the last amount a user selected per payment method so we can validate against receipt
 const depositSelections = new Map();
 const cardRequestSelections = new Map();
+const recentCallbackActions = new Map();
 const MENU_BUTTON = { text: "📋 Menu", callback_data: "MENU" };
 const MENU_KEYBOARD = [
     [
@@ -321,6 +322,13 @@ function initBot() {
         const action = query.data;
         if (!chatId || !action)
             return;
+        const now = Date.now();
+        const last = recentCallbackActions.get(chatId);
+        if (last && last.action === action && now - last.at < 1500) {
+            await bot.answerCallbackQuery(query.id).catch(() => { });
+            return;
+        }
+        recentCallbackActions.set(chatId, { action, at: now });
         if (action.startsWith("KYC_IDTYPE::")) {
             const idType = action.replace("KYC_IDTYPE::", "");
             const session = kycSessions.get(chatId);
@@ -418,19 +426,17 @@ function initBot() {
         }
         if (action === "MENU") {
             await bot.answerCallbackQuery(query.id).catch(() => { });
-            return sendMenu(chatId);
+            return sendMenu(chatId, query.message);
         }
         if (action === "MENU_VERIFY") {
-            await bot.sendMessage(chatId, "Choose payment method to verify:", {
-                reply_markup: {
-                    inline_keyboard: [
-                        [
-                            { text: "Telebirr", callback_data: "VERIFY_METHOD::telebirr" },
-                            { text: "CBE", callback_data: "VERIFY_METHOD::cbe" },
-                        ],
-                        [MENU_BUTTON],
+            await editOrSend(chatId, query.message, "Choose payment method to verify:", {
+                inline_keyboard: [
+                    [
+                        { text: "Telebirr", callback_data: "VERIFY_METHOD::telebirr" },
+                        { text: "CBE", callback_data: "VERIFY_METHOD::cbe" },
                     ],
-                },
+                    [MENU_BUTTON],
+                ],
             });
             return;
         }
@@ -984,11 +990,32 @@ function buildProfileCard(msg, link, cardCount = 0) {
     ].filter(Boolean);
     return lines.join("\n");
 }
-async function sendMenu(chatId) {
+async function sendMenu(chatId, message) {
     if (!bot)
         return;
-    await bot.sendMessage(chatId, "Main menu", {
-        reply_markup: { inline_keyboard: MENU_KEYBOARD },
+    await editOrSend(chatId, message, "Main menu", { inline_keyboard: MENU_KEYBOARD });
+}
+async function editOrSend(chatId, message, text, replyMarkup, parseMode) {
+    if (!bot)
+        return;
+    const messageId = message?.message_id;
+    if (messageId) {
+        try {
+            await bot.editMessageText(text, {
+                chat_id: chatId,
+                message_id: messageId,
+                reply_markup: replyMarkup,
+                parse_mode: parseMode,
+                disable_web_page_preview: true,
+            });
+            return;
+        }
+        catch { }
+    }
+    await bot.sendMessage(chatId, text, {
+        reply_markup: replyMarkup,
+        parse_mode: parseMode,
+        disable_web_page_preview: true,
     });
 }
 function buildVerificationHint(method) {
@@ -1186,7 +1213,7 @@ async function handleMenuSelection(action, chatId, message) {
         case "MENU_USER_INFO":
             return sendUserInfo(chatId);
         case "MENU_DEPOSIT":
-            return sendDepositInfo(chatId);
+            return sendDepositInfo(chatId, message);
         case "MENU_WALLET":
             return sendWalletSummary(chatId);
         case "MENU_INVITE":
@@ -1197,9 +1224,9 @@ async function handleMenuSelection(action, chatId, message) {
             return bot.sendMessage(chatId, "Action not recognized. Use the menu again.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
     }
 }
-async function sendDepositInfo(chatId) {
-    await bot.sendMessage(chatId, "Choose a payment method to deposit:", {
-        reply_markup: { inline_keyboard: buildDepositMethodKeyboard() },
+async function sendDepositInfo(chatId, message) {
+    await editOrSend(chatId, message, "Choose a payment method to deposit:", {
+        inline_keyboard: buildDepositMethodKeyboard(),
     });
 }
 function buildDepositMethodKeyboard() {
