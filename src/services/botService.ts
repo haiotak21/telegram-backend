@@ -132,6 +132,7 @@ const CARD_REQUEST_BASE_AMOUNT_ETB = Number(process.env.CARD_REQUEST_BASE_AMOUNT
 const depositSelections = new Map<number, { method: PaymentMethod; amount: number }>();
 const cardRequestSelections = new Map<number, { amountEtb: number; feeEtb: number; totalEtb: number }>();
 const recentCallbackActions = new Map<number, { action: string; at: number }>();
+const recentOutgoing = new Map<number, { key: string; at: number }>();
 
 const MENU_BUTTON: InlineKeyboardButton = { text: "📋 Menu", callback_data: "MENU" };
 const MENU_KEYBOARD: InlineKeyboardButton[][] = [
@@ -1086,6 +1087,14 @@ function buildWelcomeMessage() {
   ].join("\n");
 }
 
+function shouldSuppressOutgoing(chatId: number, key: string, ttlMs = 1500) {
+  const now = Date.now();
+  const last = recentOutgoing.get(chatId);
+  if (last && last.key === key && now - last.at < ttlMs) return true;
+  recentOutgoing.set(chatId, { key, at: now });
+  return false;
+}
+
 function buildProfileCard(msg: any, link?: ITelegramLink | null, cardCount = 0) {
   const firstName = msg.from?.first_name || "StroWallet User";
   const username = msg.from?.username ? `@${msg.from.username}` : undefined;
@@ -1106,6 +1115,7 @@ function buildProfileCard(msg: any, link?: ITelegramLink | null, cardCount = 0) 
 
 async function sendMenu(chatId: number, message?: any) {
   if (!bot) return;
+  if (shouldSuppressOutgoing(chatId, "menu")) return;
   await editOrSend(chatId, message, "Main menu", { inline_keyboard: MENU_KEYBOARD });
 }
 
@@ -1340,6 +1350,7 @@ async function handleMenuSelection(action: string, chatId: number, message?: any
 }
 
 async function sendDepositInfo(chatId: number, message?: any) {
+  if (shouldSuppressOutgoing(chatId, "deposit_menu")) return;
   await editOrSend(chatId, message, "Choose a payment method to deposit:", {
     inline_keyboard: buildDepositMethodKeyboard(),
   });
@@ -1409,6 +1420,7 @@ async function sendDepositSummary(chatId: number, method: PaymentMethod, amount:
 }
 
 async function handleCardRequest(chatId: number, message?: any) {
+  if (shouldSuppressOutgoing(chatId, "card_request")) return;
   const user = await User.findOne({ userId: String(chatId) }).lean();
   const kycStatus = (user?.kycStatus || "not_started") as KycStatus;
 
