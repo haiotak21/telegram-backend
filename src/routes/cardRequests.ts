@@ -2,6 +2,8 @@ import express from "express";
 import axios, { AxiosError } from "axios";
 import CardRequest from "../models/CardRequest";
 import { TelegramLink } from "../models/TelegramLink";
+import User from "../models/User";
+import Card from "../models/Card";
 import { notifyCardRequestApproved, notifyCardRequestDeclined } from "../services/botService";
 
 const router = express.Router();
@@ -103,14 +105,12 @@ router.post("/", async (req, res) => {
     const userId = asString(body.userId);
     if (!userId) throw new Error("userId is required");
 
-    // Block new requests if user already has a card or a pending/approved request
-    const chatIdNum = Number(userId);
-    if (Number.isFinite(chatIdNum)) {
-      const link = await TelegramLink.findOne({ chatId: chatIdNum }).lean();
-      if (link?.cardIds?.length) {
-        return res.status(400).json({ success: false, message: "User already has a card linked" });
-      }
+    // Block new requests if user already has an active card
+    const activeCard = await Card.findOne({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
+    if (activeCard) {
+      return res.status(400).json({ success: false, message: "User already has an active card" });
     }
+    const chatIdNum = Number(userId);
     // Only block if there is a pending/approved request that is not declined and is not for a card that is unlinked
     const existing = await CardRequest.findOne({
       userId,
@@ -166,8 +166,37 @@ router.get("/", requireAdmin, async (req, res) => {
     const status = typeof req.query.status === "string" ? req.query.status : "pending";
     const limitRaw = Number(req.query.limit ?? 50);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 && limitRaw <= 200 ? limitRaw : 50;
-    const requests = await CardRequest.find(status ? { status } : {}).sort({ createdAt: -1 }).limit(limit).lean();
-    res.json({ success: true, requests });
+    const requests = await CardRequest.find(status ? { status } : {})
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+
+    const userIds = Array.from(new Set(requests.map((r) => r.userId).filter(Boolean)));
+    const [users, cards] = await Promise.all([
+      User.find({ userId: { $in: userIds } }).lean(),
+      Card.find({ userId: { $in: userIds }, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean(),
+    ]);
+    const userMap = new Map(users.map((u) => [u.userId, u]));
+    const activeCardMap = new Map<string, (typeof cards)[number]>();
+    for (const c of cards) {
+      if (c.userId && !activeCardMap.has(c.userId)) activeCardMap.set(c.userId, c);
+    }
+
+    const enriched = requests.map((r) => {
+      const user = r.userId ? userMap.get(r.userId) : undefined;
+      const activeCard = r.userId ? activeCardMap.get(r.userId) : undefined;
+      const fullName = [user?.firstName, user?.lastName].filter(Boolean).join(" ") || undefined;
+      return {
+        ...r,
+        userName: fullName,
+        customerEmail: r.customerEmail || user?.customerEmail,
+        hasActiveCard: Boolean(activeCard),
+        activeCardId: activeCard?.cardId,
+        activeCardLast4: activeCard?.last4,
+      };
+    });
+
+    res.json({ success: true, requests: enriched });
   } catch (err: any) {
     const message = err?.message || "Failed to load requests";
     res.status(400).json({ success: false, message });
@@ -181,6 +210,16 @@ router.post("/:id/approve", requireAdmin, async (req, res) => {
     if (!request) return res.status(404).json({ success: false, message: "Request not found" });
     if (request.status !== "pending") return res.status(400).json({ success: false, message: "Request already processed" });
 
+    const user = await User.findOne({ userId: request.userId }).lean();
+    if (!user || user.kycStatus !== "approved") {
+      return res.status(400).json({ success: false, message: "User KYC must be approved before creating a card" });
+    }
+
+    const existingCard = await Card.findOne({ userId: request.userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
+    if (existingCard) {
+      return res.status(400).json({ success: false, message: "User already has an active card" });
+    }
+
     const link = await TelegramLink.findOne({ chatId: Number(request.userId) }).lean();
     const nameOnCard = asString(body.nameOnCard) || request.nameOnCard || "StroWallet User";
     const cardType = (asString(body.cardType) || request.cardType || "visa").toLowerCase();
@@ -188,7 +227,7 @@ router.post("/:id/approve", requireAdmin, async (req, res) => {
     const amountStr = typeof amountRaw === "number" ? amountRaw.toString() : String(amountRaw || "0");
     const parsedAmount = Number(amountStr);
     const amount = Number.isFinite(parsedAmount) && parsedAmount > 0 ? parsedAmount.toString() : undefined;
-    const customerEmail = asEmail(body.customerEmail) || request.customerEmail || link?.customerEmail;
+    const customerEmail = asEmail(body.customerEmail) || request.customerEmail || user.customerEmail || link?.customerEmail;
     const mode = normalizeMode(getDefaultMode());
 
     if (!customerEmail) {
@@ -253,6 +292,26 @@ router.post("/:id/approve", requireAdmin, async (req, res) => {
     request.customerEmail = customerEmail;
     request.mode = mode;
     await request.save();
+
+    const last4 = cardNumber ? cardNumber.slice(-4) : undefined;
+    await Card.findOneAndUpdate(
+      { cardId },
+      {
+        $set: {
+          cardId,
+          userId: request.userId,
+          customerEmail,
+          nameOnCard,
+          cardType,
+          status: respData?.status || respData?.state || "active",
+          last4,
+          currency: respData?.currency || respData?.ccy,
+          balance: respData?.balance || respData?.available_balance,
+          availableBalance: respData?.available_balance,
+        },
+      },
+      { upsert: true, new: true }
+    );
 
     // Store card id on Telegram link for "My Cards" view
     await TelegramLink.findOneAndUpdate(

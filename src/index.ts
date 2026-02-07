@@ -16,6 +16,7 @@ import adminRouter from "./routes/admin";
 import debugRouter from "./routes/debug";
 import { connectDB, disconnectDB } from "./db";
 import { initBot, pollPendingKycUpdates } from "./services/botService";
+import { reconcileAllCards } from "./services/reconciliationService";
 import { processStroWalletEvent } from "./services/webhookProcessor";
 
 dotenv.config();
@@ -41,6 +42,22 @@ if (Number.isFinite(kycPollIntervalMs) && kycPollIntervalMs > 0) {
       kycPollRunning = false;
     }
   }, kycPollIntervalMs);
+}
+
+const reconciliationIntervalMs = Number(process.env.RECONCILIATION_INTERVAL_MS || 0);
+let reconciliationRunning = false;
+if (Number.isFinite(reconciliationIntervalMs) && reconciliationIntervalMs > 0) {
+  setInterval(async () => {
+    if (reconciliationRunning) return;
+    reconciliationRunning = true;
+    try {
+      await reconcileAllCards({ notify: true });
+    } catch (e) {
+      console.warn("Reconciliation job failed", e);
+    } finally {
+      reconciliationRunning = false;
+    }
+  }, reconciliationIntervalMs);
 }
 
 // Webhook route uses raw body parser; declare before json middleware

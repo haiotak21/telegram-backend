@@ -173,6 +173,14 @@ function normalizeDirection(raw?: string, amount?: number) {
 
 function formatMessage(type: string, payload: any) {
   try {
+    if (type === "card.frozen") {
+      const last4 = extractField(payload, ["last4", "cardLast4", "card_last4", "cardSuffix"]);
+      return `❌ Your card ${last4 ? `••••${last4}` : ""} has been frozen.`.trim();
+    }
+    if (type === "card.unfrozen" || type === "card.unfreeze") {
+      const last4 = extractField(payload, ["last4", "cardLast4", "card_last4", "cardSuffix"]);
+      return `✅ Your card ${last4 ? `••••${last4}` : ""} is active again.`.trim();
+    }
     const transactionId = extractField(payload, ["transactionId", "transaction_id", "id", "eventId", "ref"]);
     const scene = extractField(payload, ["scene", "category", "type"]);
     const transaction = extractField(payload, ["transaction", "description", "merchant", "merchant_name", "narration"]);

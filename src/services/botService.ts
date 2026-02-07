@@ -108,6 +108,17 @@ const TELEBIRR_STRICT_RECEIVER = String(process.env.TELEBIRR_STRICT_RECEIVER || 
 const EXPECTED_TELEBIRR_PHONE = (process.env.TELEBIRR_PHONE_NUMBER || "0985656670").trim();
 const EXPECTED_CBE_ACCOUNT = (process.env.CBE_ACCOUNT_NUMBER || "1000473027449").trim();
 
+function getDefaultMode() {
+  return process.env.STROWALLET_DEFAULT_MODE || (process.env.NODE_ENV !== "production" ? "sandbox" : undefined);
+}
+
+function normalizeMode(mode?: string) {
+  if (!mode) return undefined;
+  const m = String(mode).toLowerCase();
+  if (m === "live") return undefined;
+  return m;
+}
+
 const DEPOSIT_AMOUNTS = [5, 10, 20, 100, 1000];
 const DEPOSIT_ACCOUNTS: Record<PaymentMethod, { title: string; account: string; name: string; typeLabel: string }> = {
   cbe: { title: "CBE Deposit", account: "1000473027449", name: "Hailemariam Takele Mekonnen", typeLabel: "CBE" },
@@ -120,7 +131,7 @@ const depositSelections = new Map<number, { method: PaymentMethod; amount: numbe
 const MENU_BUTTON: InlineKeyboardButton = { text: "📋 Menu", callback_data: "MENU" };
 const MENU_KEYBOARD: InlineKeyboardButton[][] = [
   [
-    { text: "➕ Create Card", callback_data: "MENU_CREATE_CARD" },
+    { text: "➕ Request Card", callback_data: "MENU_CREATE_CARD" },
     { text: "💳 My Cards", callback_data: "MENU_MY_CARDS" },
   ],
   [
@@ -155,8 +166,12 @@ export function initBot() {
     { command: "kyc_status", description: "Check your KYC status" },
     { command: "kyc_edit", description: "Edit and resubmit KYC" },
     { command: "card_request", description: "Request a virtual card" },
-    { command: "create_card", description: "Create a virtual card" },
+    { command: "create_card", description: "Request a virtual card" },
+    { command: "mycard", description: "View your card details" },
+    { command: "cardstatus", description: "View your card status" },
     { command: "transactions", description: "View card transactions" },
+    { command: "freeze", description: "Freeze your card" },
+    { command: "unfreeze", description: "Unfreeze your card" },
     { command: "linkemail", description: "Link your email: /linkemail your@example.com" },
     { command: "linkcard", description: "Link a card: /linkcard CARD_ID" },
     { command: "unlink", description: "Remove all linked identifiers" },
@@ -166,7 +181,10 @@ export function initBot() {
 
   bot.onText(/^\/start$/i, async (msg: any) => {
     const chatId = msg.chat.id;
-    const link = await TelegramLink.findOne({ chatId });
+    const [link, cardCount] = await Promise.all([
+      TelegramLink.findOne({ chatId }),
+      Card.countDocuments({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }),
+    ]);
 
     await bot!.sendMessage(chatId, buildWelcomeMessage(), {
       parse_mode: "HTML",
@@ -174,7 +192,7 @@ export function initBot() {
       reply_markup: { inline_keyboard: MENU_KEYBOARD },
     });
 
-    await bot!.sendMessage(chatId, buildProfileCard(msg, link || undefined), {
+    await bot!.sendMessage(chatId, buildProfileCard(msg, link || undefined, cardCount), {
       parse_mode: "HTML",
       disable_web_page_preview: true,
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -188,7 +206,7 @@ export function initBot() {
   bot.onText(/^\/help$/i, async (msg: any) => {
     await bot!.sendMessage(
       msg.chat.id,
-      "Commands:\n/kyc\n/kyc_status\n/kyc_edit\n/card_request\n/create_card\n/transactions\n/linkemail your@example.com\n/linkcard CARD_ID\n/unlink (remove all links)\n/status\n/verify\n/deposit"
+      "Commands:\n/kyc\n/kyc_status\n/kyc_edit\n/card_request\n/create_card\n/mycard\n/cardstatus\n/transactions\n/freeze\n/unfreeze\n/linkemail your@example.com\n/linkcard CARD_ID\n/unlink (remove all links)\n/status\n/verify\n/deposit"
     );
   });
 
@@ -230,12 +248,30 @@ export function initBot() {
 
   bot.onText(/^\/create_card$/i, async (msg: any) => {
     const chatId = msg.chat.id;
-    await startCreateCardFlow(chatId, msg);
+    await handleCardRequest(chatId, msg);
+  });
+
+  bot.onText(/^\/mycard(s)?$/i, async (msg: any) => {
+    return sendMyCardSummary(msg.chat.id);
+  });
+
+  bot.onText(/^\/cardstatus$/i, async (msg: any) => {
+    return sendCardStatus(msg.chat.id);
   });
 
   bot.onText(/^\/transactions$/i, async (msg: any) => {
     const chatId = msg.chat.id;
     await sendCardTransactions(chatId);
+  });
+
+  bot.onText(/^\/(freeze|unfreeze)$/i, async (msg: any, match?: RegExpExecArray | null) => {
+    const action = match?.[1] === "unfreeze" ? "unfreeze" : "freeze";
+    const card = await getPrimaryCardForUser(String(msg.chat.id));
+    if (!card?.cardId) {
+      await bot!.sendMessage(msg.chat.id, "❌ No cards linked yet.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+      return;
+    }
+    await handleFreezeAction(msg.chat.id, card.cardId, action);
   });
 
   bot.onText(/^\/card_request$/i, async (msg: any) => {
@@ -335,11 +371,14 @@ export function initBot() {
   });
 
   bot.onText(/^\/status$/i, async (msg: any) => {
-    const link = await TelegramLink.findOne({ chatId: msg.chat.id });
-    if (!link) return bot!.sendMessage(msg.chat.id, "No links set.");
+    const [link, cards] = await Promise.all([
+      TelegramLink.findOne({ chatId: msg.chat.id }).lean(),
+      Card.find({ userId: String(msg.chat.id), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean(),
+    ]);
+    const cardLabels = cards.map((c) => `${c.cardId}${c.last4 ? ` (••••${c.last4})` : ""}`);
     await bot!.sendMessage(
       msg.chat.id,
-      `Email: ${link.customerEmail || "(none)"}\nCards: ${(link.cardIds || []).join(", ") || "(none)"}`
+      `Email: ${link?.customerEmail || "(none)"}\nCards: ${cardLabels.join(", ") || "(none)"}`
     );
   });
 
@@ -726,8 +765,18 @@ export function initBot() {
 export async function notifyByCardId(cardId: string, message: string) {
   if (!bot) return;
   const links = await TelegramLink.find({ cardIds: cardId });
+  const sent = new Set<number>();
   for (const link of links) {
-    await bot.sendMessage(link.chatId, message, { disable_web_page_preview: true });
+    const chatId = Number(link.chatId);
+    if (!Number.isFinite(chatId)) continue;
+    sent.add(chatId);
+    await bot.sendMessage(chatId, message, { disable_web_page_preview: true });
+  }
+
+  const card = await Card.findOne({ cardId }).lean();
+  const chatId = card?.userId ? Number(card.userId) : NaN;
+  if (Number.isFinite(chatId) && !sent.has(chatId)) {
+    await bot.sendMessage(chatId, message, { disable_web_page_preview: true });
   }
 }
 
@@ -739,24 +788,48 @@ export async function notifyByEmail(email: string, message: string) {
   }
 }
 
+export async function notifyCardStatusChanged(cardId: string, status: "frozen" | "active") {
+  if (!bot) return;
+  const card = await Card.findOne({ cardId }).lean();
+  const suffix = card?.last4 ? `••••${card.last4}` : cardId;
+  const text =
+    status === "frozen"
+      ? `❌ Your card ${suffix} has been frozen by admin.`
+      : `✅ Your card ${suffix} has been reactivated.`;
+  await notifyByCardId(cardId, text);
+}
+
+export async function notifyUserBalanceReconciled(userId: string, cardId: string, balance: number, currency?: string) {
+  if (!bot) return;
+  const chatId = Number(userId);
+  if (!Number.isFinite(chatId)) return;
+  const lines = [
+    "⚠️ Your card balance was updated after reconciliation.",
+    `Card: ${cardId}`,
+    `New Balance: ${balance.toFixed(2)}${currency ? ` ${currency}` : ""}`,
+  ];
+  await bot.sendMessage(chatId, lines.join("\n"), {
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+  });
+}
+
 export async function notifyCardRequestApproved(userId: string, payload: { cardId?: string; cardType?: string; nameOnCard?: string; raw?: any }) {
   if (!bot) return;
   const lines = [
-    "✅ Your card request was approved!",
+    "✅ Approved",
+    "🎉 Your virtual card has been approved and created successfully.",
+    "You can now view and manage your card from My Card.",
     payload.cardId ? `Card ID: ${payload.cardId}` : undefined,
-    payload.cardType ? `Type: ${payload.cardType}` : undefined,
-    payload.nameOnCard ? `Name: ${payload.nameOnCard}` : undefined,
   ].filter(Boolean) as string[];
-  lines.push("You can now check card details from the admin or app.");
   await bot.sendMessage(Number(userId), lines.join("\n"), { disable_web_page_preview: true, reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
 }
 
 export async function notifyCardRequestDeclined(userId: string, reason?: string) {
   if (!bot) return;
   const lines = [
-    "⚠️ Your card request was declined.",
+    "❌ Your card request was declined. Please contact support.",
     reason ? `Reason: ${reason}` : undefined,
-    "You can update your email with /linkemail and try again.",
   ].filter(Boolean) as string[];
   await bot.sendMessage(Number(userId), lines.join("\n"), { disable_web_page_preview: true, reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
 }
@@ -812,11 +885,10 @@ function buildWelcomeMessage() {
   ].join("\n");
 }
 
-function buildProfileCard(msg: any, link?: ITelegramLink | null) {
+function buildProfileCard(msg: any, link?: ITelegramLink | null, cardCount = 0) {
   const firstName = msg.from?.first_name || "StroWallet User";
   const username = msg.from?.username ? `@${msg.from.username}` : undefined;
   const phone = link?.customerEmail ? undefined : "(not provided)";
-  const cardCount = (link?.cardIds || []).length;
 
   const lines = [
     "🧑‍💻 <b>Here's Your Profile:</b>",
@@ -824,8 +896,8 @@ function buildProfileCard(msg: any, link?: ITelegramLink | null) {
     `👤 Name: ${firstName}${username ? ` (${username})` : ""}`,
     phone ? `📞 Phone: ${phone}` : undefined,
     link?.customerEmail ? `✉️ Email: ${link.customerEmail}` : "✉️ Email: (link with /linkemail)",
-    `💳 Cards Linked: ${cardCount}`,
-    cardCount ? `➡️ /status to see cards` : "➕ Link a card with /linkcard CARD_ID",
+    `💳 Cards: ${cardCount}`,
+    cardCount ? `➡️ /status to see cards` : "➕ Request a card to get started",
   ].filter(Boolean) as string[];
 
   return lines.join("\n");
@@ -1028,7 +1100,7 @@ async function handleMenuSelection(action: string, chatId: number, message?: any
 
   switch (action) {
     case "MENU_CREATE_CARD":
-      return startCreateCardFlow(chatId, message);
+      return handleCardRequest(chatId, message);
     case "MENU_MY_CARDS":
       return sendMyCards(chatId);
     case "MENU_USER_INFO":
@@ -1127,7 +1199,52 @@ async function handleCardRequest(chatId: number, message?: any) {
       return;
     }
   }
-  return startCreateCardFlow(chatId, message);
+
+  const userId = String(chatId);
+  const existingCard = await Card.findOne({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
+  if (existingCard) {
+    await bot!.sendMessage(chatId, "❌ You already have a card. Multiple cards are not allowed.", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+    return;
+  }
+
+  const pendingRequest = await CardRequest.findOne({ userId, status: "pending" }).lean();
+  if (pendingRequest) {
+    await bot!.sendMessage(chatId, "⏳ Your card request is already pending review.", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+    return;
+  }
+  const approvedRequest = await CardRequest.findOne({ userId, status: "approved" }).lean();
+  if (approvedRequest) {
+    await bot!.sendMessage(chatId, "✅ Your card request was already approved. Check My Card.", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+    return;
+  }
+
+  if (!user?.customerEmail) {
+    await bot!.sendMessage(chatId, "❌ Missing email on your KYC. Please update and resubmit KYC.", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+    return;
+  }
+
+  const nameOnCard = [user.firstName, user.lastName].filter(Boolean).join(" ") || message?.from?.first_name || "StroWallet User";
+  await CardRequest.create({
+    userId,
+    nameOnCard,
+    cardType: "visa",
+    amount: "3",
+    customerEmail: user.customerEmail,
+    status: "pending",
+    mode: normalizeMode(getDefaultMode()),
+  });
+
+  await bot!.sendMessage(chatId, "✅ Your card request has been submitted for review.", {
+    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+  });
 }
 
 async function startCreateCardFlow(chatId: number, message?: any) {
@@ -1993,18 +2110,19 @@ function normalizeKycStatus(value: any): KycStatus | undefined {
 }
 
 async function sendUserInfo(chatId: number) {
-  const [link, user] = await Promise.all([
+  const [link, user, cards] = await Promise.all([
     TelegramLink.findOne({ chatId }).lean(),
     User.findOne({ userId: String(chatId) }).lean(),
+    Card.find({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean(),
   ]);
 
   const balance = user?.balance ?? 0;
   const currency = user?.currency || "USDT";
-  const cards = link?.cardIds || [];
-  const email = link?.customerEmail;
+  const cardsList = cards || [];
+  const email = user?.customerEmail || link?.customerEmail;
   const kycStatus = user?.kycStatus || "not_started";
   const kycLabel = kycStatus === "approved" ? "approved" : kycStatus === "pending" ? "pending" : "not started";
-  const cardList = cards.slice(0, 3).map((c, idx) => `${idx + 1}. ${c}`);
+  const cardList = cardsList.slice(0, 3).map((c, idx) => `${idx + 1}. ${c.cardId}${c.last4 ? ` (••••${c.last4})` : ""}`);
 
   const lines = [
     "👤 Your Profile",
@@ -2012,9 +2130,9 @@ async function sendUserInfo(chatId: number) {
     email ? `Email: ${email}` : "Email: not linked (use /linkemail your@example.com)",
     `KYC: ${kycLabel} (use /kyc to submit)`,
     `Wallet: ${balance} ${currency}`,
-    `Cards: ${cards.length || 0}${cards.length ? " (see below)" : ""}`,
+    `Cards: ${cardsList.length || 0}${cardsList.length ? " (see below)" : ""}`,
     cardList.length ? cardList.join("\n") : undefined,
-    !cards.length ? "Tip: Request a card from admin, then /linkcard CARD_ID." : undefined,
+    !cardsList.length ? "Tip: Request a card from admin to get started." : undefined,
   ].filter(Boolean) as string[];
 
   await bot!.sendMessage(chatId, lines.join("\n"), {
@@ -2039,19 +2157,16 @@ function chunk<T>(items: T[], size: number): T[][] {
 }
 
 async function sendWalletSummary(chatId: number) {
-  const [link, user] = await Promise.all([
+  const [link, user, cards] = await Promise.all([
     TelegramLink.findOne({ chatId }).lean(),
     User.findOne({ userId: String(chatId) }).lean(),
+    Card.find({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean(),
   ]);
-  const cardId = link?.cardIds?.[0];
+  const cardId = cards?.[0]?.cardId || link?.cardIds?.[0];
   const walletBalance = user?.balance ?? 0;
 
   if (!cardId) {
-    const lines = [
-      "💼 Wallet",
-      `Balance: ${walletBalance} USD`,
-      "No card linked yet. Use /linkcard CARD_ID after admin approval.",
-    ];
+    const lines = ["💼 Wallet", `Balance: ${walletBalance} USD`, "No card yet. Request a card to get started."];
     await bot!.sendMessage(chatId, lines.join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
     return;
   }
@@ -2095,27 +2210,68 @@ async function sendWalletSummary(chatId: number) {
 
 
 async function sendMyCards(chatId: number) {
-  const link = await TelegramLink.findOne({ chatId });
-  if (!link || !link.cardIds?.length) {
-    await bot!.sendMessage(chatId, "No cards linked yet. Use /linkcard CARD_ID to link one.", {
+  const cards = await Card.find({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
+  const legacyLink = await TelegramLink.findOne({ chatId }).lean();
+  const cardIds = cards.length ? cards.map((c) => c.cardId) : legacyLink?.cardIds || [];
+
+  if (!cardIds.length) {
+    await bot!.sendMessage(chatId, "No card yet. Request a card to get started.", {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
     return;
   }
 
-  await bot!.sendMessage(chatId, `Fetching ${link.cardIds.length} card(s)...`, {
+  await bot!.sendMessage(chatId, `Fetching ${cardIds.length} card(s)...`, {
     reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
   });
 
-  for (const cardId of link.cardIds) {
+  for (const cardId of cardIds) {
     await sendCardDetail(chatId, cardId);
   }
+}
+
+async function getPrimaryCardForUser(userId: string) {
+  return Card.findOne({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } })
+    .sort({ updatedAt: -1 })
+    .lean();
+}
+
+async function sendMyCardSummary(chatId: number) {
+  const card = await getPrimaryCardForUser(String(chatId));
+  if (!card) {
+    await bot!.sendMessage(chatId, "❌ No cards linked yet.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+    return;
+  }
+  const status = card.status ? String(card.status) : "unknown";
+  const balanceValue = card.balance != null ? String(card.balance) : "-";
+  const currency = card.currency ? ` ${card.currency}` : "";
+  const last4 = card.last4 ? `••••${card.last4}` : "(not available)";
+
+  const lines = [
+    "💳 Your Card",
+    `Status: ${status}`,
+    `Last 4 Digits: ${last4}`,
+    `Balance: ${balanceValue}${currency}`,
+  ];
+
+  await bot!.sendMessage(chatId, lines.join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+}
+
+async function sendCardStatus(chatId: number) {
+  const card = await getPrimaryCardForUser(String(chatId));
+  if (!card) {
+    await bot!.sendMessage(chatId, "❌ No cards linked yet.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+    return;
+  }
+  const status = card.status ? String(card.status) : "unknown";
+  await bot!.sendMessage(chatId, `Status: ${status}`, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
 }
 
 async function sendCardDetail(chatId: number, cardId: string) {
   try {
     const user = await User.findOne({ userId: String(chatId) }).lean();
     const walletBalance = user?.balance ?? 0;
+    const card = await Card.findOne({ cardId }).lean();
 
     // If this card was generated locally, serve synthetic details and avoid upstream call
     const local = await CardRequest.findOne({ cardId, status: "approved" }).lean();
@@ -2124,12 +2280,13 @@ async function sendCardDetail(chatId: number, cardId: string) {
         card_id: cardId,
         name_on_card: local.nameOnCard || "Virtual Card",
         card_type: local.cardType || "virtual",
-        status: "active",
+        status: card?.status || "active",
         balance: walletBalance,
         available_balance: local.amount || undefined,
-        currency: "USD",
+        currency: card?.currency || "USD",
         card_number: local.cardNumber,
         cvc: local.cvc,
+        last4: card?.last4,
       };
       const text = buildCardDetailMessage(detail, cardId);
       await bot!.sendMessage(chatId, text, {
@@ -2152,10 +2309,11 @@ async function sendCardDetail(chatId: number, cardId: string) {
       card_id: cardId,
       name_on_card: "Virtual Card",
       card_type: "virtual",
-      status: "active",
+      status: card?.status || "active",
       balance: walletBalance,
       available_balance: undefined,
-      currency: "USD",
+      currency: card?.currency || "USD",
+      last4: card?.last4,
     };
     const text = buildCardDetailMessage(detail, cardId);
     await bot!.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
@@ -2167,12 +2325,26 @@ async function sendCardDetail(chatId: number, cardId: string) {
 async function sendCardTransactions(chatId: number, cardId?: string) {
   try {
     const userId = String(chatId);
-    const query: any = { userId, transactionType: "card" };
-    if (cardId) query["metadata.cardId"] = cardId;
+    const primaryCard = cardId ? await Card.findOne({ cardId }).lean() : await getPrimaryCardForUser(userId);
+    const targetCardId = cardId || primaryCard?.cardId;
 
+    if (!targetCardId) {
+      await bot!.sendMessage(chatId, "❌ No cards linked yet.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+      return;
+    }
+
+    if (primaryCard?.status && String(primaryCard.status).toLowerCase() === "frozen") {
+      await bot!.sendMessage(chatId, "❄️ Your card is frozen. Transactions are unavailable while the card is frozen.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      return;
+    }
+
+    const query: any = { userId, transactionType: "card" };
+    query["metadata.cardId"] = targetCardId;
     const txns = await Transaction.find(query)
       .sort({ createdAt: -1 })
-      .limit(10)
+      .limit(5)
       .lean();
 
     if (!txns.length) {
@@ -2180,12 +2352,12 @@ async function sendCardTransactions(chatId: number, cardId?: string) {
       return;
     }
 
-    const lines = ["📊 Card Transactions", ""];
+    const lines = ["📄 Recent Card Transactions", ""];
     for (const t of txns) {
-      const meta = (t.metadata || {}) as any;
+      const meta = (t as any).metadata || {};
       const direction = meta.direction === "debit" ? "-" : "+";
-      const amount = `${direction}${Number(t.amount || 0).toFixed(2)}`;
-      const currency = t.currency || "USD";
+      const amount = `${direction}${Number((t as any).amount || 0).toFixed(2)}`;
+      const currency = (t as any).currency || "USD";
       const desc = meta.description || "Card transaction";
       lines.push(`${amount} ${currency}  ${desc}`);
     }
@@ -2196,9 +2368,98 @@ async function sendCardTransactions(chatId: number, cardId?: string) {
   }
 }
 
+function extractCardTransactions(payload: any): any[] {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload;
+  const candidates = [
+    payload?.data?.transactions,
+    payload?.data?.data,
+    payload?.data,
+    payload?.transactions,
+    payload?.response?.transactions,
+    payload?.response?.data,
+  ];
+  for (const c of candidates) {
+    if (Array.isArray(c)) return c;
+  }
+  return [];
+}
+
+function normalizeTxnStatus(raw?: string) {
+  const v = (raw || "").toLowerCase();
+  if (v.includes("fail") || v.includes("decline") || v.includes("deny")) return "failed";
+  if (v.includes("pending") || v.includes("review")) return "pending";
+  return "completed";
+}
+
+function normalizeTxnDirection(raw?: string, amount?: number) {
+  const v = (raw || "").toLowerCase();
+  if (v.includes("debit") || v.includes("out") || v.includes("dr")) return "debit";
+  if (v.includes("credit") || v.includes("in") || v.includes("cr")) return "credit";
+  if (amount != null) return amount < 0 ? "debit" : "credit";
+  return "debit";
+}
+
+function normalizeTxnItem(item: any) {
+  const amountRaw = item?.amount ?? item?.transactionAmount ?? item?.total ?? item?.value;
+  const amount = amountRaw != null && !Number.isNaN(Number(amountRaw)) ? Number(amountRaw) : undefined;
+  const description = item?.description || item?.merchant || item?.merchant_name || item?.narration;
+  const currency = item?.currency || item?.ccy || item?.iso_currency;
+  const statusRaw = item?.status || item?.state || item?.result;
+  const txnId = item?.transactionId || item?.transaction_id || item?.id || item?.ref || item?.reference;
+  const directionRaw = item?.direction || item?.type || item?.transaction_type || item?.drCr;
+  const direction = normalizeTxnDirection(directionRaw, amount);
+  return {
+    transactionNumber: txnId ? String(txnId) : undefined,
+    amount,
+    currency,
+    description,
+    status: normalizeTxnStatus(statusRaw),
+    direction,
+  };
+}
+
+async function cacheCardTransactions(userId: string, cardId: string, items: any[]) {
+  if (!items.length) return;
+  const now = Date.now();
+  let idx = 0;
+  for (const item of items) {
+    const normalized = normalizeTxnItem(item);
+    if (normalized.amount == null) continue;
+    const reference = normalized.transactionNumber || `${cardId}-${now}-${idx++}`;
+    await Transaction.findOneAndUpdate(
+      { userId, transactionType: "card", transactionNumber: reference },
+      {
+        $set: {
+          userId,
+          transactionType: "card",
+          paymentMethod: "strowallet",
+          amount: Math.abs(normalized.amount),
+          currency: normalized.currency || "USD",
+          status: normalized.status,
+          transactionNumber: reference,
+          metadata: {
+            cardId,
+            direction: normalized.direction,
+            description: normalized.description,
+            rawStatus: normalized.status,
+          },
+          responseData: item,
+        },
+      },
+      { upsert: true, new: true }
+    );
+  }
+}
+
 async function handleFreezeAction(chatId: number, cardId: string, action: "freeze" | "unfreeze") {
   try {
     await callStroWallet("action/status", "post", { action, card_id: cardId });
+    await Card.findOneAndUpdate(
+      { cardId },
+      { $set: { status: action === "freeze" ? "frozen" : "active", lastSync: new Date() } },
+      { new: true }
+    );
     await bot!.sendMessage(chatId, `${action === "freeze" ? "Card frozen" : "Card unfrozen"} for ${cardId}.`, {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
@@ -2250,10 +2511,6 @@ async function callStroWallet(
       },
     };
   }
-  if (path === "card-transactions") {
-    return { ok: true, data: [] };
-  }
-
   const url = API_BASE.endsWith("/") ? `${API_BASE}${path}` : `${API_BASE}/${path}`;
   try {
     const resp = await axios({ url, method, data, params: method === "get" ? data : undefined, timeout: 15000 });

@@ -323,14 +323,12 @@
           </label>
         </div>
       </div>
-      <div style="min-width: 260px; max-width: 320px; width: 100%">
-        <div class="row">
-          <label for="adminToken">Admin token (x-admin-token)</label>
-          <input id="adminToken" placeholder="Paste token" autocomplete="off" />
-          <div class="toolbar">
-            <button id="saveToken">Save Token</button>
-            <button id="testToken" class="secondary" type="button">Test</button>
-          </div>
+      <div class="row">
+        <label for="adminToken">Admin token (x-admin-token)</label>
+        <input id="adminToken" placeholder="Paste token" autocomplete="off" />
+        <div class="toolbar">
+          <button id="saveToken">Save Token</button>
+          <button id="testToken" class="secondary" type="button">Test</button>
         </div>
       </div>
     </header>
@@ -645,7 +643,9 @@
         >
           <div>
             <h2>Card Management</h2>
-            <p class="sub">View cards, refresh, freeze/unfreeze, and fund.</p>
+            <p class="sub">
+              View cards, refresh, block/unblock, fund, and review transactions.
+            </p>
           </div>
           <div class="toolbar">
             <button id="cardRefreshAll" type="button" class="secondary">
@@ -675,7 +675,9 @@
         >
           <div>
             <h2>Card Transactions (Webhook)</h2>
-            <p class="sub">Shows locally stored StroWallet card transactions.</p>
+            <p class="sub">
+              Shows locally stored StroWallet card transactions.
+            </p>
           </div>
           <div class="toolbar">
             <button id="cardTxnRefresh" type="button" class="secondary">
@@ -695,6 +697,42 @@
         </div>
         <div class="data-box" id="cardTxnTable">No data yet. Load to view.</div>
         <div class="status" id="cardTxnStatus"></div>
+      </section>
+
+      <section class="card">
+        <div
+          class="toolbar"
+          style="justify-content: space-between; margin-bottom: 6px"
+        >
+          <div>
+            <h2>Reconciliation</h2>
+            <p class="sub">
+              Compare local balances with StroWallet and audit transactions.
+            </p>
+          </div>
+          <div class="toolbar">
+            <label style="color: var(--muted); font-size: 13px">Show</label>
+            <select id="reconFilter" style="max-width: 140px">
+              <option value="all" selected>all</option>
+              <option value="mismatch">mismatch only</option>
+            </select>
+            <label style="color: var(--muted); font-size: 13px">Limit</label>
+            <select id="reconLimit" style="max-width: 90px">
+              <option>10</option>
+              <option selected>20</option>
+              <option>50</option>
+              <option>100</option>
+            </select>
+            <button id="reconRefresh" type="button" class="secondary">
+              Load
+            </button>
+            <button id="reconRunAll" type="button" class="secondary">
+              Run All
+            </button>
+          </div>
+        </div>
+        <div class="data-box" id="reconTable">No data yet. Load to view.</div>
+        <div class="status" id="reconStatus"></div>
       </section>
 
       <section class="card">
@@ -766,6 +804,12 @@
         cardTxnCardId: document.getElementById("cardTxnCardId"),
         cardTxnTable: document.getElementById("cardTxnTable"),
         cardTxnStatus: document.getElementById("cardTxnStatus"),
+        reconFilter: document.getElementById("reconFilter"),
+        reconLimit: document.getElementById("reconLimit"),
+        reconRefresh: document.getElementById("reconRefresh"),
+        reconRunAll: document.getElementById("reconRunAll"),
+        reconTable: document.getElementById("reconTable"),
+        reconStatus: document.getElementById("reconStatus"),
         fakeTopupToggle: document.getElementById("fakeTopupToggle"),
         fakeTopupStatus: document.getElementById("fakeTopupStatus"),
         resetUsersBtn: document.getElementById("resetUsersBtn"),
@@ -948,6 +992,8 @@
             els.cardStatusText.textContent = "Missing admin token";
           if (els.cardTxnStatus)
             els.cardTxnStatus.textContent = "Missing admin token";
+          if (els.reconStatus)
+            els.reconStatus.textContent = "Missing admin token";
           return;
         }
         loadConfig();
@@ -956,6 +1002,7 @@
         loadKycUsers();
         loadCards();
         loadCardTransactions();
+        loadReconciliations();
         startLoopsIfReady();
       }
 
@@ -1001,16 +1048,28 @@
             : "n/a";
           const email = r.customerEmail || "(missing email)";
           const amount = r.amount || "0";
+          const name = r.userName || "-";
+          const hasActiveCard = Boolean(r.hasActiveCard);
+          const activeCardLabel = r.activeCardId
+            ? `Active Card: ${r.activeCardId}${
+                r.activeCardLast4 ? ` (••••${r.activeCardLast4})` : ""
+              }`
+            : "";
+          const approveDisabled =
+            r.status !== "pending" || hasActiveCard || !email;
+
           wrapper.innerHTML = `
-          <div class="mono req-line">id=${r._id} | userId=${
+          <div class="mono req-line">id=${r._id} | telegramId=${
             r.userId
           } | status=${r.status} | ${when}</div>
-          <div class="req-line">Name: ${r.nameOnCard || "-"} | Type: ${
-            r.cardType || "virtual"
-          } | Amount: ${amount}</div>
+          <div class="req-line">User: ${name}</div>
+          <div class="req-line">Name on card: ${
+            r.nameOnCard || "-"
+          } | Type: ${r.cardType || "virtual"} | Amount: ${amount}</div>
           <div class="req-line">Email: ${email}${
             r.mode ? ` | Mode: ${r.mode}` : ""
           }</div>
+          ${activeCardLabel ? `<div class="req-line">${activeCardLabel}</div>` : ""}
           ${
             r.adminNote
               ? `<div class="req-line">Admin note: ${r.adminNote}</div>`
@@ -1022,6 +1081,11 @@
               : ""
           }
           ${r.cardId ? `<div class="req-line">Card ID: ${r.cardId}</div>` : ""}
+          <div class="toolbar" style="margin-top:6px">
+            <div style="flex:1"></div>
+            <button data-action="approve" data-id="${r._id}" ${approveDisabled ? "disabled" : ""}>Approve</button>
+            <button class="danger" data-action="decline" data-id="${r._id}">Decline</button>
+          </div>
         `;
 
           container.appendChild(wrapper);
@@ -1101,19 +1165,24 @@
             const updated = c.updatedAt
               ? new Date(c.updatedAt).toLocaleString()
               : "-";
+            const created = c.createdAt
+              ? new Date(c.createdAt).toLocaleString()
+              : "-";
             const status = c.status || "unknown";
+            const statusLabel = status === "frozen" ? "blocked" : status;
+            const maskedId = c.last4 ? `•••• ${c.last4}` : c.cardId;
             return `
               <div class="req-card" data-id="${c.cardId}">
-                <div class="mono req-line">Card ID: ${c.cardId}</div>
-                <div class="req-line">User ID: ${c.userId || "-"}</div>
-                <div class="req-line">Name: ${c.nameOnCard || "-"}</div>
-                <div class="req-line">Type: ${c.cardType || "-"}</div>
+                <div class="mono req-line">Card ID: ${maskedId}</div>
+                <div class="req-line">User: ${c.userName || "-"} | Telegram ID: ${c.userId || "-"}</div>
                 <div class="req-line">Email: ${c.customerEmail || "-"}</div>
-                <div class="req-line">Status: ${status}</div>
+                <div class="req-line">Status: ${statusLabel}</div>
+                <div class="req-line">Balance: ${c.balance ?? "-"} ${c.currency || ""}</div>
+                <div class="req-line">Created: ${created}</div>
                 <div class="req-line">Updated: ${updated}</div>
                 <div class="toolbar" style="margin-top:6px">
                   <button class="secondary" data-action="refresh" data-id="${c.cardId}">Refresh</button>
-                  <button class="secondary" data-action="toggle" data-status="${status}" data-id="${c.cardId}">${status === "frozen" ? "Unfreeze" : "Freeze"}</button>
+                  <button class="secondary" data-action="toggle" data-status="${status}" data-id="${c.cardId}">${status === "frozen" ? "Unblock" : "Block"}</button>
                   <button class="secondary" data-action="fund" data-id="${c.cardId}">Fund</button>
                   <button class="secondary" data-action="txns" data-id="${c.cardId}">Transactions</button>
                 </div>
@@ -1132,7 +1201,9 @@
         }
         const rows = items
           .map((t) => {
-            const when = t.createdAt ? new Date(t.createdAt).toLocaleString() : "-";
+            const when = t.createdAt
+              ? new Date(t.createdAt).toLocaleString()
+              : "-";
             const direction = t.direction === "debit" ? "-" : "+";
             const amount = `${direction}${Number(t.amount || 0).toFixed(2)} ${t.currency || "USD"}`;
             const desc = t.description || "Card transaction";
@@ -1173,6 +1244,67 @@
         } catch (err) {
           const msg = err?.message || "Failed to load card transactions";
           els.cardTxnStatus.textContent = msg;
+          showToast(msg, "error");
+        }
+      }
+
+      function renderReconciliations(items) {
+        const container = els.reconTable;
+        if (!items || !items.length) {
+          container.textContent = "No reconciliation records.";
+          return;
+        }
+        const rows = items
+          .map((r) => {
+            const checked = r.checkedAt
+              ? new Date(r.checkedAt).toLocaleString()
+              : "-";
+            const local = r.localBalance ?? "-";
+            const external = r.externalBalance ?? "-";
+            const status = r.discrepancy ? "mismatch" : "match";
+            const statusClass = r.discrepancy ? "tag bad" : "tag good";
+            const maskedId = r.cardId ? r.cardId.slice(-6) : "";
+            return `
+              <div class="req-card" data-id="${r.cardId}">
+                <div class="mono req-line">Card ID: ${maskedId ? `•••• ${maskedId}` : r.cardId}</div>
+                <div class="req-line">User: ${r.userName || "-"} | ID: ${r.userId || "-"}</div>
+                <div class="req-line">Email: ${r.email || "-"}</div>
+                <div class="req-line">Local Balance: ${local}</div>
+                <div class="req-line">StroWallet Balance: ${external}</div>
+                <div class="req-line">Status: <span class="${statusClass}">${status}</span></div>
+                <div class="req-line">Last Checked: ${checked}</div>
+                <div class="toolbar" style="margin-top:6px">
+                  <button class="secondary" data-action="force" data-id="${r.cardId}">Force Sync</button>
+                  <button class="secondary" data-action="audit" data-id="${r.cardId}">Audit Txns</button>
+                </div>
+              </div>
+            `;
+          })
+          .join("\n");
+        container.innerHTML = rows;
+      }
+
+      async function loadReconciliations() {
+        if (!hasToken()) {
+          els.reconStatus.textContent = "Missing admin token";
+          return;
+        }
+        els.reconStatus.textContent = "Loading...";
+        try {
+          const params = new URLSearchParams();
+          const filter = (els.reconFilter?.value || "all").toLowerCase();
+          const limit = (els.reconLimit?.value || "20").toString();
+          if (filter === "mismatch") params.set("mismatchOnly", "true");
+          if (limit) params.set("limit", limit);
+          const url = params.toString()
+            ? `/api/admin/reconciliation?${params.toString()}`
+            : "/api/admin/reconciliation";
+          const data = await safeFetch(url);
+          renderReconciliations(data.items || []);
+          els.reconStatus.textContent = `Loaded ${data.items?.length || 0}`;
+        } catch (err) {
+          const msg = err?.message || "Failed to load reconciliation";
+          els.reconStatus.textContent = msg;
           showToast(msg, "error");
         }
       }
@@ -1251,6 +1383,36 @@
       els.refreshConfig.addEventListener("click", loadConfig);
       if (els.cardTxnRefresh) {
         els.cardTxnRefresh.addEventListener("click", loadCardTransactions);
+      }
+      if (els.reconRefresh) {
+        els.reconRefresh.addEventListener("click", loadReconciliations);
+      }
+      if (els.reconRunAll) {
+        els.reconRunAll.addEventListener("click", async () => {
+          if (!hasToken()) {
+            els.reconStatus.textContent = "Missing admin token";
+            return;
+          }
+          setLoading(els.reconRunAll, true);
+          els.reconStatus.textContent = "Running reconciliation...";
+          try {
+            const data = await safeFetch("/api/admin/reconciliation/run", {
+              method: "POST",
+              body: JSON.stringify({}),
+            });
+            const errors = (data.results || []).filter((r) => r.error);
+            els.reconStatus.textContent = errors.length
+              ? `Completed with ${errors.length} errors`
+              : "Reconciliation completed";
+            await loadReconciliations();
+          } catch (err) {
+            const msg = err?.message || "Failed to run reconciliation";
+            els.reconStatus.textContent = msg;
+            showToast(msg, "error");
+          } finally {
+            setLoading(els.reconRunAll, false);
+          }
+        });
       }
       els.copyConfig.addEventListener("click", () => {
         if (!lastConfig) return showToast("No config loaded", "error");
@@ -1632,73 +1794,74 @@
             .join("\n");
           auditStatusEl.textContent = `Loaded ${items.length} entries`;
         } catch (err) {
-          auditStatusEl.textContent = err.message || "Failed to load audit";
+          const msg = err?.message || "Audit load failed";
+          auditStatusEl.textContent = msg;
+          showToast(msg, "error");
         }
       }
+
       if (loadAuditBtn) loadAuditBtn.addEventListener("click", loadAudit);
 
-      els.requestStatus.addEventListener("change", () => {
-        loadRequests();
-      });
+      if (els.requestList) {
+        els.requestList.addEventListener("click", async (ev) => {
+          const target = ev.target;
+          const action = target?.dataset?.action;
+          const id = target?.dataset?.id;
+          if (!action || !id) return;
+          const req = latestRequests.find((r) => r._id === id);
+          if (!req) return showToast("Request not found in list", "error");
 
-      els.requestList.addEventListener("click", async (ev) => {
-        const target = ev.target;
-        const action = target?.dataset?.action;
-        const id = target?.dataset?.id;
-        if (!action || !id) return;
-        const req = latestRequests.find((r) => r._id === id);
-        if (!req) return showToast("Request not found in list", "error");
-
-        if (action === "approve") {
-          const nameOnCard =
-            prompt("Name on card", req.nameOnCard || "") || undefined;
-          const cardType =
-            prompt("Card type", req.cardType || "virtual") || undefined;
-          const amount =
-            prompt("Initial load amount (optional)", req.amount || "0") ||
-            undefined;
-          const customerEmail =
-            prompt("Customer email (required)", req.customerEmail || "") ||
-            undefined;
-          const mode =
-            prompt("Mode (blank for live, or sandbox)", req.mode || "") ||
-            undefined;
-          try {
-            await safeFetch(`/api/card-requests/${id}/approve`, {
-              method: "POST",
-              body: JSON.stringify({
-                nameOnCard,
-                cardType,
-                amount: amount || "0",
-                customerEmail,
-                mode,
-              }),
-            });
-            showToast("Approved", "success");
-            loadRequests();
-          } catch (err) {
-            const msg = err?.message || "Approve failed";
-            const detail = err?.data?.data || err?.data;
-            const extra = detail ? `: ${JSON.stringify(detail)}` : "";
-            showToast(msg + extra, "error");
+          if (action === "approve") {
+            const nameOnCard =
+              prompt("Name on card", req.nameOnCard || "") || undefined;
+            const cardType =
+              prompt("Card type", req.cardType || "virtual") || undefined;
+            const amount =
+              prompt("Initial load amount (optional)", req.amount || "0") ||
+              undefined;
+            const customerEmail =
+              prompt("Customer email (required)", req.customerEmail || "") ||
+              undefined;
+            const mode =
+              prompt("Mode (blank for live, or sandbox)", req.mode || "") ||
+              undefined;
+            try {
+              await safeFetch(`/api/card-requests/${id}/approve`, {
+                method: "POST",
+                body: JSON.stringify({
+                  nameOnCard,
+                  cardType,
+                  amount: amount || "0",
+                  customerEmail,
+                  mode,
+                }),
+              });
+              showToast("Approved", "success");
+              loadRequests();
+            } catch (err) {
+              const msg = err?.message || "Approve failed";
+              const detail = err?.data?.data || err?.data;
+              const extra = detail ? `: ${JSON.stringify(detail)}` : "";
+              showToast(msg + extra, "error");
+            }
           }
-        }
 
-        if (action === "decline") {
-          const reason = prompt("Reason (optional)") || undefined;
-          try {
-            await safeFetch(`/api/card-requests/${id}/decline`, {
-              method: "POST",
-              body: JSON.stringify({ reason }),
-            });
-            showToast("Declined", "success");
-            loadRequests();
-          } catch (err) {
-            const msg = err?.message || "Decline failed";
-            showToast(msg, "error");
+          if (action === "decline") {
+            const reason = prompt("Reason (optional)") || undefined;
+            try {
+              await safeFetch(`/api/card-requests/${id}/decline`, {
+                method: "POST",
+                body: JSON.stringify({ reason }),
+              });
+              showToast("Declined", "success");
+              loadRequests();
+            } catch (err) {
+              const msg = err?.message || "Decline failed";
+              showToast(msg, "error");
+            }
           }
-        }
-      });
+        });
+      }
 
       if (els.kycTable) {
         els.kycTable.addEventListener("click", async (ev) => {
@@ -1765,6 +1928,36 @@
               );
               const payload = data.data || data;
               alert(JSON.stringify(payload, null, 2));
+            }
+          } catch (err) {
+            showToast(err?.message || "Action failed", "error");
+          } finally {
+            setLoading(target, false);
+          }
+        });
+      }
+
+      if (els.reconTable) {
+        els.reconTable.addEventListener("click", async (ev) => {
+          const target = ev.target;
+          const action = target?.dataset?.action;
+          const id = target?.dataset?.id;
+          if (!action || !id) return;
+          setLoading(target, true);
+          try {
+            if (action === "force") {
+              await safeFetch(
+                `/api/admin/reconciliation/${encodeURIComponent(id)}/force`,
+                { method: "POST", body: JSON.stringify({}) },
+              );
+              showToast("Reconciled", "success");
+              await loadReconciliations();
+              await loadCards();
+            } else if (action === "audit") {
+              const data = await safeFetch(
+                `/api/admin/reconciliation/${encodeURIComponent(id)}/audit`,
+              );
+              alert(JSON.stringify(data.result || data, null, 2));
             }
           } catch (err) {
             showToast(err?.message || "Action failed", "error");

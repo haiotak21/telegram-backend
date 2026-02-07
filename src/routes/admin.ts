@@ -4,6 +4,8 @@ import { z } from "zod";
 import User from "../models/User";
 import Card from "../models/Card";
 import Transaction from "../models/Transaction";
+import { notifyCardStatusChanged } from "../services/botService";
+import { auditCardTransactions, getReconciliationSummary, reconcileAllCards, reconcileCard } from "../services/reconciliationService";
 
 const router = express.Router();
 
@@ -38,6 +40,18 @@ function normalizeError(e: any) {
   const status = e?.status ?? 400;
   const msg = e?.message ?? "Request error";
   return { status, body: { success: false, message: String(msg) } };
+}
+
+function extractField(obj: any, keys: string[]): string | undefined {
+  if (!obj || typeof obj !== "object") return undefined;
+  for (const key of keys) {
+    if (obj[key] != null) return String(obj[key]);
+  }
+  for (const val of Object.values(obj)) {
+    const v = typeof val === "object" ? extractField(val, keys) : undefined;
+    if (v) return v;
+  }
+  return undefined;
 }
 
 function normalizeKycStatus(value: any): "pending" | "approved" | "declined" | undefined {
@@ -339,19 +353,26 @@ router.get("/cards", requireAdmin, async (req, res) => {
       .limit(limit || 100)
       .lean();
 
+    const userIds = Array.from(new Set(items.map((c) => c.userId).filter(Boolean)));
+    const users = await User.find({ userId: { $in: userIds } }).lean();
+    const userMap = new Map(users.map((u) => [u.userId, u]));
+
     return res.json({
       success: true,
       cards: items.map((c) => ({
         cardId: c.cardId,
         userId: c.userId,
+        userName: c.userId ? [userMap.get(c.userId)?.firstName, userMap.get(c.userId)?.lastName].filter(Boolean).join(" ") || undefined : undefined,
         customerEmail: c.customerEmail,
+        email: c.customerEmail,
         nameOnCard: c.nameOnCard,
         cardType: c.cardType,
         status: c.status,
         last4: c.last4,
         currency: c.currency,
-        balance: c.balance,
+        balance: c.balance != null && !Number.isNaN(Number(c.balance)) ? Number(c.balance) : c.balance,
         availableBalance: c.availableBalance,
+        createdAt: c.createdAt,
         updatedAt: c.updatedAt,
       })),
     });
@@ -393,12 +414,22 @@ router.post("/cards/:cardId/action", requireAdmin, async (req, res) => {
   try {
     const cardId = String(req.params.cardId);
     const action = req.body?.action === "freeze" ? "freeze" : "unfreeze";
+    const card = await Card.findOne({ cardId });
+    if (!card) return res.status(404).json({ success: false, message: "Card not found" });
+    const currentStatus = String(card.status || "").toLowerCase();
+    if (action === "freeze" && currentStatus === "frozen") {
+      return res.status(400).json({ success: false, message: "Card already frozen" });
+    }
+    if (action === "unfreeze" && currentStatus === "active") {
+      return res.status(400).json({ success: false, message: "Card already active" });
+    }
     const result = await actionCard(cardId, action);
     await Card.findOneAndUpdate(
       { cardId },
-      { $set: { status: action === "freeze" ? "frozen" : "active" } },
+      { $set: { status: action === "freeze" ? "frozen" : "active", lastSync: new Date() } },
       { new: true }
     );
+    await notifyCardStatusChanged(cardId, action === "freeze" ? "frozen" : "active");
     return res.json({ success: true, result });
   } catch (e) {
     const { status, body } = normalizeError(e);
@@ -412,6 +443,64 @@ router.post("/cards/:cardId/fund", requireAdmin, async (req, res) => {
     const amount = String(req.body?.amount || "0");
     const mode = typeof req.body?.mode === "string" ? req.body.mode : undefined;
     const result = await fundCard(cardId, amount, mode);
+
+    const data = (result as any)?.data ?? result;
+    const balanceRaw =
+      (data as any)?.balance ||
+      (data as any)?.available_balance ||
+      (data as any)?.availableBalance ||
+      (data as any)?.data?.balance ||
+      (data as any)?.data?.available_balance;
+    const currency = extractField(data, ["currency", "ccy", "iso_currency"]);
+    const amountNum = Number(amount);
+    const nextBalance = balanceRaw != null && !Number.isNaN(Number(balanceRaw)) ? Number(balanceRaw) : undefined;
+
+    const existing = await Card.findOne({ cardId }).lean();
+    const updatedBalance =
+      nextBalance != null
+        ? nextBalance
+        : existing?.balance != null && !Number.isNaN(Number(existing.balance)) && !Number.isNaN(amountNum)
+          ? Number(existing.balance) + amountNum
+          : undefined;
+
+    const updated = await Card.findOneAndUpdate(
+      { cardId },
+      {
+        $set: {
+          balance: updatedBalance != null ? String(updatedBalance) : existing?.balance,
+          currency: currency || existing?.currency,
+          lastSync: new Date(),
+        },
+      },
+      { new: true }
+    );
+
+    const userId = updated?.userId || existing?.userId;
+    const txnId = extractField(data, ["transaction_id", "transactionId", "id", "reference", "ref"]);
+    const ref = txnId || `admin-fund-${cardId}-${Date.now()}`;
+    if (userId && !Number.isNaN(amountNum)) {
+      await Transaction.findOneAndUpdate(
+        { userId, transactionType: "card", transactionNumber: ref },
+        {
+          $set: {
+            userId,
+            transactionType: "card",
+            paymentMethod: "strowallet",
+            amount: Math.abs(amountNum),
+            currency: currency || updated?.currency || existing?.currency || "USD",
+            status: "completed",
+            transactionNumber: ref,
+            metadata: {
+              cardId,
+              direction: "credit",
+              description: "Admin fund",
+            },
+            responseData: data,
+          },
+        },
+        { upsert: true, new: true }
+      );
+    }
     return res.json({ success: true, result });
   } catch (e) {
     const { status, body } = normalizeError(e);
@@ -464,6 +553,58 @@ router.get("/transactions", requireAdmin, async (req, res) => {
     }));
 
     return res.json({ success: true, transactions });
+  } catch (e) {
+    const { status, body } = normalizeError(e);
+    return res.status(status).json(body);
+  }
+});
+
+// Reconciliation summary
+router.get("/reconciliation", requireAdmin, async (req, res) => {
+  try {
+    const limit = Number(req.query.limit || 50);
+    const mismatchOnly = String(req.query.mismatchOnly || "false").toLowerCase() === "true";
+    const items = await getReconciliationSummary(limit, mismatchOnly);
+    return res.json({ success: true, items });
+  } catch (e) {
+    const { status, body } = normalizeError(e);
+    return res.status(status).json(body);
+  }
+});
+
+// Run reconciliation for all cards
+router.post("/reconciliation/run", requireAdmin, async (req, res) => {
+  try {
+    const mode = typeof req.body?.mode === "string" ? req.body.mode : undefined;
+    const limit = req.body?.limit ? Number(req.body.limit) : undefined;
+    const results = await reconcileAllCards({ mode, notify: true, limit });
+    return res.json({ success: true, results });
+  } catch (e) {
+    const { status, body } = normalizeError(e);
+    return res.status(status).json(body);
+  }
+});
+
+// Force reconciliation for a card
+router.post("/reconciliation/:cardId/force", requireAdmin, async (req, res) => {
+  try {
+    const cardId = String(req.params.cardId);
+    const mode = typeof req.body?.mode === "string" ? req.body.mode : undefined;
+    const result = await reconcileCard(cardId, { mode, notify: true });
+    return res.json({ success: true, result });
+  } catch (e) {
+    const { status, body } = normalizeError(e);
+    return res.status(status).json(body);
+  }
+});
+
+// Audit transactions for a card
+router.get("/reconciliation/:cardId/audit", requireAdmin, async (req, res) => {
+  try {
+    const cardId = String(req.params.cardId);
+    const mode = typeof req.query.mode === "string" ? req.query.mode : undefined;
+    const result = await auditCardTransactions(cardId, { mode });
+    return res.json({ success: true, result });
   } catch (e) {
     const { status, body } = normalizeError(e);
     return res.status(status).json(body);
