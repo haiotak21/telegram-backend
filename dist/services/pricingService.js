@@ -21,6 +21,7 @@ async function loadPricingConfig() {
         depositFlatFee: 0,
         topupPercentFee: 0,
         topupFlatFee: 0,
+        cardRequestFeeEtb: 0,
     });
     return created;
 }

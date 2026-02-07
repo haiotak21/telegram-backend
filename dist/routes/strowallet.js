@@ -17,6 +17,23 @@ const bitvcard = axios_1.default.create({
         Authorization: process.env.STROWALLET_API_KEY ? `Bearer ${process.env.STROWALLET_API_KEY}` : undefined,
     },
 });
+function getDefaultMode() {
+    return process.env.STROWALLET_DEFAULT_MODE || (process.env.NODE_ENV !== "production" ? "sandbox" : undefined);
+}
+function normalizeMode(mode) {
+    if (!mode)
+        return undefined;
+    const m = String(mode).toLowerCase();
+    if (m === "live")
+        return undefined;
+    return m;
+}
+function applyDefaultMode(body) {
+    const defaultMode = normalizeMode(getDefaultMode());
+    if (!body?.mode && defaultMode)
+        return { ...body, mode: defaultMode };
+    return body;
+}
 function pickCardId(req) {
     const v = req.body?.card_id ??
         req.body?.cardId ??
@@ -48,11 +65,12 @@ function requirePublicKey() {
 }
 function normalizeError(e) {
     // Axios error normalization
-    if (axios_1.default.isAxiosError(e)) {
+    if (typeof axios_1.default.isAxiosError === "function" && axios_1.default.isAxiosError(e)) {
         const ae = e;
         const status = ae.response?.status ?? 400;
-        const msg = ae.response?.data?.error || ae.message || "Request failed";
-        return { status, body: { ok: false, error: String(msg) } };
+        const payload = ae.response?.data;
+        const msg = payload?.message || payload?.error || ae.message || "Request failed";
+        return { status, body: { ok: false, error: String(msg), data: payload } };
     }
     const status = e?.status ?? 400;
     const msg = e?.message ?? "Request error";
@@ -66,6 +84,30 @@ const amountString = zod_1.z
     .regex(/^\d+(\.\d+)?$/)
     .refine((v) => Number(v) > 0, "amount must be greater than zero");
 const CardIdSchema = zod_1.z.union([zod_1.z.string(), zod_1.z.number()]).transform((v) => String(v));
+// Accept either a remote URL or base64/data-uri for images (idImage, userPhoto)
+const UrlOrBase64 = zod_1.z
+    .string()
+    .refine((v) => {
+    if (!v || typeof v !== "string")
+        return false;
+    // Data URI (e.g. data:image/png;base64,...) or raw base64 blob
+    const dataUri = /^data:[^;\s]+;base64,[A-Za-z0-9+/=\s]+$/i;
+    if (dataUri.test(v))
+        return true;
+    // Try URL
+    try {
+        // new URL will throw if invalid
+        // accept relative/absolute http(s) urls only
+        const u = new URL(v);
+        return u.protocol === "http:" || u.protocol === "https:" || u.protocol === "data:";
+    }
+    catch (err) {
+        // not a URL -> test data URI or long base64 blob heuristics
+    }
+    // Raw base64: require a reasonably long string to reduce false positives
+    const rawBase64 = /^[A-Za-z0-9+/=\s]{50,}$/;
+    return rawBase64.test(v);
+}, "must be a valid URL or base64 data");
 const CreateCustomerSchema = zod_1.z.object({
     houseNumber: zod_1.z.string().min(1),
     firstName: zod_1.z.string().min(1),
@@ -74,14 +116,14 @@ const CreateCustomerSchema = zod_1.z.object({
     customerEmail: zod_1.z.string().email(),
     phoneNumber: internationalPhone,
     dateOfBirth: mmddyyyy, // MM/DD/YYYY
-    idImage: zod_1.z.string().url(),
-    userPhoto: zod_1.z.string().url(),
+    idImage: UrlOrBase64,
+    userPhoto: UrlOrBase64,
     line1: zod_1.z.string().min(1),
     state: zod_1.z.string().min(1),
     zipCode: zod_1.z.string().min(1),
     city: zod_1.z.string().min(1),
     country: zod_1.z.string().min(1),
-    idType: zod_1.z.enum(["BVN", "NIN", "PASSPORT"]),
+    idType: zod_1.z.enum(["NIN", "PASSPORT", "DRIVING_LICENSE"]),
 });
 router.post("/create-user", async (req, res) => {
     try {
@@ -91,7 +133,30 @@ router.post("/create-user", async (req, res) => {
         const resp = await bitvcard.post("create-user/", payload, {
             headers: { "Content-Type": "application/json" },
         });
-        return res.status(200).json({ ok: true, data: resp.data });
+        const data = resp.data;
+        const customerId = data?.response?.customerId ||
+            data?.response?.customer_id ||
+            data?.customerId ||
+            data?.customer_id;
+        if (!customerId && body.customerEmail) {
+            try {
+                const lookup = await bitvcard.get("getcardholder/", {
+                    params: { public_key, customerEmail: body.customerEmail },
+                });
+                const lookupData = lookup.data;
+                const lookupId = lookupData?.data?.customerId ||
+                    lookupData?.data?.customer_id ||
+                    lookupData?.customerId ||
+                    lookupData?.customer_id;
+                if (lookupId) {
+                    data.response = { ...(data.response || {}), customerId: lookupId };
+                }
+            }
+            catch {
+                // ignore lookup failures
+            }
+        }
+        return res.status(200).json({ ok: true, data });
     }
     catch (e) {
         const { status, body } = normalizeError(e);
@@ -116,12 +181,15 @@ router.get("/getcardholder", async (req, res) => {
     }
 });
 // 3) Update Customer
-const UpdateCustomerSchema = zod_1.z.object({
-    customerId: zod_1.z.string().min(1),
+// Allow partial updates for customer: only `customerId` is required
+const UpdateCustomerSchema = zod_1.z
+    .object({ customerId: zod_1.z.string().min(1) })
+    .merge(zod_1.z
+    .object({
     firstName: zod_1.z.string().min(1),
     lastName: zod_1.z.string().min(1),
-    idImage: zod_1.z.string().url(),
-    userPhoto: zod_1.z.string().url(),
+    idImage: UrlOrBase64,
+    userPhoto: UrlOrBase64,
     phoneNumber: internationalPhone,
     country: zod_1.z.string().min(1),
     city: zod_1.z.string().min(1),
@@ -129,7 +197,9 @@ const UpdateCustomerSchema = zod_1.z.object({
     zipCode: zod_1.z.string().min(1),
     line1: zod_1.z.string().min(1),
     houseNumber: zod_1.z.string().min(1),
-});
+})
+    .partial());
+// Keep existing PUT for compatibility (sends full body including undefineds)
 router.put("/updateCardCustomer", async (req, res) => {
     try {
         const body = UpdateCustomerSchema.parse(req.body || {});
@@ -145,19 +215,48 @@ router.put("/updateCardCustomer", async (req, res) => {
         return res.status(status).json(body);
     }
 });
+// PATCH variant forwards only provided fields (omits undefined)
+router.patch("/updateCardCustomer", async (req, res) => {
+    try {
+        const parsed = UpdateCustomerSchema.parse(req.body || {});
+        const public_key = requirePublicKey();
+        // Build payload with only keys that were actually provided in the request body
+        const providedBody = {};
+        for (const [k, v] of Object.entries(req.body || {})) {
+            if (v !== undefined)
+                providedBody[k] = v;
+        }
+        // Ensure customerId exists (required)
+        if (!providedBody.customerId) {
+            const err = new Error("customerId is required in body");
+            err.status = 400;
+            throw err;
+        }
+        const payload = { ...providedBody, public_key };
+        const resp = await bitvcard.patch("updateCardCustomer/", payload, {
+            headers: { "Content-Type": "application/json" },
+        });
+        return res.status(200).json({ ok: true, data: resp.data });
+    }
+    catch (e) {
+        const { status, body } = normalizeError(e);
+        return res.status(status).json(body);
+    }
+});
 // 4) Create Card
-const CardTypeSchema = zod_1.z.enum(["visa", "mastercard"]);
+// Allow any non-empty string for card_type (not limited to visa/mastercard)
+const CardTypeSchema = zod_1.z.string().min(1);
 const CreateCardSchema = zod_1.z.object({
     name_on_card: zod_1.z.string().min(1),
     card_type: CardTypeSchema,
     amount: amountString,
     customerEmail: zod_1.z.string().email(),
-    mode: zod_1.z.enum(["sandbox"]).optional(),
+    mode: zod_1.z.string().optional(),
     developer_code: zod_1.z.string().optional(),
 });
 router.post("/create-card", async (req, res) => {
     try {
-        const body = CreateCardSchema.parse(req.body || {});
+        const body = applyDefaultMode(CreateCardSchema.parse(req.body || {}));
         const public_key = requirePublicKey();
         const payload = { ...body, public_key };
         const resp = await bitvcard.post("create-card/", payload);
@@ -172,11 +271,11 @@ router.post("/create-card", async (req, res) => {
 const FundCardSchema = zod_1.z.object({
     card_id: CardIdSchema,
     amount: amountString,
-    mode: zod_1.z.enum(["sandbox"]).optional(),
+    mode: zod_1.z.string().optional(),
 });
 router.post("/fund-card", async (req, res) => {
     try {
-        const body = FundCardSchema.parse(req.body || {});
+        const body = applyDefaultMode(FundCardSchema.parse(req.body || {}));
         const public_key = requirePublicKey();
         const payload = { ...body, public_key };
         const resp = await bitvcard.post("fund-card/", payload);
@@ -190,11 +289,11 @@ router.post("/fund-card", async (req, res) => {
 // 6) Get Card Details
 const FetchCardDetailSchema = zod_1.z.object({
     card_id: CardIdSchema,
-    mode: zod_1.z.enum(["sandbox"]).optional(),
+    mode: zod_1.z.string().optional(),
 });
 router.post("/fetch-card-detail", async (req, res) => {
     try {
-        const body = FetchCardDetailSchema.parse(req.body || {});
+        const body = applyDefaultMode(FetchCardDetailSchema.parse(req.body || {}));
         const public_key = requirePublicKey();
         const payload = { ...body, public_key };
         const resp = await bitvcard.post("fetch-card-detail/", payload);
@@ -208,11 +307,11 @@ router.post("/fetch-card-detail", async (req, res) => {
 // 7) Card Transactions (recent)
 const CardTransactionsSchema = zod_1.z.object({
     card_id: CardIdSchema,
-    mode: zod_1.z.enum(["sandbox"]).optional(),
+    mode: zod_1.z.string().optional(),
 });
 router.post("/card-transactions", async (req, res) => {
     try {
-        const body = CardTransactionsSchema.parse(req.body || {});
+        const body = applyDefaultMode(CardTransactionsSchema.parse(req.body || {}));
         const public_key = requirePublicKey();
         const payload = { ...body, public_key };
         const resp = await bitvcard.post("card-transactions/", payload);
@@ -256,7 +355,7 @@ router.get("/apicard-transactions", async (req, res) => {
             take,
             public_key,
         };
-        const mode = typeof req.query.mode === "string" ? req.query.mode : undefined;
+        const mode = normalizeMode(typeof req.query.mode === "string" ? req.query.mode : getDefaultMode());
         const developer_code = typeof req.query.developer_code === "string" ? req.query.developer_code : undefined;
         if (mode)
             params.mode = mode;
@@ -287,7 +386,7 @@ router.post("/apicard-transactions", async (req, res) => {
             take,
             public_key,
         };
-        const mode = req.body?.mode ?? req.query?.mode;
+        const mode = normalizeMode(req.body?.mode ?? req.query?.mode ?? getDefaultMode());
         const developer_code = req.body?.developer_code ?? req.query?.developer_code;
         if (mode)
             params.mode = mode;

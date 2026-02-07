@@ -355,15 +355,32 @@ function phoneLikelyMatches(expected, actual) {
         return true;
     return false;
 }
+function asStringValue(value) {
+    if (typeof value === "string")
+        return value;
+    if (value === undefined || value === null)
+        return undefined;
+    return String(value);
+}
+function asNumberValue(value) {
+    if (typeof value === "number" && Number.isFinite(value))
+        return value;
+    if (value === undefined || value === null)
+        return undefined;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+}
 function mapCbeSuccess(detail, transactionNumber) {
+    const reference = asStringValue(detail.reference) || transactionNumber;
+    const amount = asNumberValue(detail.amount);
     return {
         status: 200,
         body: {
             success: true,
             message: "Verified",
             provider: "cbe",
-            transactionNumber: detail.reference || transactionNumber,
-            amount: detail.amount,
+            transactionNumber: reference,
+            amount,
             currency: "ETB",
             status: "verified",
             raw: detail,
@@ -371,7 +388,9 @@ function mapCbeSuccess(detail, transactionNumber) {
     };
 }
 function mapCbeFailure(failure) {
-    switch (failure.type) {
+    const failureType = asStringValue(failure.type);
+    const failureMessage = asStringValue(failure.message);
+    switch (failureType) {
         case "INVALID_TRANSACTION_ID":
             return { status: 400, body: { success: false, message: "Invalid transaction id" } };
         case "INVALID_ACCOUNT_NO":
@@ -380,7 +399,7 @@ function mapCbeFailure(failure) {
             return { status: 404, body: { success: false, message: "Transaction not found" } };
         case "API_REQUEST_FAILED":
         default:
-            return { status: 502, body: { success: false, message: failure.message || "CBE verification failed" } };
+            return { status: 502, body: { success: false, message: failureMessage || "CBE verification failed" } };
     }
 }
 function sanitizeCbeAccountNumber(accountNumber) {

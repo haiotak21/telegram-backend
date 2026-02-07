@@ -44,6 +44,7 @@ const PricingConfigSchema = new mongoose_1.Schema({
     topupFlatFee: { type: Number, required: true, default: 0 },
     topupMin: { type: Number },
     topupMax: { type: Number },
+    cardRequestFeeEtb: { type: Number, default: 0 },
     updatedBy: { type: String },
 }, { timestamps: true });
 exports.PricingConfig = mongoose_1.default.models.PricingConfig || mongoose_1.default.model("PricingConfig", PricingConfigSchema);

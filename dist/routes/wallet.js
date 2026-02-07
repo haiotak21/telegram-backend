@@ -14,6 +14,7 @@ const botService_1 = require("../services/botService");
 const TelegramLink_1 = require("../models/TelegramLink");
 const Transaction_1 = __importDefault(require("../models/Transaction"));
 const RuntimeConfig_1 = __importDefault(require("../models/RuntimeConfig"));
+const RuntimeAudit_1 = __importDefault(require("../models/RuntimeAudit"));
 const router = express_1.default.Router();
 const AmountEtbSchema = zod_1.z.object({ amountEtb: zod_1.z.number().positive() });
 const AmountUsdtSchema = zod_1.z.object({ amountUsdt: zod_1.z.number().positive() });
@@ -26,6 +27,7 @@ const PricingSchema = zod_1.z.object({
     topupFlatFee: zod_1.z.number().min(0),
     topupMin: zod_1.z.number().min(0).optional(),
     topupMax: zod_1.z.number().min(0).optional(),
+    cardRequestFeeEtb: zod_1.z.number().min(0).optional(),
     updatedBy: zod_1.z.string().optional(),
 });
 const TopupSchema = zod_1.z.object({
@@ -64,14 +66,54 @@ router.get("/fake-topup", requireAdmin, async (_req, res) => {
 });
 router.put("/fake-topup", requireAdmin, async (req, res) => {
     try {
-        const body = req.body || {};
-        if (typeof body.value !== "boolean")
-            return res.status(400).json({ success: false, message: "Value must be boolean" });
-        const doc = (await RuntimeConfig_1.default.findOneAndUpdate({ key: "FAKE_TOPUP" }, { value: body.value }, { upsert: true, new: true }).lean());
+        let body = req.body || {};
+        // Some clients (PowerShell variants) may send the JSON as a raw string
+        if (typeof body === "string") {
+            try {
+                body = JSON.parse(body);
+            }
+            catch (_) {
+                // leave as-is; validation below will catch non-boolean
+            }
+        }
+        let value = body.value;
+        if (typeof value === "string") {
+            const v = value.toLowerCase().trim();
+            if (v === "true" || v === "1")
+                value = true;
+            else if (v === "false" || v === "0")
+                value = false;
+        }
+        else if (typeof value === "number") {
+            value = value === 1 ? true : value === 0 ? false : value;
+        }
+        if (typeof value !== "boolean") {
+            console.warn("/fake-topup: invalid value", { rawBody: req.body, body, typeofValue: typeof body.value, parsedValue: value });
+            return res.status(400).json({ success: false, message: "Value must be boolean", received: { rawBody: req.body, body, typeofValue: typeof body.value, parsedValue: value } });
+        }
+        const before = (await RuntimeConfig_1.default.findOne({ key: "FAKE_TOPUP" }).lean());
+        const doc = (await RuntimeConfig_1.default.findOneAndUpdate({ key: "FAKE_TOPUP" }, { value }, { upsert: true, new: true }).lean());
+        // record audit
+        try {
+            await RuntimeAudit_1.default.create({ key: "FAKE_TOPUP", oldValue: before?.value, newValue: !!doc.value, changedBy: req.headers["x-admin-token"] });
+        }
+        catch (e) {
+            console.warn("Failed to write runtime audit", e);
+        }
         res.json({ success: true, value: !!doc.value });
     }
     catch (err) {
         res.status(500).json({ success: false, message: err?.message || "Failed to update config" });
+    }
+});
+// Admin: list runtime audits
+router.get("/audit", requireAdmin, async (_req, res) => {
+    try {
+        const items = await RuntimeAudit_1.default.find().sort({ createdAt: -1 }).limit(200).lean();
+        res.json({ success: true, items });
+    }
+    catch (e) {
+        res.status(500).json({ success: false, message: e?.message || 'Failed to load audits' });
     }
 });
 // Helper to resolve FAKE_TOPUP at runtime
@@ -229,6 +271,76 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
     catch (err) {
         const status = err?.status || 400;
         const message = err?.errors?.[0]?.message || err?.message || "Failed to update transaction";
+        res.status(status).json({ success: false, message });
+    }
+});
+// Admin: reset all existing users to start fresh (zero balances, unlink cards, archive transactions)
+router.post("/reset-users", requireAdmin, async (req, res) => {
+    const session = await mongoose_1.default.startSession();
+    session.startTransaction();
+    try {
+        const body = (req.body || {});
+        const removeTransactions = !!body.removeTransactions;
+        // Zero all user balances
+        const usersResult = await User_1.default.updateMany({}, { $set: { balance: 0, currency: "USDT" } }, { session });
+        // Unlink cardIds for all TelegramLink records
+        const linksResult = await TelegramLink_1.TelegramLink.updateMany({}, { $set: { cardIds: [] } }, { session });
+        // Archive transactions by marking them cancelled and adding metadata
+        const archiveUpdate = { $set: { status: "cancelled" }, $setOnInsert: {} };
+        const now = new Date();
+        // Add metadata flag for auditing
+        const txs = await Transaction_1.default.updateMany({ status: { $ne: "cancelled" } }, { $set: { status: "cancelled", metadata: { ...(req.body?.metadata || {}), archivedBy: "admin_reset", archivedAt: now } } }, { session });
+        if (removeTransactions) {
+            // optionally remove transactions entirely (destructive)
+            await Transaction_1.default.deleteMany({}, { session });
+        }
+        // Record runtime audit entry
+        const getModifiedCount = (result) => {
+            if (!result)
+                return null;
+            if (typeof result.modifiedCount === "number")
+                return result.modifiedCount;
+            return result.nModified ?? null;
+        };
+        try {
+            await RuntimeAudit_1.default.create([
+                {
+                    key: "reset_users",
+                    oldValue: null,
+                    newValue: {
+                        usersZeroed: getModifiedCount(usersResult),
+                        linksCleared: getModifiedCount(linksResult),
+                        transactionsArchived: getModifiedCount(txs),
+                        removedTransactions: removeTransactions,
+                    },
+                    changedBy: req.headers["x-admin-token"],
+                    reason: "Admin requested reset of all user accounts to migrate to new system",
+                },
+            ], { session });
+        }
+        catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            console.warn("Failed to write runtime audit for reset-users", message);
+        }
+        await session.commitTransaction();
+        session.endSession();
+        res.json({
+            success: true,
+            message: "All users reset. Existing balances cleared and links unlinked.",
+            usersZeroed: getModifiedCount(usersResult),
+            linksCleared: getModifiedCount(linksResult),
+            transactionsArchived: getModifiedCount(txs),
+            removedTransactions: removeTransactions,
+        });
+    }
+    catch (err) {
+        try {
+            await session.abortTransaction();
+        }
+        catch { }
+        session.endSession();
+        const status = err?.status || 500;
+        const message = err?.message || "Failed to reset users";
         res.status(status).json({ success: false, message });
     }
 });

@@ -150,6 +150,28 @@ const TransactionQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 
+router.get("/stats", requireAdmin, async (_req, res) => {
+  try {
+    const [usersTotal, kycApproved, cardHolders, transactionsTotal] = await Promise.all([
+      User.countDocuments({}),
+      User.countDocuments({ kycStatus: "approved" }),
+      Card.distinct("userId", { cardId: { $exists: true, $ne: "" } }).then((ids) => ids.length),
+      Transaction.countDocuments({}),
+    ]);
+
+    res.json({
+      success: true,
+      usersTotal,
+      kycApproved,
+      cardHolders,
+      transactionsTotal,
+    });
+  } catch (e) {
+    const { status, body } = normalizeError(e);
+    res.status(status).json(body);
+  }
+});
+
 router.get("/users", requireAdmin, async (req, res) => {
   try {
     const { search, limit } = SearchSchema.parse(req.query || {});

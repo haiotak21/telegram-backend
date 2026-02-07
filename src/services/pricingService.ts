@@ -34,6 +34,7 @@ export async function loadPricingConfig(): Promise<IPricingConfig> {
     depositFlatFee: 0,
     topupPercentFee: 0,
     topupFlatFee: 0,
+    cardRequestFeeEtb: 0,
   });
   return created;
 }

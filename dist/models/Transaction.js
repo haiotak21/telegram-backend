@@ -37,8 +37,8 @@ exports.Transaction = void 0;
 const mongoose_1 = __importStar(require("mongoose"));
 const TransactionSchema = new mongoose_1.Schema({
     userId: { type: String, required: true, index: true },
-    transactionType: { type: String, enum: ["deposit", "withdrawal", "manual_deposit", "system", "verification"], required: true, default: "deposit" },
-    paymentMethod: { type: String, enum: ["telebirr", "cbe", "system"], required: true },
+    transactionType: { type: String, enum: ["deposit", "withdrawal", "manual_deposit", "system", "verification", "card"], required: true, default: "deposit" },
+    paymentMethod: { type: String, enum: ["telebirr", "cbe", "system", "strowallet"], required: true },
     amount: { type: Number, required: true },
     currency: { type: String },
     amountEtb: { type: Number },

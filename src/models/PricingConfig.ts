@@ -9,6 +9,7 @@ export interface IPricingConfig extends Document {
   topupFlatFee: number; // USDT flat fee per top-up
   topupMin?: number; // Minimum top-up amount in USDT
   topupMax?: number; // Maximum top-up amount in USDT
+  cardRequestFeeEtb?: number; // flat fee in ETB for card requests
   updatedBy?: string;
   createdAt: Date;
   updatedAt: Date;
@@ -24,6 +25,7 @@ const PricingConfigSchema = new Schema<IPricingConfig>(
     topupFlatFee: { type: Number, required: true, default: 0 },
     topupMin: { type: Number },
     topupMax: { type: Number },
+    cardRequestFeeEtb: { type: Number, default: 0 },
     updatedBy: { type: String },
   },
   { timestamps: true }

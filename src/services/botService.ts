@@ -12,13 +12,15 @@ import { verifyPayment } from "./paymentVerification";
 import Transaction from "../models/Transaction";
 import User from "../models/User";
 import type { PaymentMethod } from "./paymentVerification";
+import { loadPricingConfig } from "./pricingService";
 
 let bot: TelegramBot | null = null;
 type PendingAction =
   | { type: "email" }
   | { type: "card" }
   | { type: "verify"; method: PaymentMethod }
-  | { type: "deposit_amount"; method: PaymentMethod };
+  | { type: "deposit_amount"; method: PaymentMethod }
+  | { type: "card_request_verify"; method: PaymentMethod };
 const pendingActions = new Map<number, PendingAction>();
 
 type KycIdType = "NIN" | "PASSPORT" | "DRIVING_LICENSE";
@@ -124,9 +126,11 @@ const DEPOSIT_ACCOUNTS: Record<PaymentMethod, { title: string; account: string; 
   cbe: { title: "CBE Deposit", account: "1000473027449", name: "Hailemariam Takele Mekonnen", typeLabel: "CBE" },
   telebirr: { title: "Telebirr Deposit", account: "0985656670", name: "Hayilemariyam Takele Mekonen", typeLabel: "Telebirr" },
 };
+const CARD_REQUEST_BASE_AMOUNT_ETB = Number(process.env.CARD_REQUEST_BASE_AMOUNT_ETB || 3);
 
 // Tracks the last amount a user selected per payment method so we can validate against receipt
 const depositSelections = new Map<number, { method: PaymentMethod; amount: number }>();
+const cardRequestSelections = new Map<number, { amountEtb: number; feeEtb: number; totalEtb: number }>();
 
 const MENU_BUTTON: InlineKeyboardButton = { text: "📋 Menu", callback_data: "MENU" };
 const MENU_KEYBOARD: InlineKeyboardButton[][] = [
@@ -150,6 +154,9 @@ const MENU_KEYBOARD: InlineKeyboardButton[][] = [
 ];
 
 export function initBot() {
+  if (bot) {
+    return;
+  }
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
     console.warn("TELEGRAM_BOT_TOKEN not set; bot disabled");
@@ -167,6 +174,7 @@ export function initBot() {
     { command: "kyc_edit", description: "Edit and resubmit KYC" },
     { command: "card_request", description: "Request a virtual card" },
     { command: "create_card", description: "Request a virtual card" },
+    { command: "requestcard", description: "Request a virtual card" },
     { command: "mycard", description: "View your card details" },
     { command: "cardstatus", description: "View your card status" },
     { command: "transactions", description: "View card transactions" },
@@ -206,7 +214,7 @@ export function initBot() {
   bot.onText(/^\/help$/i, async (msg: any) => {
     await bot!.sendMessage(
       msg.chat.id,
-      "Commands:\n/kyc\n/kyc_status\n/kyc_edit\n/card_request\n/create_card\n/mycard\n/cardstatus\n/transactions\n/freeze\n/unfreeze\n/linkemail your@example.com\n/linkcard CARD_ID\n/unlink (remove all links)\n/status\n/verify\n/deposit"
+      "Commands:\n/kyc\n/kyc_status\n/kyc_edit\n/card_request\n/create_card\n/requestcard\n/mycard\n/cardstatus\n/transactions\n/freeze\n/unfreeze\n/linkemail your@example.com\n/linkcard CARD_ID\n/unlink (remove all links)\n/status\n/verify\n/deposit"
     );
   });
 
@@ -247,6 +255,11 @@ export function initBot() {
   });
 
   bot.onText(/^\/create_card$/i, async (msg: any) => {
+    const chatId = msg.chat.id;
+    await handleCardRequest(chatId, msg);
+  });
+
+  bot.onText(/^\/requestcard$/i, async (msg: any) => {
     const chatId = msg.chat.id;
     await handleCardRequest(chatId, msg);
   });
@@ -384,6 +397,7 @@ export function initBot() {
 
   bot.onText(/^\/cancel$/i, async (msg: any) => {
     pendingActions.delete(msg.chat.id);
+    cardRequestSelections.delete(msg.chat.id);
     kycSessions.delete(msg.chat.id);
     createCardSessions.delete(msg.chat.id);
     await bot!.sendMessage(msg.chat.id, "Cancelled pending action.");
@@ -553,6 +567,36 @@ export function initBot() {
       if (method !== "telebirr" && method !== "cbe") return;
       await bot!.answerCallbackQuery(query.id).catch(() => {});
       await startVerificationFlow(chatId, method);
+      return;
+    }
+
+    if (action.startsWith("CARDPAY_METHOD::")) {
+      const method = action.replace("CARDPAY_METHOD::", "") as PaymentMethod;
+      if (method !== "telebirr" && method !== "cbe") return;
+      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      const selection = cardRequestSelections.get(chatId);
+      if (!selection) {
+        await bot!.sendMessage(chatId, "Card request payment session expired. Please request a card again.", {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+      }
+      pendingActions.set(chatId, { type: "card_request_verify", method });
+      const meta = DEPOSIT_ACCOUNTS[method];
+      const lines = [
+        "💳 Card request payment",
+        `Base amount: ${selection.amountEtb} ETB`,
+        `Fee: ${selection.feeEtb} ETB`,
+        `Total to pay: ${selection.totalEtb} ETB`,
+        `${meta.typeLabel} account: ${meta.account}`,
+        `Name: ${meta.name}`,
+        "",
+        "After paying, send your receipt reference:",
+        buildVerificationHint(method),
+      ];
+      await bot!.sendMessage(chatId, lines.join("\n"), {
+        reply_markup: { force_reply: true },
+      });
       return;
     }
 
@@ -747,6 +791,146 @@ export function initBot() {
         }
       } catch (e: any) {
         await bot!.sendMessage(msg.chat.id, `❌ Verification error: ${e?.message || "Unexpected error"}`, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+      } finally {
+        pendingActions.delete(msg.chat.id);
+      }
+    } else if (pending.type === "card_request_verify") {
+      const method = pending.method;
+      if (!text) {
+        return bot!.sendMessage(msg.chat.id, "Transaction number cannot be empty. Try again or /cancel.");
+      }
+      let txn = text;
+      try {
+        if (/^https?:\/\//i.test(text)) {
+          const u = new URL(text);
+          const id = u.searchParams.get("id");
+          if (id) {
+            txn = id;
+          } else {
+            const parts = u.pathname.split("/").filter(Boolean);
+            if (parts.length) txn = parts[parts.length - 1];
+          }
+        }
+      } catch {}
+
+      const normalizedTxn = normalizeTxnRef(txn, pending.method);
+      try {
+        const already = await Transaction.findOne({
+          transactionType: "card",
+          userId: String(msg.chat.id),
+          paymentMethod: method,
+          status: "completed",
+          $or: [{ transactionNumber: normalizedTxn }, { referenceNumber: normalizedTxn }],
+        }).lean();
+        if (already) {
+          await bot!.sendMessage(msg.chat.id, "ℹ️ You already verified this transaction.", {
+            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+          });
+          pendingActions.delete(msg.chat.id);
+          return;
+        }
+
+        const result = await verifyPayment({ paymentMethod: method, transactionNumber: normalizedTxn });
+        const b = result.body as any;
+        if (b?.success) {
+          const selection = cardRequestSelections.get(msg.chat.id);
+          if (!selection) {
+            await bot!.sendMessage(msg.chat.id, "Card request payment session expired. Please request a card again.", {
+              reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
+            pendingActions.delete(msg.chat.id);
+            return;
+          }
+          const validationErrors = validateVerificationResult({
+            method,
+            body: b,
+            selected: { method, amount: selection.totalEtb },
+          });
+          if (validationErrors.length) {
+            const notice = [
+              "❌ Verification failed due to:",
+              ...validationErrors.map((v) => `- ${v}`),
+              "Please check your receipt and try again.",
+            ].join("\n");
+            await bot!.sendMessage(msg.chat.id, notice, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+            pendingActions.delete(msg.chat.id);
+            return;
+          }
+
+          const rawData = (b.raw?.data ?? b.raw ?? {}) as any;
+          const verifiedKey = normalizeTxnRef(String(b.transactionNumber || normalizedTxn), method);
+          const altKey = normalizeTxnRef(String(rawData?.reference || normalizedTxn), method);
+
+          try {
+            await Transaction.create({
+              userId: String(msg.chat.id),
+              transactionType: "card",
+              paymentMethod: method,
+              amount: selection.totalEtb,
+              amountEtb: selection.totalEtb,
+              feeEtb: selection.feeEtb,
+              status: "completed",
+              transactionNumber: verifiedKey,
+              referenceNumber: altKey,
+              responseData: b.raw ?? b,
+              metadata: {
+                kind: "card_request",
+                baseAmountEtb: selection.amountEtb,
+                feeEtb: selection.feeEtb,
+                totalEtb: selection.totalEtb,
+              },
+            });
+          } catch (createErr: any) {
+            if (createErr?.code !== 11000) {
+              await bot!.sendMessage(msg.chat.id, `❌ Verification error: ${createErr?.message || "Unexpected error"}`, {
+                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+              });
+              pendingActions.delete(msg.chat.id);
+              return;
+            }
+          }
+
+          const user = await User.findOne({ userId: String(msg.chat.id) }).lean();
+          if (!user || user.kycStatus !== "approved") {
+            await bot!.sendMessage(msg.chat.id, "❌ KYC is not approved. Please complete KYC before requesting a card.", {
+              reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
+            pendingActions.delete(msg.chat.id);
+            return;
+          }
+
+          const activeCard = await Card.findOne({ userId: String(msg.chat.id), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
+          if (activeCard) {
+            await bot!.sendMessage(msg.chat.id, "❌ You already have a card. Multiple cards are not allowed.", {
+              reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
+            pendingActions.delete(msg.chat.id);
+            return;
+          }
+
+          const pendingRequest = await CardRequest.findOne({ userId: String(msg.chat.id), status: "pending" }).lean();
+          if (pendingRequest) {
+            await bot!.sendMessage(msg.chat.id, "⏳ Your card request is already pending review.", {
+              reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
+            pendingActions.delete(msg.chat.id);
+            return;
+          }
+
+          await bot!.sendMessage(msg.chat.id, "✅ Payment verified. Submitting your card request...", {
+            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+          });
+          cardRequestSelections.delete(msg.chat.id);
+          await submitCardRequest(String(msg.chat.id), user, undefined, selection.amountEtb);
+        } else {
+          await bot!.sendMessage(msg.chat.id, `❌ Verification failed: ${b?.message || "Unknown error"}`, {
+            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+          });
+        }
+      } catch (e: any) {
+        await bot!.sendMessage(msg.chat.id, `❌ Verification error: ${e?.message || "Unexpected error"}`, {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
       } finally {
         pendingActions.delete(msg.chat.id);
       }
@@ -1134,6 +1318,21 @@ function buildDepositMethodKeyboard(): InlineKeyboardButton[][] {
   ];
 }
 
+function buildCardRequestMethodKeyboard(): InlineKeyboardButton[][] {
+  return [
+    [
+      { text: "Telebirr", callback_data: "CARDPAY_METHOD::telebirr" },
+      { text: "CBE", callback_data: "CARDPAY_METHOD::cbe" },
+    ],
+    [MENU_BUTTON],
+  ];
+}
+
+function getCardRequestBaseAmount() {
+  const base = Number.isFinite(CARD_REQUEST_BASE_AMOUNT_ETB) ? CARD_REQUEST_BASE_AMOUNT_ETB : 3;
+  return base >= 3 ? base : 3;
+}
+
 async function sendDepositAmountSelect(chatId: number, method: PaymentMethod) {
   const methodLabel = method === "cbe" ? "CBE" : "Telebirr";
   const buttons: InlineKeyboardButton[] = DEPOSIT_AMOUNTS.map((amt) => ({ text: `${amt} ETB`, callback_data: `DEPOSIT_AMOUNT::${method}::${amt}` }));
@@ -1231,20 +1430,55 @@ async function handleCardRequest(chatId: number, message?: any) {
     return;
   }
 
-  const nameOnCard = [user.firstName, user.lastName].filter(Boolean).join(" ") || message?.from?.first_name || "StroWallet User";
-  await CardRequest.create({
-    userId,
-    nameOnCard,
-    cardType: "visa",
-    amount: "3",
-    customerEmail: user.customerEmail,
-    status: "pending",
-    mode: normalizeMode(getDefaultMode()),
-  });
+  const baseAmount = getCardRequestBaseAmount();
+  const config = await loadPricingConfig();
+  const feeEtb = Math.max(0, Number(config.cardRequestFeeEtb ?? 0));
+  const totalEtb = baseAmount + feeEtb;
 
-  await bot!.sendMessage(chatId, "✅ Your card request has been submitted for review.", {
-    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-  });
+  if (feeEtb > 0) {
+    cardRequestSelections.set(chatId, { amountEtb: baseAmount, feeEtb, totalEtb });
+    const lines = [
+      "💳 Card request fee required.",
+      `Base amount: ${baseAmount} ETB`,
+      `Fee: ${feeEtb} ETB`,
+      `Total to pay: ${totalEtb} ETB`,
+      "Choose a payment method:",
+    ];
+    await bot!.sendMessage(chatId, lines.join("\n"), {
+      reply_markup: { inline_keyboard: buildCardRequestMethodKeyboard() },
+    });
+    return;
+  }
+
+  await submitCardRequest(String(chatId), user, message, baseAmount);
+}
+
+async function submitCardRequest(userId: string, user: any, message?: any, baseAmount?: number) {
+  const nameOnCard = [user.firstName, user.lastName].filter(Boolean).join(" ") || message?.from?.first_name || "StroWallet User";
+  const amount = baseAmount != null ? String(baseAmount) : String(getCardRequestBaseAmount());
+  try {
+    const resp = await axios.post(`${BACKEND_BASE}/api/card-requests`, {
+      userId,
+      nameOnCard,
+      cardType: "visa",
+      amount,
+      customerEmail: user.customerEmail,
+    });
+    if (resp?.data?.success) {
+      await bot!.sendMessage(Number(userId), "✅ Your card request has been submitted to StroWallet. You'll be notified once approved.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+    } else {
+      await bot!.sendMessage(Number(userId), "❌ Your card request could not be approved.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+    }
+  } catch (e: any) {
+    const messageText = e?.response?.data?.message || "Your card request could not be approved.";
+    await bot!.sendMessage(Number(userId), `❌ ${messageText}`, {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+  }
 }
 
 async function startCreateCardFlow(chatId: number, message?: any) {
@@ -1965,36 +2199,22 @@ async function submitKyc(chatId: number, session: KycSession) {
       resp = await callStroWallet("create-user", "post", createPayload);
     }
 
-    const providerSuccess = resp?.success ?? resp?.data?.success;
-    if (providerSuccess === false) {
-      const providerMessage = resp?.message ?? resp?.data?.message ?? resp?.error ?? resp?.data?.error;
-      const msgText = typeof providerMessage === "string" ? providerMessage : JSON.stringify(providerMessage || "KYC rejected");
-      kycSessions.delete(chatId);
-      await bot!.sendMessage(chatId, `❌ KYC rejected by provider: ${msgText}`, {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
-    }
-
     let customerId = extractCustomerId(resp);
-    if (!customerId && data.customerEmail) {
-      const delays = [1000, 2000, 3000];
-      for (const delay of delays) {
-        try {
-          await sleep(delay);
+    if (!customerId && session.mode === "create") {
+      try {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          await sleep(1200);
           const lookup = await callStroWallet(
             "getcardholder",
             "get",
             { customerEmail: data.customerEmail },
             { silentOnStatus: [404] }
           );
-          if ((lookup as any)?.ok !== false) {
-            customerId = extractCustomerId(lookup);
-            if (customerId) break;
-          }
-        } catch (e) {
-          console.warn("[bot] KYC customerId lookup failed", e);
+          customerId = extractCustomerId(lookup);
+          if (customerId) break;
         }
+      } catch (e) {
+        console.warn("[bot] KYC customerId lookup failed", e);
       }
     }
     if (!customerId && session.mode === "create") {
@@ -2239,16 +2459,18 @@ async function getPrimaryCardForUser(userId: string) {
 async function sendMyCardSummary(chatId: number) {
   const card = await getPrimaryCardForUser(String(chatId));
   if (!card) {
-    await bot!.sendMessage(chatId, "❌ No cards linked yet.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+    await bot!.sendMessage(chatId, "❌ No cards linked yet. Use /linkcard CARD_ID to link one.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
     return;
   }
   const status = card.status ? String(card.status) : "unknown";
   const balanceValue = card.balance != null ? String(card.balance) : "-";
   const currency = card.currency ? ` ${card.currency}` : "";
   const last4 = card.last4 ? `••••${card.last4}` : "(not available)";
+  const cardType = card.cardType ? String(card.cardType) : "-";
 
   const lines = [
     "💳 Your Card",
+    `Type: ${cardType}`,
     `Status: ${status}`,
     `Last 4 Digits: ${last4}`,
     `Balance: ${balanceValue}${currency}`,

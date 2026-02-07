@@ -24,6 +24,7 @@ const PricingSchema = z.object({
   topupFlatFee: z.number().min(0),
   topupMin: z.number().min(0).optional(),
   topupMax: z.number().min(0).optional(),
+  cardRequestFeeEtb: z.number().min(0).optional(),
   updatedBy: z.string().optional(),
 });
 
