@@ -1243,13 +1243,13 @@ async function handleMenuSelection(action, chatId, message) {
         case "MENU_CREATE_CARD":
             return handleCardRequest(chatId, message);
         case "MENU_MY_CARDS":
-            return sendMyCards(chatId);
+            return sendMyCards(chatId, message);
         case "MENU_USER_INFO":
-            return sendUserInfo(chatId);
+            return sendUserInfo(chatId, message);
         case "MENU_DEPOSIT":
             return sendDepositInfo(chatId, message);
         case "MENU_WALLET":
-            return sendWalletSummary(chatId);
+            return sendWalletSummary(chatId, message);
         case "MENU_INVITE":
             return bot.sendMessage(chatId, "Invite friends and earn rewards: share your referral link from the app.", {
                 reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -2228,7 +2228,9 @@ function normalizeKycStatus(value) {
         return "declined";
     return undefined;
 }
-async function sendUserInfo(chatId) {
+async function sendUserInfo(chatId, message) {
+    if (shouldSuppressOutgoing(chatId, "user_info"))
+        return;
     const [link, user, cards] = await Promise.all([
         TelegramLink_1.TelegramLink.findOne({ chatId }).lean(),
         User_1.default.findOne({ userId: String(chatId) }).lean(),
@@ -2251,16 +2253,14 @@ async function sendUserInfo(chatId) {
         cardList.length ? cardList.join("\n") : undefined,
         !cardsList.length ? "Tip: Request a card from admin to get started." : undefined,
     ].filter(Boolean);
-    await bot.sendMessage(chatId, lines.join("\n"), {
-        reply_markup: {
-            inline_keyboard: [
-                [
-                    { text: "💼 Wallet", callback_data: "MENU_WALLET" },
-                    { text: "💳 My Cards", callback_data: "MENU_MY_CARDS" },
-                ],
-                [MENU_BUTTON],
+    await editOrSend(chatId, message, lines.join("\n"), {
+        inline_keyboard: [
+            [
+                { text: "💼 Wallet", callback_data: "MENU_WALLET" },
+                { text: "💳 My Cards", callback_data: "MENU_MY_CARDS" },
             ],
-        },
+            [MENU_BUTTON],
+        ],
     });
 }
 function chunk(items, size) {
@@ -2270,7 +2270,9 @@ function chunk(items, size) {
     }
     return rows;
 }
-async function sendWalletSummary(chatId) {
+async function sendWalletSummary(chatId, message) {
+    if (shouldSuppressOutgoing(chatId, "wallet_summary"))
+        return;
     const [link, user, cards] = await Promise.all([
         TelegramLink_1.TelegramLink.findOne({ chatId }).lean(),
         User_1.default.findOne({ userId: String(chatId) }).lean(),
@@ -2280,7 +2282,7 @@ async function sendWalletSummary(chatId) {
     const walletBalance = user?.balance ?? 0;
     if (!cardId) {
         const lines = ["💼 Wallet", `Balance: ${walletBalance} USD`, "No card yet. Request a card to get started."];
-        await bot.sendMessage(chatId, lines.join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+        await editOrSend(chatId, message, lines.join("\n"), { inline_keyboard: [[MENU_BUTTON]] });
         return;
     }
     // Prefer local synthetic detail if available
@@ -2294,8 +2296,8 @@ async function sendWalletSummary(chatId) {
             local.cardNumber ? `Number: ${local.cardNumber}` : undefined,
             local.cvc ? `CVC: ${local.cvc}` : undefined,
         ].filter(Boolean);
-        await bot.sendMessage(chatId, lines.join("\n"), {
-            reply_markup: { inline_keyboard: [[{ text: "🔍 My Cards", callback_data: "MENU_MY_CARDS" }], [MENU_BUTTON]] },
+        await editOrSend(chatId, message, lines.join("\n"), {
+            inline_keyboard: [[{ text: "🔍 My Cards", callback_data: "MENU_MY_CARDS" }], [MENU_BUTTON]],
         });
         return;
     }
@@ -2311,27 +2313,31 @@ async function sendWalletSummary(chatId) {
             detail?.card_number ? `Number: ${detail.card_number}` : undefined,
             detail?.cvc ? `CVC: ${detail.cvc}` : undefined,
         ].filter(Boolean);
-        await bot.sendMessage(chatId, lines.join("\n"), {
-            reply_markup: { inline_keyboard: [[{ text: "🔍 My Cards", callback_data: "MENU_MY_CARDS" }], [MENU_BUTTON]] },
+        await editOrSend(chatId, message, lines.join("\n"), {
+            inline_keyboard: [[{ text: "🔍 My Cards", callback_data: "MENU_MY_CARDS" }], [MENU_BUTTON]],
         });
     }
     catch (err) {
         await sendFriendlyError(chatId, err?.requestId);
     }
 }
-async function sendMyCards(chatId) {
+async function sendMyCards(chatId, message) {
     const cards = await Card_1.default.find({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
     const legacyLink = await TelegramLink_1.TelegramLink.findOne({ chatId }).lean();
     const cardIds = cards.length ? cards.map((c) => c.cardId) : legacyLink?.cardIds || [];
     if (!cardIds.length) {
-        await bot.sendMessage(chatId, "No card yet. Request a card to get started.", {
-            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        if (shouldSuppressOutgoing(chatId, "my_cards_empty"))
+            return;
+        await editOrSend(chatId, message, "No card yet. Request a card to get started.", {
+            inline_keyboard: [[MENU_BUTTON]],
         });
         return;
     }
-    await bot.sendMessage(chatId, `Fetching ${cardIds.length} card(s)...`, {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
+    if (!shouldSuppressOutgoing(chatId, "my_cards_fetch")) {
+        await editOrSend(chatId, message, `Fetching ${cardIds.length} card(s)...`, {
+            inline_keyboard: [[MENU_BUTTON]],
+        });
+    }
     for (const cardId of cardIds) {
         await sendCardDetail(chatId, cardId);
     }
