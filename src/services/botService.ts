@@ -133,6 +133,7 @@ const depositSelections = new Map<number, { method: PaymentMethod; amount: numbe
 const cardRequestSelections = new Map<number, { amountEtb: number; feeEtb: number; totalEtb: number }>();
 const recentCallbackActions = new Map<number, { action: string; at: number }>();
 const recentOutgoing = new Map<number, { key: string; at: number }>();
+const recentUpdates = new Map<string, number>();
 
 const MENU_BUTTON: InlineKeyboardButton = { text: "📋 Menu", callback_data: "MENU" };
 const MENU_KEYBOARD: InlineKeyboardButton[][] = [
@@ -420,6 +421,12 @@ export function initBot() {
     const action = query.data as string | undefined;
     if (!chatId || !action) return;
 
+    const callbackKey = query.id ? `cb:${query.id}` : `cb:${chatId}:${action}`;
+    if (isDuplicateUpdate(callbackKey, 20000)) {
+      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      return;
+    }
+
     const now = Date.now();
     const last = recentCallbackActions.get(chatId);
     if (last && last.action === action && now - last.at < 1500) {
@@ -624,6 +631,8 @@ export function initBot() {
 
   bot.on("message", async (msg: any) => {
     const chatId = msg.chat.id;
+    const messageKey = msg.message_id ? `msg:${chatId}:${msg.message_id}` : `msg:${chatId}:${Date.now()}`;
+    if (isDuplicateUpdate(messageKey, 20000)) return;
     const kyc = kycSessions.get(chatId);
     if (kyc) {
       await handleKycMessage(msg, kyc);
@@ -1092,6 +1101,19 @@ function shouldSuppressOutgoing(chatId: number, key: string, ttlMs = 1500) {
   const last = recentOutgoing.get(chatId);
   if (last && last.key === key && now - last.at < ttlMs) return true;
   recentOutgoing.set(chatId, { key, at: now });
+  return false;
+}
+
+function isDuplicateUpdate(key: string, ttlMs = 15000) {
+  const now = Date.now();
+  const last = recentUpdates.get(key);
+  if (last && now - last < ttlMs) return true;
+  recentUpdates.set(key, now);
+  if (recentUpdates.size > 2000) {
+    for (const [k, t] of recentUpdates.entries()) {
+      if (now - t > ttlMs) recentUpdates.delete(k);
+    }
+  }
   return false;
 }
 

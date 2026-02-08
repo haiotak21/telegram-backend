@@ -76,6 +76,7 @@ const depositSelections = new Map();
 const cardRequestSelections = new Map();
 const recentCallbackActions = new Map();
 const recentOutgoing = new Map();
+const recentUpdates = new Map();
 const MENU_BUTTON = { text: "📋 Menu", callback_data: "MENU" };
 const MENU_KEYBOARD = [
     [
@@ -323,6 +324,11 @@ function initBot() {
         const action = query.data;
         if (!chatId || !action)
             return;
+        const callbackKey = query.id ? `cb:${query.id}` : `cb:${chatId}:${action}`;
+        if (isDuplicateUpdate(callbackKey, 20000)) {
+            await bot.answerCallbackQuery(query.id).catch(() => { });
+            return;
+        }
         const now = Date.now();
         const last = recentCallbackActions.get(chatId);
         if (last && last.action === action && now - last.at < 1500) {
@@ -521,6 +527,9 @@ function initBot() {
     });
     bot.on("message", async (msg) => {
         const chatId = msg.chat.id;
+        const messageKey = msg.message_id ? `msg:${chatId}:${msg.message_id}` : `msg:${chatId}:${Date.now()}`;
+        if (isDuplicateUpdate(messageKey, 20000))
+            return;
         const kyc = kycSessions.get(chatId);
         if (kyc) {
             await handleKycMessage(msg, kyc);
@@ -982,6 +991,20 @@ function shouldSuppressOutgoing(chatId, key, ttlMs = 1500) {
     if (last && last.key === key && now - last.at < ttlMs)
         return true;
     recentOutgoing.set(chatId, { key, at: now });
+    return false;
+}
+function isDuplicateUpdate(key, ttlMs = 15000) {
+    const now = Date.now();
+    const last = recentUpdates.get(key);
+    if (last && now - last < ttlMs)
+        return true;
+    recentUpdates.set(key, now);
+    if (recentUpdates.size > 2000) {
+        for (const [k, t] of recentUpdates.entries()) {
+            if (now - t > ttlMs)
+                recentUpdates.delete(k);
+        }
+    }
     return false;
 }
 function buildProfileCard(msg, link, cardCount = 0) {
