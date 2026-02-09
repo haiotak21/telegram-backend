@@ -256,6 +256,11 @@ export async function initBot() {
 
   botRef.onText(/^\/start(?:@[\w_]+)?(?:\s+.*)?$/i, async (msg: any) => {
     const chatId = msg.chat.id;
+    console.log("Telegram /start received", {
+      chatId,
+      from: msg.from?.username || msg.from?.id,
+      text: msg.text,
+    });
     if (shouldSuppressOutgoing(chatId, "start", 10000)) return;
     if (shouldSkipCommand(msg, "start", 10000)) return;
     const [link, cardCount] = await Promise.all([
@@ -704,6 +709,11 @@ export async function initBot() {
 
   botRef.on("message", async (msg: any) => {
     const chatId = msg.chat.id;
+    console.log("Telegram message received", {
+      chatId,
+      from: msg.from?.username || msg.from?.id,
+      text: msg.text,
+    });
     const messageKey = msg.message_id ? `msg:${chatId}:${msg.message_id}` : `msg:${chatId}:${Date.now()}`;
     if (isDuplicateUpdate(messageKey, 20000)) return;
     const kyc = kycSessions.get(chatId);
