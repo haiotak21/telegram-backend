@@ -159,6 +159,19 @@ const MENU_KEYBOARD: InlineKeyboardButton[][] = [
 
 export function initBot() {
   console.log(`
+╔════════════════════════════════════════════════════════════════════╗
+║                    EMERGENCY BOT KILL SWITCH                       ║
+║               POLLING IS FORCED DISABLED RIGHT NOW                 ║
+║                                                                    ║
+║ If you see this message → bot is NOT polling                       ║
+║ If duplicates STOP after deploy → problem was polling             ║
+╚════════════════════════════════════════════════════════════════════╝
+  `);
+
+  // comment out or remove this return when we are ready to re-enable
+  return;
+
+  console.log(`
 ╔════════════════════════════════════════════╗
 ║ BOT INSTANCE STARTED                       ║
 ║ PID: ${process.pid}                        ║
