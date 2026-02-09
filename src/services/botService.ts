@@ -210,10 +210,8 @@ export function initBot() {
     console.warn("TELEGRAM_POLLING_ENABLED is false; bot polling disabled");
     return;
   }
-  const activeBot = new TelegramBot(activeToken, { polling: true });
-  bot = activeBot;
-  const botRef = activeBot;
-  const bot = botRef;
+  const botRef = new TelegramBot(activeToken, { polling: true });
+  bot = botRef;
   console.log("Telegram bot started");
 
   botRef.setMyCommands([
@@ -259,12 +257,12 @@ export function initBot() {
     });
   });
 
-  bot.onText(/^\/menu$/i, async (msg: any) => {
+  botRef.onText(/^\/menu$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "menu")) return;
     await sendMenu(msg.chat.id);
   });
 
-  bot.onText(/^\/help$/i, async (msg: any) => {
+  botRef.onText(/^\/help$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "help")) return;
     await bot!.sendMessage(
       msg.chat.id,
@@ -272,12 +270,12 @@ export function initBot() {
     );
   });
 
-  bot.onText(/^\/deposit$/i, async (msg: any) => {
+  botRef.onText(/^\/deposit$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "deposit")) return;
     await sendDepositInfo(msg.chat.id);
   });
 
-  bot.onText(/^\/verify$/i, async (msg: any) => {
+  botRef.onText(/^\/verify$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "verify")) return;
     const chatId = msg.chat.id;
     await bot!.sendMessage(chatId, "Choose payment method to verify:", {
@@ -293,7 +291,7 @@ export function initBot() {
     });
   });
 
-  bot.onText(/^\/kyc_status$/i, async (msg: any) => {
+  botRef.onText(/^\/kyc_status$/i, async (msg: any) => {
     const chatId = msg.chat.id;
     const user = await User.findOne({ userId: String(chatId) }).lean();
     if (!user) {
@@ -310,34 +308,34 @@ export function initBot() {
     });
   });
 
-  bot.onText(/^\/create_card$/i, async (msg: any) => {
+  botRef.onText(/^\/create_card$/i, async (msg: any) => {
     const chatId = msg.chat.id;
     await handleCardRequest(chatId, msg);
   });
 
-  bot.onText(/^\/requestcard$/i, async (msg: any) => {
+  botRef.onText(/^\/requestcard$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "requestcard")) return;
     const chatId = msg.chat.id;
     await handleCardRequest(chatId, msg);
   });
 
-  bot.onText(/^\/mycard(s)?$/i, async (msg: any) => {
+  botRef.onText(/^\/mycard(s)?$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "mycard")) return;
     return sendMyCardSummary(msg.chat.id);
   });
 
-  bot.onText(/^\/cardstatus$/i, async (msg: any) => {
+  botRef.onText(/^\/cardstatus$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "cardstatus")) return;
     return sendCardStatus(msg.chat.id);
   });
 
-  bot.onText(/^\/transactions$/i, async (msg: any) => {
+  botRef.onText(/^\/transactions$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "transactions")) return;
     const chatId = msg.chat.id;
     await sendCardTransactions(chatId);
   });
 
-  bot.onText(/^\/(freeze|unfreeze)$/i, async (msg: any, match?: RegExpExecArray | null) => {
+  botRef.onText(/^\/(freeze|unfreeze)$/i, async (msg: any, match?: RegExpExecArray | null) => {
     if (shouldSkipCommand(msg, "freeze_toggle")) return;
     const action = match?.[1] === "unfreeze" ? "unfreeze" : "freeze";
     const card = await getPrimaryCardForUser(String(msg.chat.id));
@@ -348,13 +346,13 @@ export function initBot() {
     await handleFreezeAction(msg.chat.id, card.cardId, action);
   });
 
-  bot.onText(/^\/card_request$/i, async (msg: any) => {
+  botRef.onText(/^\/card_request$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "card_request")) return;
     const chatId = msg.chat.id;
     await handleCardRequest(chatId, msg);
   });
 
-  bot.onText(/^\/kyc$/i, async (msg: any) => {
+  botRef.onText(/^\/kyc$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "kyc")) return;
     const chatId = msg.chat.id;
     const user = await User.findOne({ userId: String(chatId) }).lean();
@@ -387,7 +385,7 @@ export function initBot() {
     await startKycFlow(chatId, msg, "create");
   });
 
-  bot.onText(/^\/kyc_edit$/i, async (msg: any) => {
+  botRef.onText(/^\/kyc_edit$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "kyc_edit")) return;
     const chatId = msg.chat.id;
     const user = await User.findOne({ userId: String(chatId) }).lean();
@@ -410,7 +408,7 @@ export function initBot() {
     await startKycFlow(chatId, msg, "edit", user);
   });
 
-  bot.onText(/^\/linkemail(?:\s+([^\s]+))?$/i, async (msg: any, match?: RegExpExecArray | null) => {
+  botRef.onText(/^\/linkemail(?:\s+([^\s]+))?$/i, async (msg: any, match?: RegExpExecArray | null) => {
     if (shouldSkipCommand(msg, "linkemail")) return;
     const email = match?.[1];
     if (!email) {
@@ -427,7 +425,7 @@ export function initBot() {
     await bot!.sendMessage(msg.chat.id, `Linked email ${email}.`);
   });
 
-  bot.onText(/^\/linkcard(?:\s+([^\s]+))?$/i, async (msg: any, match?: RegExpExecArray | null) => {
+  botRef.onText(/^\/linkcard(?:\s+([^\s]+))?$/i, async (msg: any, match?: RegExpExecArray | null) => {
     if (shouldSkipCommand(msg, "linkcard")) return;
     const cardId = match?.[1];
     if (!cardId) {
@@ -444,13 +442,13 @@ export function initBot() {
     await bot!.sendMessage(msg.chat.id, `Linked card ${cardId}.`);
   });
 
-  bot.onText(/^\/unlink$/i, async (msg: any) => {
+  botRef.onText(/^\/unlink$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "unlink")) return;
     await TelegramLink.findOneAndUpdate({ chatId: msg.chat.id }, { $set: { customerEmail: undefined, cardIds: [] } }, { upsert: true });
     await bot!.sendMessage(msg.chat.id, "All links removed.");
   });
 
-  bot.onText(/^\/status$/i, async (msg: any) => {
+  botRef.onText(/^\/status$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "status")) return;
     const [link, cards] = await Promise.all([
       TelegramLink.findOne({ chatId: msg.chat.id }).lean(),
@@ -463,7 +461,7 @@ export function initBot() {
     );
   });
 
-  bot.onText(/^\/cancel$/i, async (msg: any) => {
+  botRef.onText(/^\/cancel$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "cancel")) return;
     pendingActions.delete(msg.chat.id);
     cardRequestSelections.delete(msg.chat.id);
@@ -472,7 +470,7 @@ export function initBot() {
     await bot!.sendMessage(msg.chat.id, "Cancelled pending action.");
   });
 
-  bot.on("callback_query", async (query: any) => {
+  botRef.on("callback_query", async (query: any) => {
     const chatId = query.message?.chat?.id;
     const action = query.data as string | undefined;
     if (!chatId || !action) return;
@@ -685,7 +683,7 @@ export function initBot() {
     await handleMenuSelection(action, chatId, query.message);
   });
 
-  bot.on("message", async (msg: any) => {
+  botRef.on("message", async (msg: any) => {
     const chatId = msg.chat.id;
     const messageKey = msg.message_id ? `msg:${chatId}:${msg.message_id}` : `msg:${chatId}:${Date.now()}`;
     if (isDuplicateUpdate(messageKey, 20000)) return;
