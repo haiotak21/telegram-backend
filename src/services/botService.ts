@@ -237,8 +237,9 @@ export function initBot() {
   ]).catch(() => {});
 
   botRef.onText(/^\/start$/i, async (msg: any) => {
-    if (shouldSkipCommand(msg, "start", 3000)) return;
     const chatId = msg.chat.id;
+    if (shouldSuppressOutgoing(chatId, "start", 10000)) return;
+    if (shouldSkipCommand(msg, "start", 10000)) return;
     const [link, cardCount] = await Promise.all([
       TelegramLink.findOne({ chatId }),
       Card.countDocuments({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }),
@@ -258,7 +259,7 @@ export function initBot() {
   });
 
   botRef.onText(/^\/menu$/i, async (msg: any) => {
-    if (shouldSkipCommand(msg, "menu")) return;
+    if (shouldSkipCommand(msg, "menu", 4000)) return;
     await sendMenu(msg.chat.id);
   });
 
