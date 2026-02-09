@@ -308,19 +308,6 @@
           <span id="tokenStatus" class="pill">Token: missing</span>
           <span class="pill">Env: <span id="envHost"></span></span>
           <span class="pill" id="configMeta">Config: loading...</span>
-          <span class="pill" id="fakeTopupStatus">Fake Top-up: ...</span>
-          <label
-            style="
-              margin-left: 12px;
-              display: flex;
-              align-items: center;
-              gap: 8px;
-              font-size: 13px;
-            "
-          >
-            <input type="checkbox" id="fakeTopupToggle" style="margin: 0" />
-            Enable Fake Top-up
-          </label>
         </div>
       </div>
       <div class="row">
@@ -848,8 +835,6 @@
         statsCards: document.getElementById("statsCards"),
         statsTx: document.getElementById("statsTx"),
         statsStatus: document.getElementById("statsStatus"),
-        fakeTopupToggle: document.getElementById("fakeTopupToggle"),
-        fakeTopupStatus: document.getElementById("fakeTopupStatus"),
         resetUsersBtn: document.getElementById("resetUsersBtn"),
         resetRemoveTx: document.getElementById("resetRemoveTx"),
         resetUsersStatus: document.getElementById("resetUsersStatus"),
@@ -900,11 +885,6 @@
           els.tokenStatus.className = "pill bad";
           stopLoops();
         }
-        // enable/disable fakeTopup toggle depending on token presence
-        try {
-          if (els.fakeTopupToggle)
-            els.fakeTopupToggle.disabled = !Boolean(token);
-        } catch (_) {}
       }
 
       function headers() {
@@ -2040,40 +2020,6 @@
         const stored = localStorage.getItem("adminToken");
         if (stored) els.adminToken.value = stored;
         updateTokenStatus();
-        // load fake topup runtime value
-        (async function loadFakeTopup() {
-          try {
-            if (!hasToken()) return;
-            const data = await safeFetch("/api/wallet/fake-topup");
-            els.fakeTopupToggle.checked = !!data.value;
-            els.fakeTopupStatus.textContent =
-              "Fake Top-up: " + (data.value ? "ON" : "OFF");
-          } catch (err) {
-            els.fakeTopupStatus.textContent = "Fake Top-up: error";
-          }
-        })();
-        els.fakeTopupToggle.addEventListener("change", async () => {
-          const value = !!els.fakeTopupToggle.checked;
-          try {
-            await safeFetch("/api/wallet/fake-topup", {
-              method: "PUT",
-              body: JSON.stringify({ value }),
-            });
-            els.fakeTopupStatus.textContent =
-              "Fake Top-up: " + (value ? "ON" : "OFF");
-            showToast(
-              "Fake Top-up " + (value ? "enabled" : "disabled"),
-              "success",
-            );
-          } catch (err) {
-            console.error("Fake topup update error", err);
-            const msg = err?.message || "Failed to update Fake Top-up";
-            const detail = err?.data || null;
-            els.fakeTopupStatus.textContent =
-              msg + (detail ? `: ${JSON.stringify(detail)}` : "");
-            showToast(msg, "error");
-          }
-        });
       }
 
       initEnv();

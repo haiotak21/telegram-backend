@@ -1,11 +1,11 @@
 import axios from "axios";
 import mongoose from "mongoose";
 import Transaction from "../models/Transaction";
-import User, { IUser } from "../models/User";
+import User from "../models/User";
 import { enforceTopupLimits, loadPricingConfig, quoteTopup } from "./pricingService";
-import { getFakeTopup } from "./runtimeConfigService";
 
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
+
 function getDefaultMode() {
   return process.env.STROWALLET_DEFAULT_MODE || (process.env.NODE_ENV !== "production" ? "sandbox" : undefined);
 }
@@ -41,9 +41,6 @@ export async function topUpCard(params: { userId: string; cardId: string; amount
     return { success: false, message: "Top-up amount must be greater than zero" };
   }
 
-  const runtimeFake = await getFakeTopup();
-  const fakeTopup = runtimeFake || String(process.env.FAKE_TOPUP || "true").toLowerCase() === "true" || mode === "fake";
-
   const pricing = await loadPricingConfig();
   enforceTopupLimits(amountUsdt, pricing);
   const quote = quoteTopup(amountUsdt, pricing);
@@ -71,7 +68,7 @@ export async function topUpCard(params: { userId: string; cardId: string; amount
           amountUsdt,
           feeUsdt: quote.feeUsdt,
           currency: "USDT",
-          status: fakeTopup ? "completed" : "pending",
+          status: "pending",
           transactionNumber: txnNumber,
           referenceNumber: txnNumber,
           metadata: { cardId, mode },
@@ -80,59 +77,40 @@ export async function topUpCard(params: { userId: string; cardId: string; amount
       { session }
     );
 
-    let updatedUser: IUser | null = user;
-
-    if (!fakeTopup) {
-      if (user.balance < quote.totalChargeUsdt) {
-        throw Object.assign(new Error("Insufficient balance"), { status: 400 });
-      }
-
-      updatedUser = await User.findOneAndUpdate(
-        { userId, balance: { $gte: quote.totalChargeUsdt } },
-        { $inc: { balance: -quote.totalChargeUsdt }, $setOnInsert: { currency: "USDT" } },
-        { new: true, upsert: false, session }
-      );
-
-      if (!updatedUser) {
-        throw Object.assign(new Error("Insufficient balance"), { status: 400 });
-      }
-
-      const providerResponse = await fundCard(cardId, amountUsdt, mode);
-
-      await Transaction.updateOne(
-        { _id: tx[0]._id },
-        { $set: { status: "completed", responseData: providerResponse, referenceNumber: providerResponse?.id || providerResponse?.ref } },
-        { session }
-      );
-
-      await session.commitTransaction();
-      session.endSession();
-
-      return {
-        success: true,
-        message: "Card topped up successfully",
-        transactionId: tx[0]._id,
-        chargedUsdt: quote.totalChargeUsdt,
-        topupAmountUsdt: amountUsdt,
-        feeUsdt: quote.feeUsdt,
-        newBalance: updatedUser!.balance,
-        providerResponse,
-      };
+    if (user.balance < quote.totalChargeUsdt) {
+      throw Object.assign(new Error("Insufficient balance"), { status: 400 });
     }
 
-    // Fake mode: do not check balance, do not call provider, do not deduct balance
+    const updatedUser = await User.findOneAndUpdate(
+      { userId, balance: { $gte: quote.totalChargeUsdt } },
+      { $inc: { balance: -quote.totalChargeUsdt }, $setOnInsert: { currency: "USDT" } },
+      { new: true, upsert: false, session }
+    );
+
+    if (!updatedUser) {
+      throw Object.assign(new Error("Insufficient balance"), { status: 400 });
+    }
+
+    const providerResponse = await fundCard(cardId, amountUsdt, mode);
+
+    await Transaction.updateOne(
+      { _id: tx[0]._id },
+      { $set: { status: "completed", responseData: providerResponse, referenceNumber: providerResponse?.id || providerResponse?.ref } },
+      { session }
+    );
+
     await session.commitTransaction();
     session.endSession();
 
     return {
       success: true,
-      message: "Card topped up (simulated)",
+      message: "Card topped up successfully",
       transactionId: tx[0]._id,
-      chargedUsdt: 0,
+      chargedUsdt: quote.totalChargeUsdt,
       topupAmountUsdt: amountUsdt,
-      feeUsdt: 0,
-      newBalance: updatedUser!.balance,
-      providerResponse: { ok: true, simulated: true },
+      feeUsdt: quote.feeUsdt,
+      newBalance: updatedUser.balance,
+      providerResponse,
     };
   } catch (err: any) {
     try {

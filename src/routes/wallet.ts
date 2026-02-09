@@ -7,7 +7,6 @@ import { topUpCard } from "../services/topupService";
 import { notifyDepositCredited } from "../services/botService";
 import { TelegramLink } from "../models/TelegramLink";
 import Transaction from "../models/Transaction";
-import RuntimeConfig from "../models/RuntimeConfig";
 import RuntimeAudit from "../models/RuntimeAudit";
 
 const router = express.Router();
@@ -53,57 +52,6 @@ function requireAdmin(req: express.Request, res: express.Response, next: express
   return res.status(401).json({ success: false, message: "Unauthorized" });
 }
 
-// --- Runtime Config endpoints for FAKE_TOPUP (admin only) ---
-router.get("/fake-topup", requireAdmin, async (_req, res) => {
-  try {
-    const doc = (await RuntimeConfig.findOne({ key: "FAKE_TOPUP" }).lean()) as any;
-    const value = doc ? !!doc.value : (process.env.FAKE_TOPUP === "true");
-    res.json({ success: true, value });
-  } catch (err: any) {
-    res.status(500).json({ success: false, message: err?.message || "Failed to read config" });
-  }
-});
-
-router.put("/fake-topup", requireAdmin, async (req, res) => {
-  try {
-    let body: any = req.body || {};
-    // Some clients (PowerShell variants) may send the JSON as a raw string
-    if (typeof body === "string") {
-      try {
-        body = JSON.parse(body);
-      } catch (_) {
-        // leave as-is; validation below will catch non-boolean
-      }
-    }
-    let value: any = body.value;
-    if (typeof value === "string") {
-      const v = value.toLowerCase().trim();
-      if (v === "true" || v === "1") value = true;
-      else if (v === "false" || v === "0") value = false;
-    } else if (typeof value === "number") {
-      value = value === 1 ? true : value === 0 ? false : value;
-    }
-
-    if (typeof value !== "boolean") {
-      console.warn("/fake-topup: invalid value", { rawBody: req.body, body, typeofValue: typeof body.value, parsedValue: value });
-      return res.status(400).json({ success: false, message: "Value must be boolean", received: { rawBody: req.body, body, typeofValue: typeof body.value, parsedValue: value } });
-    }
-
-    const before = (await RuntimeConfig.findOne({ key: "FAKE_TOPUP" }).lean()) as any;
-    const doc = (await RuntimeConfig.findOneAndUpdate({ key: "FAKE_TOPUP" }, { value }, { upsert: true, new: true }).lean()) as any;
-
-    // record audit
-    try {
-      await RuntimeAudit.create({ key: "FAKE_TOPUP", oldValue: before?.value, newValue: !!doc.value, changedBy: req.headers["x-admin-token"] as string | undefined });
-    } catch (e) {
-      console.warn("Failed to write runtime audit", e);
-    }
-
-    res.json({ success: true, value: !!doc.value });
-  } catch (err: any) {
-    res.status(500).json({ success: false, message: err?.message || "Failed to update config" });
-  }
-});
 
 // Admin: list runtime audits
 router.get("/audit", requireAdmin, async (_req, res) => {
@@ -114,13 +62,6 @@ router.get("/audit", requireAdmin, async (_req, res) => {
     res.status(500).json({ success: false, message: e?.message || 'Failed to load audits' });
   }
 });
-
-// Helper to resolve FAKE_TOPUP at runtime
-export async function isFakeTopupRuntime(): Promise<boolean> {
-  const doc = (await RuntimeConfig.findOne({ key: "FAKE_TOPUP" }).lean()) as any;
-  if (doc) return !!doc.value;
-  return process.env.FAKE_TOPUP === "true";
-}
 
 router.get("/config", requireAdmin, async (_req, res) => {
   const config = await loadPricingConfig();
