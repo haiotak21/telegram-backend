@@ -227,7 +227,7 @@ export async function initBot() {
   await (botRef as any).startPolling();
   bot = botRef;
   console.log("Telegram bot started");
-  botRef.getMe().then((me) => {
+  (botRef as any).getMe().then((me: any) => {
     console.log(`Telegram bot identity: @${me.username} (${me.id})`);
   }).catch(() => { });
   startBotLockHeartbeat(lockOwner, botRef, BOT_LOCK_TTL_MS);
