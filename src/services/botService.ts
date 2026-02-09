@@ -221,9 +221,15 @@ export async function initBot() {
 
   const botRef = new TelegramBot(activeToken, { polling: false });
   await (botRef as any).deleteWebHook({ drop_pending_updates: true }).catch(() => {});
+  botRef.on("polling_error", (err: any) => {
+    console.error("Telegram polling error:", err);
+  });
   await (botRef as any).startPolling();
   bot = botRef;
   console.log("Telegram bot started");
+  botRef.getMe().then((me) => {
+    console.log(`Telegram bot identity: @${me.username} (${me.id})`);
+  }).catch(() => { });
   startBotLockHeartbeat(lockOwner, botRef, BOT_LOCK_TTL_MS);
 
   botRef.setMyCommands([
@@ -248,7 +254,7 @@ export async function initBot() {
     { command: "verify", description: "Verify a payment transaction" },
   ]).catch(() => { });
 
-  botRef.onText(/^\/start$/i, async (msg: any) => {
+  botRef.onText(/^\/start(?:@[\w_]+)?(?:\s+.*)?$/i, async (msg: any) => {
     const chatId = msg.chat.id;
     if (shouldSuppressOutgoing(chatId, "start", 10000)) return;
     if (shouldSkipCommand(msg, "start", 10000)) return;
