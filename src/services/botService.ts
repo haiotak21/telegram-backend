@@ -1277,7 +1277,7 @@ function shouldSkipCommand(msg: any, key: string, ttlMs = 1500) {
   const chatId = msg?.chat?.id;
   const messageId = msg?.message_id;
   if (chatId != null && messageId != null) {
-    if (isDuplicateUpdate(`msg:${chatId}:${messageId}`)) return true;
+    if (isDuplicateUpdate(`cmdmsg:${chatId}:${messageId}`)) return true;
   }
   if (chatId != null && shouldSuppressOutgoing(chatId, `cmd:${key}`, ttlMs)) return true;
   return false;
