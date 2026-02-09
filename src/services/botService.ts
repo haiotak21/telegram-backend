@@ -1,4 +1,5 @@
 import TelegramBot, { InlineKeyboardButton } from "node-telegram-bot-api";
+import os from "os";
 import crypto from "crypto";
 import axios from "axios";
 import sharp from "sharp";
@@ -157,6 +158,26 @@ const MENU_KEYBOARD: InlineKeyboardButton[][] = [
 ];
 
 export function initBot() {
+  console.log(`
+╔════════════════════════════════════════════╗
+║ BOT INSTANCE STARTED                       ║
+║ PID: ${process.pid}                        ║
+║ Replica: ${process.env.RAILWAY_REPLICA_ID || process.env.REPLICA_ID || "none"}  ║
+║ Time: ${new Date().toISOString()}          ║
+╚════════════════════════════════════════════╝
+`);
+
+  console.log("Machine / container info:", {
+    hostname: os.hostname(),
+    platform: os.platform(),
+    arch: os.arch(),
+    cpus: os.cpus().length,
+    totalmem: Math.round(os.totalmem() / 1024 / 1024 / 1024) + " GB",
+    pid: process.pid,
+    replica: process.env.RAILWAY_REPLICA_ID || process.env.REPLICA_ID || "none",
+    railwayDeploymentId: process.env.RAILWAY_DEPLOYMENT_ID || "none",
+  });
+
   if (bot) {
     return;
   }
