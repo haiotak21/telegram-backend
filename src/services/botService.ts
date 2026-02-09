@@ -199,6 +199,7 @@ export function initBot() {
     console.warn("TELEGRAM_BOT_TOKEN not set; bot disabled");
     return;
   }
+  const activeToken: string = token;
   const pollingEnabled = String(process.env.TELEGRAM_POLLING_ENABLED ?? "true").toLowerCase() !== "false";
   const replicaId = process.env.RAILWAY_REPLICA_ID || process.env.REPLICA_ID;
   if (replicaId && replicaId !== "0") {
@@ -209,10 +210,13 @@ export function initBot() {
     console.warn("TELEGRAM_POLLING_ENABLED is false; bot polling disabled");
     return;
   }
-  bot = new TelegramBot(token, { polling: true });
+  const activeBot = new TelegramBot(activeToken, { polling: true });
+  bot = activeBot;
+  const botRef = activeBot;
+  const bot = botRef;
   console.log("Telegram bot started");
 
-  bot.setMyCommands([
+  botRef.setMyCommands([
     { command: "start", description: "Show welcome message" },
     { command: "menu", description: "Show main menu" },
     { command: "help", description: "Show available commands" },
@@ -234,7 +238,7 @@ export function initBot() {
     { command: "verify", description: "Verify a payment transaction" },
   ]).catch(() => {});
 
-  bot.onText(/^\/start$/i, async (msg: any) => {
+  botRef.onText(/^\/start$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "start", 3000)) return;
     const chatId = msg.chat.id;
     const [link, cardCount] = await Promise.all([
