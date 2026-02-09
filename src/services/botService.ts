@@ -206,8 +206,13 @@ export async function initBot() {
   const activeToken = token!;
   const pollingEnabled = String(process.env.TELEGRAM_POLLING_ENABLED ?? "true").toLowerCase() !== "false";
   const replicaId = process.env.RAILWAY_REPLICA_ID || process.env.REPLICA_ID;
-  if (replicaId && replicaId !== "0") {
-    console.warn(`Skipping Telegram bot polling on replica ${replicaId}`);
+  const replicaIndex = process.env.RAILWAY_REPLICA_INDEX || process.env.REPLICA_INDEX;
+  const shouldSkipReplica = (value?: string) => {
+    if (!value) return false;
+    return /^\d+$/.test(value) && value !== "0";
+  };
+  if (shouldSkipReplica(replicaIndex) || shouldSkipReplica(replicaId)) {
+    console.warn(`Skipping Telegram bot polling on replica ${replicaIndex || replicaId}`);
     return;
   }
   if (!pollingEnabled) {
@@ -222,7 +227,7 @@ export async function initBot() {
   }
 
   const botRef = new TelegramBot(activeToken, { polling: false });
-  await (botRef as any).deleteWebHook({ drop_pending_updates: true }).catch(() => {});
+  await (botRef as any).deleteWebHook({ drop_pending_updates: true }).catch(() => { });
   await (botRef as any).startPolling();
   bot = botRef;
   console.log("Telegram bot started");
@@ -248,7 +253,7 @@ export async function initBot() {
     { command: "unlink", description: "Remove all linked identifiers" },
     { command: "status", description: "Show current links" },
     { command: "verify", description: "Verify a payment transaction" },
-  ]).catch(() => {});
+  ]).catch(() => { });
 
   botRef.onText(/^\/start$/i, async (msg: any) => {
     const chatId = msg.chat.id;
@@ -492,14 +497,14 @@ export async function initBot() {
 
     const callbackKey = query.id ? `cb:${query.id}` : `cb:${chatId}:${action}`;
     if (await isDuplicateUpdateGlobal(callbackKey, 20000)) {
-      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
       return;
     }
 
     const now = Date.now();
     const last = recentCallbackActions.get(chatId);
     if (last && last.action === action && now - last.at < 1500) {
-      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
       return;
     }
     recentCallbackActions.set(chatId, { action, at: now });
@@ -508,17 +513,17 @@ export async function initBot() {
       const idType = action.replace("KYC_IDTYPE::", "") as KycIdType;
       const session = kycSessions.get(chatId);
       if (!session || session.step !== "idType") {
-        await bot!.answerCallbackQuery(query.id, { text: "KYC session not active" }).catch(() => {});
+        await bot!.answerCallbackQuery(query.id, { text: "KYC session not active" }).catch(() => { });
         return;
       }
       if (!KYC_ID_TYPES.find((t) => t.value === idType)) {
-        await bot!.answerCallbackQuery(query.id, { text: "Invalid ID type" }).catch(() => {});
+        await bot!.answerCallbackQuery(query.id, { text: "Invalid ID type" }).catch(() => { });
         return;
       }
       session.data.idType = idType;
       session.step = "idNumber";
       kycSessions.set(chatId, session);
-      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
       await bot!.sendMessage(chatId, "Enter your ID number:", { reply_markup: { force_reply: true } });
       return;
     }
@@ -527,10 +532,10 @@ export async function initBot() {
       const decision = action.replace("KYC_CONFIRM::", "");
       const session = kycSessions.get(chatId);
       if (!session || session.step !== "confirm") {
-        await bot!.answerCallbackQuery(query.id, { text: "KYC session not active" }).catch(() => {});
+        await bot!.answerCallbackQuery(query.id, { text: "KYC session not active" }).catch(() => { });
         return;
       }
-      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
       if (decision === "yes") {
         await submitKyc(chatId, session);
       } else {
@@ -544,14 +549,14 @@ export async function initBot() {
       const cardType = action.replace("CARD_TYPE::", "") as "visa" | "mastercard";
       const session = createCardSessions.get(chatId);
       if (!session || session.step !== "type") {
-        await bot!.answerCallbackQuery(query.id, { text: "Card session not active" }).catch(() => {});
+        await bot!.answerCallbackQuery(query.id, { text: "Card session not active" }).catch(() => { });
         return;
       }
       if (cardType !== "visa" && cardType !== "mastercard") return;
       session.data.cardType = cardType;
       session.step = "amount";
       createCardSessions.set(chatId, session);
-      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
       await promptCreateCardStep(chatId, session);
       return;
     }
@@ -560,7 +565,7 @@ export async function initBot() {
       const amount = action.replace("CARD_AMOUNT::", "");
       const session = createCardSessions.get(chatId);
       if (!session || session.step !== "amount") {
-        await bot!.answerCallbackQuery(query.id, { text: "Card session not active" }).catch(() => {});
+        await bot!.answerCallbackQuery(query.id, { text: "Card session not active" }).catch(() => { });
         return;
       }
       if (amount === "skip") {
@@ -570,7 +575,7 @@ export async function initBot() {
       }
       session.step = "confirm";
       createCardSessions.set(chatId, session);
-      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
       await promptCreateCardStep(chatId, session);
       return;
     }
@@ -579,10 +584,10 @@ export async function initBot() {
       const decision = action.replace("CARD_CONFIRM::", "");
       const session = createCardSessions.get(chatId);
       if (!session || session.step !== "confirm") {
-        await bot!.answerCallbackQuery(query.id, { text: "Card session not active" }).catch(() => {});
+        await bot!.answerCallbackQuery(query.id, { text: "Card session not active" }).catch(() => { });
         return;
       }
-      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
       if (decision === "yes") {
         await submitCreateCard(chatId, session);
       } else {
@@ -596,13 +601,13 @@ export async function initBot() {
       pendingActions.delete(chatId);
       kycSessions.delete(chatId);
       createCardSessions.delete(chatId);
-      await bot!.answerCallbackQuery(query.id, { text: "Cancelled" }).catch(() => {});
+      await bot!.answerCallbackQuery(query.id, { text: "Cancelled" }).catch(() => { });
       await bot!.sendMessage(chatId, "Cancelled pending action.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
       return;
     }
 
     if (action === "MENU") {
-      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
       return sendMenu(chatId, query.message);
     }
 
@@ -622,7 +627,7 @@ export async function initBot() {
     if (action.startsWith("VERIFY_METHOD::")) {
       const method = action.replace("VERIFY_METHOD::", "") as PaymentMethod;
       if (method !== "telebirr" && method !== "cbe") return;
-      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
       await startVerificationFlow(chatId, method);
       return;
     }
@@ -630,7 +635,7 @@ export async function initBot() {
     if (action.startsWith("DEPOSIT_METHOD::")) {
       const method = action.replace("DEPOSIT_METHOD::", "") as PaymentMethod;
       if (method !== "telebirr" && method !== "cbe") return;
-      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
       await sendDepositAmountSelect(chatId, method);
       return;
     }
@@ -640,7 +645,7 @@ export async function initBot() {
       const method = methodRaw as PaymentMethod;
       const amount = Number(amountRaw);
       if ((method !== "telebirr" && method !== "cbe") || !Number.isFinite(amount)) return;
-      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
       await sendDepositSummary(chatId, method, amount);
       return;
     }
@@ -648,7 +653,7 @@ export async function initBot() {
     if (action.startsWith("DEPOSIT_CUSTOM::")) {
       const method = action.replace("DEPOSIT_CUSTOM::", "") as PaymentMethod;
       if (method !== "telebirr" && method !== "cbe") return;
-      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
       pendingActions.set(chatId, { type: "deposit_amount", method });
       await bot!.sendMessage(chatId, `Enter the amount to deposit via ${method.toUpperCase()} (ETB).`, {
         reply_markup: { force_reply: true },
@@ -659,7 +664,7 @@ export async function initBot() {
     if (action.startsWith("DEPOSIT_VERIFY::")) {
       const method = action.replace("DEPOSIT_VERIFY::", "") as PaymentMethod;
       if (method !== "telebirr" && method !== "cbe") return;
-      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
       await startVerificationFlow(chatId, method);
       return;
     }
@@ -667,7 +672,7 @@ export async function initBot() {
     if (action.startsWith("CARDPAY_METHOD::")) {
       const method = action.replace("CARDPAY_METHOD::", "") as PaymentMethod;
       if (method !== "telebirr" && method !== "cbe") return;
-      await bot!.answerCallbackQuery(query.id).catch(() => {});
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
       const selection = cardRequestSelections.get(chatId);
       if (!selection) {
         await bot!.sendMessage(chatId, "Card request payment session expired. Please request a card again.", {
@@ -694,7 +699,7 @@ export async function initBot() {
       return;
     }
 
-    await bot!.answerCallbackQuery(query.id).catch(() => {});
+    await bot!.answerCallbackQuery(query.id).catch(() => { });
     await handleMenuSelection(action, chatId, query.message);
   });
 
@@ -761,7 +766,7 @@ export async function initBot() {
             if (parts.length) txn = parts[parts.length - 1];
           }
         }
-      } catch {}
+      } catch { }
 
       const normalizedTxn = normalizeTxnRef(txn, pending.method);
       try {
@@ -907,7 +912,7 @@ export async function initBot() {
             if (parts.length) txn = parts[parts.length - 1];
           }
         }
-      } catch {}
+      } catch { }
 
       const normalizedTxn = normalizeTxnRef(txn, pending.method);
       try {
@@ -1196,7 +1201,7 @@ function startBotLockHeartbeat(ownerId: string, botRef: TelegramBot, ttlMs: numb
       const ok = await renewBotLock(ownerId, ttlMs);
       if (!ok) {
         console.warn("Telegram bot lock lost; stopping polling.");
-        await (botRef as any).stopPolling().catch(() => {});
+        await (botRef as any).stopPolling().catch(() => { });
         clearInterval(timer);
       }
     } catch (err) {
@@ -1299,7 +1304,7 @@ async function editOrSend(chatId: number, message: any, text: string, replyMarku
         disable_web_page_preview: true,
       });
       return;
-    } catch {}
+    } catch { }
   }
   await bot.sendMessage(chatId, text, {
     reply_markup: replyMarkup,
@@ -1311,19 +1316,19 @@ async function editOrSend(chatId: number, message: any, text: string, replyMarku
 function buildVerificationHint(method: PaymentMethod) {
   return method === "telebirr"
     ? [
-        "Send your Telebirr reference (from the SMS receipt).",
-        "Example: DA91OELAQ1",
-        "You can paste the whole SMS text; we will extract the ID.",
-        "Or tap /cancel to stop.",
-      ].join("\n")
+      "Send your Telebirr reference (from the SMS receipt).",
+      "Example: DA91OELAQ1",
+      "You can paste the whole SMS text; we will extract the ID.",
+      "Or tap /cancel to stop.",
+    ].join("\n")
     : [
-        "Send your CBE receipt reference.",
-        "If your link looks like https://apps.cbe.com.et:100/BranchReceipt/FT26009L330J&73027449, send either:",
-        "- The full link, or",
-        "- Just: FT26009L330J&73027449",
-        "We will extract the reference for you.",
-        "Or tap /cancel to stop.",
-      ].join("\n");
+      "Send your CBE receipt reference.",
+      "If your link looks like https://apps.cbe.com.et:100/BranchReceipt/FT26009L330J&73027449, send either:",
+      "- The full link, or",
+      "- Just: FT26009L330J&73027449",
+      "We will extract the reference for you.",
+      "Or tap /cancel to stop.",
+    ].join("\n");
 }
 
 async function startVerificationFlow(chatId: number, method: PaymentMethod) {
@@ -1358,7 +1363,7 @@ function normalizeTxnRef(raw: string, method: PaymentMethod) {
     // Fallback: choose the last likely uppercase alphanumeric token of length 8-14
     const tokens = trimmed.match(/[A-Z0-9]{8,14}/g);
     if (tokens && tokens.length) return tokens[tokens.length - 1].toUpperCase();
-  } catch {}
+  } catch { }
   return trimmed;
 }
 
@@ -1780,10 +1785,12 @@ async function promptCreateCardStep(chatId: number, session: CreateCardSession) 
       break;
     case "confirm":
       await bot!.sendMessage(chatId, buildCreateCardSummary(session.data), {
-        reply_markup: { inline_keyboard: [[
-          { text: "✅ Create Card", callback_data: "CARD_CONFIRM::yes" },
-          { text: "❌ Cancel", callback_data: "CARD_CONFIRM::no" },
-        ], [MENU_BUTTON]] },
+        reply_markup: {
+          inline_keyboard: [[
+            { text: "✅ Create Card", callback_data: "CARD_CONFIRM::yes" },
+            { text: "❌ Cancel", callback_data: "CARD_CONFIRM::no" },
+          ], [MENU_BUTTON]]
+        },
       });
       break;
   }
