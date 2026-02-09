@@ -140,6 +140,8 @@ function initBot() {
         { command: "verify", description: "Verify a payment transaction" },
     ]).catch(() => { });
     bot.onText(/^\/start$/i, async (msg) => {
+        if (shouldSkipCommand(msg, "start", 3000))
+            return;
         const chatId = msg.chat.id;
         const [link, cardCount] = await Promise.all([
             TelegramLink_1.TelegramLink.findOne({ chatId }),
@@ -157,15 +159,23 @@ function initBot() {
         });
     });
     bot.onText(/^\/menu$/i, async (msg) => {
+        if (shouldSkipCommand(msg, "menu"))
+            return;
         await sendMenu(msg.chat.id);
     });
     bot.onText(/^\/help$/i, async (msg) => {
+        if (shouldSkipCommand(msg, "help"))
+            return;
         await bot.sendMessage(msg.chat.id, "Commands:\n/kyc\n/kyc_status\n/kyc_edit\n/card_request\n/create_card\n/requestcard\n/mycard\n/cardstatus\n/transactions\n/freeze\n/unfreeze\n/linkemail your@example.com\n/linkcard CARD_ID\n/unlink (remove all links)\n/status\n/verify\n/deposit");
     });
     bot.onText(/^\/deposit$/i, async (msg) => {
+        if (shouldSkipCommand(msg, "deposit"))
+            return;
         await sendDepositInfo(msg.chat.id);
     });
     bot.onText(/^\/verify$/i, async (msg) => {
+        if (shouldSkipCommand(msg, "verify"))
+            return;
         const chatId = msg.chat.id;
         await bot.sendMessage(chatId, "Choose payment method to verify:", {
             reply_markup: {
@@ -200,20 +210,30 @@ function initBot() {
         await handleCardRequest(chatId, msg);
     });
     bot.onText(/^\/requestcard$/i, async (msg) => {
+        if (shouldSkipCommand(msg, "requestcard"))
+            return;
         const chatId = msg.chat.id;
         await handleCardRequest(chatId, msg);
     });
     bot.onText(/^\/mycard(s)?$/i, async (msg) => {
+        if (shouldSkipCommand(msg, "mycard"))
+            return;
         return sendMyCardSummary(msg.chat.id);
     });
     bot.onText(/^\/cardstatus$/i, async (msg) => {
+        if (shouldSkipCommand(msg, "cardstatus"))
+            return;
         return sendCardStatus(msg.chat.id);
     });
     bot.onText(/^\/transactions$/i, async (msg) => {
+        if (shouldSkipCommand(msg, "transactions"))
+            return;
         const chatId = msg.chat.id;
         await sendCardTransactions(chatId);
     });
     bot.onText(/^\/(freeze|unfreeze)$/i, async (msg, match) => {
+        if (shouldSkipCommand(msg, "freeze_toggle"))
+            return;
         const action = match?.[1] === "unfreeze" ? "unfreeze" : "freeze";
         const card = await getPrimaryCardForUser(String(msg.chat.id));
         if (!card?.cardId) {
@@ -223,10 +243,14 @@ function initBot() {
         await handleFreezeAction(msg.chat.id, card.cardId, action);
     });
     bot.onText(/^\/card_request$/i, async (msg) => {
+        if (shouldSkipCommand(msg, "card_request"))
+            return;
         const chatId = msg.chat.id;
         await handleCardRequest(chatId, msg);
     });
     bot.onText(/^\/kyc$/i, async (msg) => {
+        if (shouldSkipCommand(msg, "kyc"))
+            return;
         const chatId = msg.chat.id;
         const user = await User_1.default.findOne({ userId: String(chatId) }).lean();
         const status = (user?.kycStatus || "not_started");
@@ -258,6 +282,8 @@ function initBot() {
         await startKycFlow(chatId, msg, "create");
     });
     bot.onText(/^\/kyc_edit$/i, async (msg) => {
+        if (shouldSkipCommand(msg, "kyc_edit"))
+            return;
         const chatId = msg.chat.id;
         const user = await User_1.default.findOne({ userId: String(chatId) }).lean();
         if (!user) {
@@ -279,6 +305,8 @@ function initBot() {
         await startKycFlow(chatId, msg, "edit", user);
     });
     bot.onText(/^\/linkemail(?:\s+([^\s]+))?$/i, async (msg, match) => {
+        if (shouldSkipCommand(msg, "linkemail"))
+            return;
         const email = match?.[1];
         if (!email) {
             pendingActions.set(msg.chat.id, { type: "email" });
@@ -290,6 +318,8 @@ function initBot() {
         await bot.sendMessage(msg.chat.id, `Linked email ${email}.`);
     });
     bot.onText(/^\/linkcard(?:\s+([^\s]+))?$/i, async (msg, match) => {
+        if (shouldSkipCommand(msg, "linkcard"))
+            return;
         const cardId = match?.[1];
         if (!cardId) {
             pendingActions.set(msg.chat.id, { type: "card" });
@@ -301,10 +331,14 @@ function initBot() {
         await bot.sendMessage(msg.chat.id, `Linked card ${cardId}.`);
     });
     bot.onText(/^\/unlink$/i, async (msg) => {
+        if (shouldSkipCommand(msg, "unlink"))
+            return;
         await TelegramLink_1.TelegramLink.findOneAndUpdate({ chatId: msg.chat.id }, { $set: { customerEmail: undefined, cardIds: [] } }, { upsert: true });
         await bot.sendMessage(msg.chat.id, "All links removed.");
     });
     bot.onText(/^\/status$/i, async (msg) => {
+        if (shouldSkipCommand(msg, "status"))
+            return;
         const [link, cards] = await Promise.all([
             TelegramLink_1.TelegramLink.findOne({ chatId: msg.chat.id }).lean(),
             Card_1.default.find({ userId: String(msg.chat.id), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean(),
@@ -313,6 +347,8 @@ function initBot() {
         await bot.sendMessage(msg.chat.id, `Email: ${link?.customerEmail || "(none)"}\nCards: ${cardLabels.join(", ") || "(none)"}`);
     });
     bot.onText(/^\/cancel$/i, async (msg) => {
+        if (shouldSkipCommand(msg, "cancel"))
+            return;
         pendingActions.delete(msg.chat.id);
         cardRequestSelections.delete(msg.chat.id);
         kycSessions.delete(msg.chat.id);
@@ -993,7 +1029,7 @@ function shouldSuppressOutgoing(chatId, key, ttlMs = 1500) {
     recentOutgoing.set(chatId, { key, at: now });
     return false;
 }
-function isDuplicateUpdate(key, ttlMs = 15000) {
+function isDuplicateUpdate(key, ttlMs = 60000) {
     const now = Date.now();
     const last = recentUpdates.get(key);
     if (last && now - last < ttlMs)
@@ -1005,6 +1041,17 @@ function isDuplicateUpdate(key, ttlMs = 15000) {
                 recentUpdates.delete(k);
         }
     }
+    return false;
+}
+function shouldSkipCommand(msg, key, ttlMs = 1500) {
+    const chatId = msg?.chat?.id;
+    const messageId = msg?.message_id;
+    if (chatId != null && messageId != null) {
+        if (isDuplicateUpdate(`msg:${chatId}:${messageId}`))
+            return true;
+    }
+    if (chatId != null && shouldSuppressOutgoing(chatId, `cmd:${key}`, ttlMs))
+        return true;
     return false;
 }
 function buildProfileCard(msg, link, cardCount = 0) {
@@ -1223,6 +1270,8 @@ function validateVerificationResult(params) {
     return errors;
 }
 async function handleMenuSelection(action, chatId, message) {
+    if (shouldSuppressOutgoing(chatId, `menu_action:${action}`, 1200))
+        return;
     if (action.startsWith("CARD_DETAIL::")) {
         const cardId = action.replace("CARD_DETAIL::", "");
         return sendCardDetail(chatId, cardId);
