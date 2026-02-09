@@ -261,24 +261,34 @@ export async function initBot() {
       from: msg.from?.username || msg.from?.id,
       text: msg.text,
     });
-    if (shouldSuppressOutgoing(chatId, "start", 10000)) return;
-    if (shouldSkipCommand(msg, "start", 10000)) return;
+    if (shouldSuppressOutgoing(chatId, "start", 10000)) {
+      console.warn("/start suppressed by rate limit", { chatId });
+      return;
+    }
+    if (shouldSkipCommand(msg, "start", 10000)) {
+      console.warn("/start skipped as duplicate", { chatId });
+      return;
+    }
     const [link, cardCount] = await Promise.all([
       TelegramLink.findOne({ chatId }),
       Card.countDocuments({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }),
     ]);
 
-    await bot!.sendMessage(chatId, buildWelcomeMessage(), {
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-      reply_markup: { inline_keyboard: MENU_KEYBOARD },
-    });
+    try {
+      await bot!.sendMessage(chatId, buildWelcomeMessage(), {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: MENU_KEYBOARD },
+      });
 
-    await bot!.sendMessage(chatId, buildProfileCard(msg, link || undefined, cardCount), {
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
+      await bot!.sendMessage(chatId, buildProfileCard(msg, link || undefined, cardCount), {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+    } catch (err) {
+      console.error("Failed to respond to /start", { chatId, err });
+    }
   });
 
   botRef.onText(/^\/menu$/i, async (msg: any) => {
