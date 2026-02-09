@@ -1176,7 +1176,22 @@ async function acquireBotLock(ownerId: string, ttlMs: number) {
       { $set: { ownerId, expiresAt }, $setOnInsert: { key: BOT_LOCK_KEY, createdAt: now } },
       { upsert: true, new: true }
     ).lean()) as { ownerId?: string } | null;
-    return lock?.ownerId === ownerId;
+    if (lock?.ownerId === ownerId) return true;
+
+    // Recover from clock-skewed locks that stay in the future and block polling.
+    const existing = (await BotLock.findOne({ key: BOT_LOCK_KEY }).lean()) as { ownerId?: string; expiresAt?: Date } | null;
+    const maxSkewMs = ttlMs * 2;
+    if (existing?.expiresAt && existing.expiresAt.getTime() - now.getTime() > maxSkewMs) {
+      console.warn("Bot lock expires far in the future; forcing takeover.");
+      const forced = (await BotLock.findOneAndUpdate(
+        { key: BOT_LOCK_KEY },
+        { $set: { ownerId, expiresAt } },
+        { new: true }
+      ).lean()) as { ownerId?: string } | null;
+      return forced?.ownerId === ownerId;
+    }
+
+    return false;
   } catch (err: any) {
     if (err?.code === 11000) return false;
     throw err;
