@@ -1,6 +1,3 @@
-jest.mock('../src/services/runtimeConfigService', () => ({
-  getFakeTopup: jest.fn(),
-}));
 jest.mock('../src/services/pricingService', () => ({
   loadPricingConfig: jest.fn(),
   quoteDeposit: jest.fn(),
@@ -16,9 +13,6 @@ jest.mock('../src/models/User', () => ({
   findOneAndUpdate: jest.fn(),
   findOne: jest.fn(),
 }));
-jest.mock('../src/models/RuntimeAudit', () => ({
-  create: jest.fn(),
-}));
 
 // Mock mongoose session behavior so tests don't require a DB
 jest.mock('mongoose', () => ({
@@ -32,12 +26,10 @@ jest.mock('mongoose', () => ({
 
 import { processDeposit } from '../src/services/depositService';
 
-import { getFakeTopup } from '../src/services/runtimeConfigService';
 import { loadPricingConfig, quoteDeposit } from '../src/services/pricingService';
 import { verifyPayment } from '../src/services/paymentVerification';
 import Transaction from '../src/models/Transaction';
 import User from '../src/models/User';
-import RuntimeAudit from '../src/models/RuntimeAudit';
 
 const asAny = (v: any) => v;
 
@@ -49,22 +41,7 @@ describe('processDeposit', () => {
     (User.findOne as any).mockReturnValue({ lean: jest.fn().mockResolvedValue(null) });
   });
 
-  it('auto-completes and credits when fake-topup is enabled', async () => {
-    (getFakeTopup as any).mockResolvedValue(true);
-    (loadPricingConfig as any).mockResolvedValue({});
-    (quoteDeposit as any).mockReturnValue({ creditedUsdt: 0.45454545454545453, rate: 220, feeEtb: 0 });
-    (Transaction.create as any).mockResolvedValue([{ _id: 'tx123' }] );
-    (User.findOneAndUpdate as any).mockResolvedValue({ balance: 0.45454545454545453 });
-
-    const res = await processDeposit({ userId: 'u1', paymentMethod: 'telebirr', amount: 100, transactionNumber: 'SIM1' });
-    expect(res.success).toBe(true);
-    expect(res.creditedUsdt).toBeCloseTo(0.45454545);
-    expect(res.newBalance).toBeCloseTo(0.45454545);
-    expect(RuntimeAudit.create as any).toHaveBeenCalled();
-  });
-
   it('records pending when fake-topup is disabled and provider verifies', async () => {
-    (getFakeTopup as any).mockResolvedValue(false);
     (loadPricingConfig as any).mockResolvedValue({});
     (quoteDeposit as any).mockReturnValue({ creditedUsdt: 0.45454545, rate: 220, feeEtb: 0 });
     (verifyPayment as any).mockResolvedValue({ body: { success: true, amount: 100 } });
@@ -76,7 +53,6 @@ describe('processDeposit', () => {
   });
 
   it('returns failure when provider verification fails', async () => {
-    (getFakeTopup as any).mockResolvedValue(false);
     (loadPricingConfig as any).mockResolvedValue({});
     (quoteDeposit as any).mockReturnValue({ creditedUsdt: 0.45454545, rate: 220, feeEtb: 0 });
     (verifyPayment as any).mockResolvedValue({ body: { success: false, message: 'Invalid receipt', raw: {} } });
@@ -88,7 +64,6 @@ describe('processDeposit', () => {
   });
 
   it('returns failure when provider amount mismatches', async () => {
-    (getFakeTopup as any).mockResolvedValue(false);
     (loadPricingConfig as any).mockResolvedValue({});
     (quoteDeposit as any).mockReturnValue({ creditedUsdt: 0.45454545, rate: 220, feeEtb: 0 });
     (verifyPayment as any).mockResolvedValue({ body: { success: true, amount: 50, raw: {} } });
@@ -100,7 +75,6 @@ describe('processDeposit', () => {
   });
 
   it('short-circuits when an existing completed deposit is found', async () => {
-    (getFakeTopup as any).mockResolvedValue(true);
     (loadPricingConfig as any).mockResolvedValue({});
     (quoteDeposit as any).mockReturnValue({ creditedUsdt: 0.5, rate: 200, feeEtb: 0 });
     // Make Transaction.findOne(...).lean() return an existing completed record
