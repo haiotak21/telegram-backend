@@ -8,7 +8,6 @@ import { promises as fs } from "fs";
 import { v2 as cloudinary } from "cloudinary";
 import { TelegramLink, ITelegramLink } from "../models/TelegramLink";
 import BotLock from "../models/BotLock";
-import TelegramUpdate from "../models/TelegramUpdate";
 import CardRequest from "../models/CardRequest";
 import Card from "../models/Card";
 import { verifyPayment } from "./paymentVerification";
@@ -204,16 +203,10 @@ export async function initBot() {
     return;
   }
   const activeToken = token!;
-  const debugEnabled = String(process.env.TELEGRAM_DEBUG_LOGS || "false").toLowerCase() === "true";
   const pollingEnabled = String(process.env.TELEGRAM_POLLING_ENABLED ?? "true").toLowerCase() !== "false";
   const replicaId = process.env.RAILWAY_REPLICA_ID || process.env.REPLICA_ID;
-  const replicaIndex = process.env.RAILWAY_REPLICA_INDEX || process.env.REPLICA_INDEX;
-  const shouldSkipReplica = (value?: string) => {
-    if (!value) return false;
-    return /^\d+$/.test(value) && value !== "0";
-  };
-  if (shouldSkipReplica(replicaIndex) || shouldSkipReplica(replicaId)) {
-    console.warn(`Skipping Telegram bot polling on replica ${replicaIndex || replicaId}`);
+  if (replicaId && replicaId !== "0") {
+    console.warn(`Skipping Telegram bot polling on replica ${replicaId}`);
     return;
   }
   if (!pollingEnabled) {
@@ -228,23 +221,7 @@ export async function initBot() {
   }
 
   const botRef = new TelegramBot(activeToken, { polling: false });
-  if (debugEnabled) {
-    botRef.on("polling_error", (error: any) => {
-      console.error("[BOT DEBUG] Polling error:", error);
-    });
-    botRef.on("error", (error: any) => {
-      console.error("[BOT DEBUG] Bot error:", error);
-    });
-    botRef.on("message", (msg: any) => {
-      console.log("[BOT DEBUG] Message", {
-        chatId: msg?.chat?.id,
-        messageId: msg?.message_id,
-        text: msg?.text,
-        from: msg?.from?.username || msg?.from?.id,
-      });
-    });
-  }
-  await (botRef as any).deleteWebHook({ drop_pending_updates: true }).catch(() => { });
+  await (botRef as any).deleteWebHook({ drop_pending_updates: true }).catch(() => {});
   await (botRef as any).startPolling();
   bot = botRef;
   console.log("Telegram bot started");
@@ -275,7 +252,7 @@ export async function initBot() {
   botRef.onText(/^\/start$/i, async (msg: any) => {
     const chatId = msg.chat.id;
     if (shouldSuppressOutgoing(chatId, "start", 10000)) return;
-    if (await shouldSkipCommand(msg, "start", 10000)) return;
+    if (shouldSkipCommand(msg, "start", 10000)) return;
     const [link, cardCount] = await Promise.all([
       TelegramLink.findOne({ chatId }),
       Card.countDocuments({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }),
@@ -295,12 +272,12 @@ export async function initBot() {
   });
 
   botRef.onText(/^\/menu$/i, async (msg: any) => {
-    if (await shouldSkipCommand(msg, "menu", 4000)) return;
+    if (shouldSkipCommand(msg, "menu", 4000)) return;
     await sendMenu(msg.chat.id);
   });
 
   botRef.onText(/^\/help$/i, async (msg: any) => {
-    if (await shouldSkipCommand(msg, "help")) return;
+    if (shouldSkipCommand(msg, "help")) return;
     await bot!.sendMessage(
       msg.chat.id,
       "Commands:\n/kyc\n/kyc_status\n/kyc_edit\n/card_request\n/create_card\n/requestcard\n/mycard\n/cardstatus\n/transactions\n/freeze\n/unfreeze\n/linkemail your@example.com\n/linkcard CARD_ID\n/unlink (remove all links)\n/status\n/verify\n/deposit"
@@ -308,12 +285,12 @@ export async function initBot() {
   });
 
   botRef.onText(/^\/deposit$/i, async (msg: any) => {
-    if (await shouldSkipCommand(msg, "deposit")) return;
+    if (shouldSkipCommand(msg, "deposit")) return;
     await sendDepositInfo(msg.chat.id);
   });
 
   botRef.onText(/^\/verify$/i, async (msg: any) => {
-    if (await shouldSkipCommand(msg, "verify")) return;
+    if (shouldSkipCommand(msg, "verify")) return;
     const chatId = msg.chat.id;
     await bot!.sendMessage(chatId, "Choose payment method to verify:", {
       reply_markup: {
@@ -351,29 +328,29 @@ export async function initBot() {
   });
 
   botRef.onText(/^\/requestcard$/i, async (msg: any) => {
-    if (await shouldSkipCommand(msg, "requestcard")) return;
+    if (shouldSkipCommand(msg, "requestcard")) return;
     const chatId = msg.chat.id;
     await handleCardRequest(chatId, msg);
   });
 
   botRef.onText(/^\/mycard(s)?$/i, async (msg: any) => {
-    if (await shouldSkipCommand(msg, "mycard")) return;
+    if (shouldSkipCommand(msg, "mycard")) return;
     return sendMyCardSummary(msg.chat.id);
   });
 
   botRef.onText(/^\/cardstatus$/i, async (msg: any) => {
-    if (await shouldSkipCommand(msg, "cardstatus")) return;
+    if (shouldSkipCommand(msg, "cardstatus")) return;
     return sendCardStatus(msg.chat.id);
   });
 
   botRef.onText(/^\/transactions$/i, async (msg: any) => {
-    if (await shouldSkipCommand(msg, "transactions")) return;
+    if (shouldSkipCommand(msg, "transactions")) return;
     const chatId = msg.chat.id;
     await sendCardTransactions(chatId);
   });
 
   botRef.onText(/^\/(freeze|unfreeze)$/i, async (msg: any, match?: RegExpExecArray | null) => {
-    if (await shouldSkipCommand(msg, "freeze_toggle")) return;
+    if (shouldSkipCommand(msg, "freeze_toggle")) return;
     const action = match?.[1] === "unfreeze" ? "unfreeze" : "freeze";
     const card = await getPrimaryCardForUser(String(msg.chat.id));
     if (!card?.cardId) {
@@ -384,13 +361,13 @@ export async function initBot() {
   });
 
   botRef.onText(/^\/card_request$/i, async (msg: any) => {
-    if (await shouldSkipCommand(msg, "card_request")) return;
+    if (shouldSkipCommand(msg, "card_request")) return;
     const chatId = msg.chat.id;
     await handleCardRequest(chatId, msg);
   });
 
   botRef.onText(/^\/kyc$/i, async (msg: any) => {
-    if (await shouldSkipCommand(msg, "kyc")) return;
+    if (shouldSkipCommand(msg, "kyc")) return;
     const chatId = msg.chat.id;
     const user = await User.findOne({ userId: String(chatId) }).lean();
     const status = (user?.kycStatus || "not_started") as KycStatus;
@@ -423,7 +400,7 @@ export async function initBot() {
   });
 
   botRef.onText(/^\/kyc_edit$/i, async (msg: any) => {
-    if (await shouldSkipCommand(msg, "kyc_edit")) return;
+    if (shouldSkipCommand(msg, "kyc_edit")) return;
     const chatId = msg.chat.id;
     const user = await User.findOne({ userId: String(chatId) }).lean();
     if (!user) {
@@ -446,7 +423,7 @@ export async function initBot() {
   });
 
   botRef.onText(/^\/linkemail(?:\s+([^\s]+))?$/i, async (msg: any, match?: RegExpExecArray | null) => {
-    if (await shouldSkipCommand(msg, "linkemail")) return;
+    if (shouldSkipCommand(msg, "linkemail")) return;
     const email = match?.[1];
     if (!email) {
       pendingActions.set(msg.chat.id, { type: "email" });
@@ -463,7 +440,7 @@ export async function initBot() {
   });
 
   botRef.onText(/^\/linkcard(?:\s+([^\s]+))?$/i, async (msg: any, match?: RegExpExecArray | null) => {
-    if (await shouldSkipCommand(msg, "linkcard")) return;
+    if (shouldSkipCommand(msg, "linkcard")) return;
     const cardId = match?.[1];
     if (!cardId) {
       pendingActions.set(msg.chat.id, { type: "card" });
@@ -480,13 +457,13 @@ export async function initBot() {
   });
 
   botRef.onText(/^\/unlink$/i, async (msg: any) => {
-    if (await shouldSkipCommand(msg, "unlink")) return;
+    if (shouldSkipCommand(msg, "unlink")) return;
     await TelegramLink.findOneAndUpdate({ chatId: msg.chat.id }, { $set: { customerEmail: undefined, cardIds: [] } }, { upsert: true });
     await bot!.sendMessage(msg.chat.id, "All links removed.");
   });
 
   botRef.onText(/^\/status$/i, async (msg: any) => {
-    if (await shouldSkipCommand(msg, "status")) return;
+    if (shouldSkipCommand(msg, "status")) return;
     const [link, cards] = await Promise.all([
       TelegramLink.findOne({ chatId: msg.chat.id }).lean(),
       Card.find({ userId: String(msg.chat.id), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean(),
@@ -499,7 +476,7 @@ export async function initBot() {
   });
 
   botRef.onText(/^\/cancel$/i, async (msg: any) => {
-    if (await shouldSkipCommand(msg, "cancel")) return;
+    if (shouldSkipCommand(msg, "cancel")) return;
     pendingActions.delete(msg.chat.id);
     cardRequestSelections.delete(msg.chat.id);
     kycSessions.delete(msg.chat.id);
@@ -513,8 +490,8 @@ export async function initBot() {
     if (!chatId || !action) return;
 
     const callbackKey = query.id ? `cb:${query.id}` : `cb:${chatId}:${action}`;
-    if (await isDuplicateUpdateGlobal(callbackKey, 20000)) {
-      await bot!.answerCallbackQuery(query.id).catch(() => { });
+    if (isDuplicateUpdate(callbackKey, 20000)) {
+      await bot!.answerCallbackQuery(query.id).catch(() => {});
       return;
     }
 
@@ -723,7 +700,7 @@ export async function initBot() {
   botRef.on("message", async (msg: any) => {
     const chatId = msg.chat.id;
     const messageKey = msg.message_id ? `msg:${chatId}:${msg.message_id}` : `msg:${chatId}:${Date.now()}`;
-    if (await isDuplicateUpdateGlobal(messageKey, 20000)) return;
+    if (isDuplicateUpdate(messageKey, 20000)) return;
     const kyc = kycSessions.get(chatId);
     if (kyc) {
       await handleKycMessage(msg, kyc);
@@ -1256,29 +1233,11 @@ function isDuplicateUpdate(key: string, ttlMs = 60000) {
   return false;
 }
 
-async function isDuplicateUpdateGlobal(key: string, ttlMs = 60000) {
-  // Fast in-memory check first for the current process
-  if (isDuplicateUpdate(key, ttlMs)) return true;
-
-  // Cross-process deduplication using MongoDB unique index
-  try {
-    await TelegramUpdate.create({ key });
-    return false;
-  } catch (err: any) {
-    if (err?.code === 11000) {
-      // Duplicate key => another process already handled this update
-      return true;
-    }
-    console.warn("Failed to persist Telegram update key for deduplication:", err);
-    return false;
-  }
-}
-
-async function shouldSkipCommand(msg: any, key: string, ttlMs = 1500) {
+function shouldSkipCommand(msg: any, key: string, ttlMs = 1500) {
   const chatId = msg?.chat?.id;
   const messageId = msg?.message_id;
   if (chatId != null && messageId != null) {
-    if (await isDuplicateUpdateGlobal(`msg:${chatId}:${messageId}`, ttlMs)) return true;
+    if (isDuplicateUpdate(`msg:${chatId}:${messageId}`)) return true;
   }
   if (chatId != null && shouldSuppressOutgoing(chatId, `cmd:${key}`, ttlMs)) return true;
   return false;
