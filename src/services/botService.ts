@@ -204,6 +204,7 @@ export async function initBot() {
     return;
   }
   const activeToken = token!;
+  const debugEnabled = String(process.env.TELEGRAM_DEBUG_LOGS || "false").toLowerCase() === "true";
   const pollingEnabled = String(process.env.TELEGRAM_POLLING_ENABLED ?? "true").toLowerCase() !== "false";
   const replicaId = process.env.RAILWAY_REPLICA_ID || process.env.REPLICA_ID;
   const replicaIndex = process.env.RAILWAY_REPLICA_INDEX || process.env.REPLICA_INDEX;
@@ -227,6 +228,22 @@ export async function initBot() {
   }
 
   const botRef = new TelegramBot(activeToken, { polling: false });
+  if (debugEnabled) {
+    botRef.on("polling_error", (error: any) => {
+      console.error("[BOT DEBUG] Polling error:", error);
+    });
+    botRef.on("error", (error: any) => {
+      console.error("[BOT DEBUG] Bot error:", error);
+    });
+    botRef.on("message", (msg: any) => {
+      console.log("[BOT DEBUG] Message", {
+        chatId: msg?.chat?.id,
+        messageId: msg?.message_id,
+        text: msg?.text,
+        from: msg?.from?.username || msg?.from?.id,
+      });
+    });
+  }
   await (botRef as any).deleteWebHook({ drop_pending_updates: true }).catch(() => { });
   await (botRef as any).startPolling();
   bot = botRef;
