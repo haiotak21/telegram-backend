@@ -199,7 +199,7 @@ export function initBot() {
     console.warn("TELEGRAM_BOT_TOKEN not set; bot disabled");
     return;
   }
-  const activeToken: string = token;
+  const activeToken = token!;
   const pollingEnabled = String(process.env.TELEGRAM_POLLING_ENABLED ?? "true").toLowerCase() !== "false";
   const replicaId = process.env.RAILWAY_REPLICA_ID || process.env.REPLICA_ID;
   if (replicaId && replicaId !== "0") {
