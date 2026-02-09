@@ -23,6 +23,7 @@ const path_1 = __importDefault(require("path"));
 const fs_1 = require("fs");
 const cloudinary_1 = require("cloudinary");
 const TelegramLink_1 = require("../models/TelegramLink");
+const BotLock_1 = __importDefault(require("../models/BotLock"));
 const CardRequest_1 = __importDefault(require("../models/CardRequest"));
 const Card_1 = __importDefault(require("../models/Card"));
 const paymentVerification_1 = require("./paymentVerification");
@@ -72,6 +73,8 @@ const DEPOSIT_ACCOUNTS = {
     telebirr: { title: "Telebirr Deposit", account: "0985656670", name: "Hayilemariyam Takele Mekonen", typeLabel: "Telebirr" },
 };
 const CARD_REQUEST_BASE_AMOUNT_ETB = Number(process.env.CARD_REQUEST_BASE_AMOUNT_ETB || 3);
+const BOT_LOCK_KEY = "telegram-bot";
+const BOT_LOCK_TTL_MS = Number(process.env.TELEGRAM_BOT_LOCK_TTL_MS || 90000);
 // Tracks the last amount a user selected per payment method so we can validate against receipt
 const depositSelections = new Map();
 const cardRequestSelections = new Map();
@@ -98,18 +101,19 @@ const MENU_KEYBOARD = [
     ],
     [{ text: "📢 News", url: NEWS_URL }],
 ];
-function initBot() {
-    console.log(`
+async function initBot() {
+    const killSwitch = String(process.env.TELEGRAM_BOT_DISABLED || "false").toLowerCase() === "true";
+    if (killSwitch) {
+        console.log(`
 ╔════════════════════════════════════════════════════════════════════╗
 ║                    EMERGENCY BOT KILL SWITCH                       ║
-║               POLLING IS FORCED DISABLED RIGHT NOW                 ║
+║               POLLING IS DISABLED VIA ENV                          ║
 ║                                                                    ║
-║ If you see this message → bot is NOT polling                       ║
-║ If duplicates STOP after deploy → problem was polling             ║
+║ Set TELEGRAM_BOT_DISABLED=false to enable bot                      ║
 ╚════════════════════════════════════════════════════════════════════╝
   `);
-    // comment out or remove this return when we are ready to re-enable
-    return;
+        return;
+    }
     console.log(`
 ╔════════════════════════════════════════════╗
 ║ BOT INSTANCE STARTED                       ║
@@ -147,9 +151,18 @@ function initBot() {
         console.warn("TELEGRAM_POLLING_ENABLED is false; bot polling disabled");
         return;
     }
-    const botRef = new node_telegram_bot_api_1.default(activeToken, { polling: true });
+    const lockOwner = buildInstanceId();
+    const hasLock = await acquireBotLock(lockOwner, BOT_LOCK_TTL_MS);
+    if (!hasLock) {
+        console.warn("Telegram bot lock not acquired; another instance is active.");
+        return;
+    }
+    const botRef = new node_telegram_bot_api_1.default(activeToken, { polling: false });
+    await botRef.deleteWebHook({ drop_pending_updates: true }).catch(() => { });
+    await botRef.startPolling();
     bot = botRef;
     console.log("Telegram bot started");
+    startBotLockHeartbeat(lockOwner, botRef, BOT_LOCK_TTL_MS);
     botRef.setMyCommands([
         { command: "start", description: "Show welcome message" },
         { command: "menu", description: "Show main menu" },
@@ -1048,6 +1061,46 @@ async function pollPendingKycUpdates() {
         }
     }
     return { checked: pending.length, updated };
+}
+function buildInstanceId() {
+    const replica = process.env.RAILWAY_REPLICA_ID || process.env.REPLICA_ID || "none";
+    return `${os_1.default.hostname()}-${process.pid}-${replica}`;
+}
+async function acquireBotLock(ownerId, ttlMs) {
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + ttlMs);
+    try {
+        const lock = (await BotLock_1.default.findOneAndUpdate({ key: BOT_LOCK_KEY, $or: [{ expiresAt: { $lte: now } }, { ownerId }] }, { $set: { ownerId, expiresAt }, $setOnInsert: { key: BOT_LOCK_KEY, createdAt: now } }, { upsert: true, new: true }).lean());
+        return lock?.ownerId === ownerId;
+    }
+    catch (err) {
+        if (err?.code === 11000)
+            return false;
+        throw err;
+    }
+}
+async function renewBotLock(ownerId, ttlMs) {
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + ttlMs);
+    const res = await BotLock_1.default.updateOne({ key: BOT_LOCK_KEY, ownerId }, { $set: { expiresAt } });
+    return res.modifiedCount > 0;
+}
+function startBotLockHeartbeat(ownerId, botRef, ttlMs) {
+    const intervalMs = Math.max(15000, Math.floor(ttlMs / 2));
+    const timer = setInterval(async () => {
+        try {
+            const ok = await renewBotLock(ownerId, ttlMs);
+            if (!ok) {
+                console.warn("Telegram bot lock lost; stopping polling.");
+                await botRef.stopPolling().catch(() => { });
+                clearInterval(timer);
+            }
+        }
+        catch (err) {
+            console.warn("Failed to renew Telegram bot lock:", err);
+        }
+    }, intervalMs);
+    return timer;
 }
 function buildWelcomeMessage() {
     return [

@@ -27,7 +27,7 @@ const app = (0, express_1.default)();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 // Connect DB and init bot
 (0, db_1.connectDB)().catch((e) => console.error("DB init failed:", e));
-(0, botService_1.initBot)();
+(0, botService_1.initBot)().catch((e) => console.error("Bot init failed:", e));
 const kycPollIntervalMs = Number(process.env.KYC_POLL_INTERVAL_MS || 600000);
 let kycPollRunning = false;
 if (Number.isFinite(kycPollIntervalMs) && kycPollIntervalMs > 0) {

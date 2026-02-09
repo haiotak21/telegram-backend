@@ -221,8 +221,8 @@ export async function initBot() {
   }
 
   const botRef = new TelegramBot(activeToken, { polling: false });
-  await botRef.deleteWebHook({ drop_pending_updates: true }).catch(() => {});
-  await botRef.startPolling();
+  await (botRef as any).deleteWebHook({ drop_pending_updates: true }).catch(() => {});
+  await (botRef as any).startPolling();
   bot = botRef;
   console.log("Telegram bot started");
   startBotLockHeartbeat(lockOwner, botRef, BOT_LOCK_TTL_MS);
@@ -1166,11 +1166,11 @@ async function acquireBotLock(ownerId: string, ttlMs: number) {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + ttlMs);
   try {
-    const lock = await BotLock.findOneAndUpdate(
+    const lock = (await BotLock.findOneAndUpdate(
       { key: BOT_LOCK_KEY, $or: [{ expiresAt: { $lte: now } }, { ownerId }] },
       { $set: { ownerId, expiresAt }, $setOnInsert: { key: BOT_LOCK_KEY, createdAt: now } },
       { upsert: true, new: true }
-    ).lean();
+    ).lean()) as { ownerId?: string } | null;
     return lock?.ownerId === ownerId;
   } catch (err: any) {
     if (err?.code === 11000) return false;
@@ -1195,7 +1195,7 @@ function startBotLockHeartbeat(ownerId: string, botRef: TelegramBot, ttlMs: numb
       const ok = await renewBotLock(ownerId, ttlMs);
       if (!ok) {
         console.warn("Telegram bot lock lost; stopping polling.");
-        await botRef.stopPolling().catch(() => {});
+        await (botRef as any).stopPolling().catch(() => {});
         clearInterval(timer);
       }
     } catch (err) {
