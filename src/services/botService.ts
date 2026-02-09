@@ -206,8 +206,7 @@ export async function initBot() {
   const pollingEnabled = String(process.env.TELEGRAM_POLLING_ENABLED ?? "true").toLowerCase() !== "false";
   const replicaId = process.env.RAILWAY_REPLICA_ID || process.env.REPLICA_ID;
   if (replicaId && replicaId !== "0") {
-    console.warn(`Skipping Telegram bot polling on replica ${replicaId}`);
-    return;
+    console.warn(`Replica detected (${replicaId}); relying on bot lock to prevent multiple pollers.`);
   }
   if (!pollingEnabled) {
     console.warn("TELEGRAM_POLLING_ENABLED is false; bot polling disabled");

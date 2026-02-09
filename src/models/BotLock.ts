@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 const BotLockSchema = new mongoose.Schema({
   key: { type: String, required: true, unique: true, index: true },
   ownerId: { type: String, required: true },
-  expiresAt: { type: Date, required: true, index: true },
+  expiresAt: { type: Date, required: true },
   createdAt: { type: Date, default: Date.now },
 });
 
