@@ -135,7 +135,7 @@ router.get("/users", requireAdmin, async (req, res) => {
   try {
     const { search, limit } = SearchSchema.parse(req.query || {});
     const q = search?.trim();
-    const query: any = {
+    const baseQuery: any = {
       $or: [
         { kycStatus: { $in: ["pending", "approved", "declined"] } },
         { kycSubmittedAt: { $exists: true, $ne: null } },
@@ -143,19 +143,22 @@ router.get("/users", requireAdmin, async (req, res) => {
       ],
     };
 
+    let query: any = baseQuery;
+
     if (q) {
       const isNumeric = /^\d+$/.test(q);
-      query.$and = [
-        query,
-        {
-          $or: [
-            ...(isNumeric ? [{ userId: q }] : []),
-            { customerEmail: q },
-            { strowalletCustomerId: q },
-          ],
-        },
-      ];
-      delete query.$or;
+      query = {
+        $and: [
+          baseQuery,
+          {
+            $or: [
+              ...(isNumeric ? [{ userId: q }] : []),
+              { customerEmail: q },
+              { strowalletCustomerId: q },
+            ],
+          },
+        ],
+      };
     }
 
     const items = await User.find(query)
