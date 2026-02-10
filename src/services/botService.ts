@@ -2741,9 +2741,7 @@ async function sendWalletSummary(chatId: number, message?: any) {
 
 
 async function sendMyCards(chatId: number, message?: any) {
-  const cards = await Card.find({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
-  const legacyLink = await TelegramLink.findOne({ chatId }).lean();
-  const cardIds = cards.length ? cards.map((c) => c.cardId) : legacyLink?.cardIds || [];
+  const cardIds = await getUserCardIds(chatId);
 
   if (!cardIds.length) {
     if (shouldSuppressOutgoing(chatId, "my_cards_empty")) return;
@@ -2764,10 +2762,48 @@ async function sendMyCards(chatId: number, message?: any) {
   }
 }
 
+function isLikelyCardId(value?: string) {
+  if (!value) return false;
+  if (value.startsWith("/")) return false;
+  if (value.length < 6) return false;
+  return /^[A-Za-z0-9_-]+$/.test(value) || /^[A-Za-z0-9-]{6,}$/.test(value);
+}
+
+async function getUserCardIds(chatId: number) {
+  const userId = String(chatId);
+  const cards = await Card.find({ userId }).lean();
+  const cardIdsFromCards = cards.map((c) => c.cardId).filter(isLikelyCardId);
+  if (cardIdsFromCards.length) return Array.from(new Set(cardIdsFromCards));
+
+  const requests = await CardRequest.find({ userId, status: "approved", cardId: { $exists: true, $ne: "" } }).lean();
+  const requestIds = requests.map((r) => String(r.cardId)).filter(isLikelyCardId);
+  if (requestIds.length) return Array.from(new Set(requestIds));
+
+  const legacyLink = await TelegramLink.findOne({ chatId }).lean();
+  const legacyIds = (legacyLink?.cardIds || []).filter(isLikelyCardId);
+  if (legacyLink && legacyIds.length !== (legacyLink.cardIds || []).length) {
+    await TelegramLink.updateOne({ chatId }, { $set: { cardIds: legacyIds } });
+  }
+  return Array.from(new Set(legacyIds));
+}
+
 async function getPrimaryCardForUser(userId: string) {
-  return Card.findOne({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } })
+  const card = await Card.findOne({ userId })
     .sort({ updatedAt: -1 })
     .lean();
+  if (card) return card;
+  const request = await CardRequest.findOne({ userId, status: "approved", cardId: { $exists: true, $ne: "" } })
+    .sort({ updatedAt: -1 })
+    .lean();
+  if (!request) return null;
+  return {
+    cardId: String(request.cardId),
+    cardType: request.cardType,
+    status: (request as any)?.responseData?.response?.card_status || "pending",
+    last4: request.cardNumber ? request.cardNumber.slice(-4) : undefined,
+    balance: undefined,
+    currency: undefined,
+  } as any;
 }
 
 async function sendMyCardSummary(chatId: number) {
