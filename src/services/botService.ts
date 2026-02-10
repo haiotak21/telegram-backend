@@ -350,14 +350,17 @@ export async function initBot() {
 
   botRef.onText(/^\/kyc_status$/i, async (msg: any) => {
     const chatId = msg.chat.id;
-    const customer = await Customer.findOne({ userId: String(chatId) }).lean();
-    if (!customer) {
+    const [user, customer] = await Promise.all([
+      User.findOne({ userId: String(chatId) }).lean(),
+      Customer.findOne({ userId: String(chatId) }).lean(),
+    ]);
+    const status = resolveKycStatus(user, customer);
+    if (status === "not_started") {
       await bot!.sendMessage(chatId, "No KYC record found. Use /kyc to submit.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
       return;
     }
-    const status = customer.kycStatus || "pending";
     const label = status === "approved" ? "Approved" : status === "pending" ? "Pending verification" : "Rejected — contact support";
     await bot!.sendMessage(chatId, `Your KYC status: ${label}.`, {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -411,20 +414,24 @@ export async function initBot() {
   botRef.onText(/^\/kyc$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "kyc")) return;
     const chatId = msg.chat.id;
-    const customer = await Customer.findOne({ userId: String(chatId) }).lean();
-    if (customer?.kycStatus === "pending") {
+    const [user, customer] = await Promise.all([
+      User.findOne({ userId: String(chatId) }).lean(),
+      Customer.findOne({ userId: String(chatId) }).lean(),
+    ]);
+    const status = resolveKycStatus(user, customer);
+    if (status === "pending") {
       await bot!.sendMessage(chatId, "✅ KYC already submitted. Status: pending verification.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
       return;
     }
-    if (customer?.kycStatus === "approved") {
+    if (status === "approved") {
       await bot!.sendMessage(chatId, "✅ KYC already approved.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
       return;
     }
-    if (customer?.kycStatus === "rejected") {
+    if (status === "rejected") {
       await bot!.sendMessage(chatId, "❌ Your KYC was rejected. Use /kyc_edit to resubmit.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
@@ -436,16 +443,25 @@ export async function initBot() {
   botRef.onText(/^\/kyc_edit$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "kyc_edit")) return;
     const chatId = msg.chat.id;
-    const user = await User.findOne({ userId: String(chatId) }).lean();
-    const customer = await Customer.findOne({ userId: String(chatId) }).lean();
-    if (!customer) {
+    const [user, customer] = await Promise.all([
+      User.findOne({ userId: String(chatId) }).lean(),
+      Customer.findOne({ userId: String(chatId) }).lean(),
+    ]);
+    const status = resolveKycStatus(user, customer);
+    if (status === "not_started") {
       await bot!.sendMessage(chatId, "No KYC record found. Use /kyc to submit.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
       return;
     }
-    if (customer.kycStatus === "approved") {
+    if (status === "approved") {
       await bot!.sendMessage(chatId, "✅ KYC already approved. No edits required.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      return;
+    }
+    if (status === "pending") {
+      await bot!.sendMessage(chatId, "⏳ KYC is pending verification. Please wait for approval.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
       return;
@@ -2615,6 +2631,14 @@ function normalizeKycStatus(value: any): KycStatus | undefined {
   return undefined;
 }
 
+function resolveKycStatus(user?: any, customer?: any): KycStatus | "not_started" {
+  if (customer?.kycStatus) return customer.kycStatus as KycStatus;
+  const raw = user?.kycStatus;
+  if (!raw) return "not_started";
+  const normalized = normalizeKycStatus(raw);
+  return normalized || (raw === "not_started" ? "not_started" : "pending");
+}
+
 async function sendUserInfo(chatId: number, message?: any) {
   if (shouldSuppressOutgoing(chatId, "user_info")) return;
   const [link, user, customer, cards] = await Promise.all([
@@ -2628,7 +2652,7 @@ async function sendUserInfo(chatId: number, message?: any) {
   const currency = user?.currency || "USDT";
   const cardsList = cards || [];
   const email = user?.customerEmail || link?.customerEmail;
-  const kycStatus = customer?.kycStatus || "not_started";
+  const kycStatus = resolveKycStatus(user, customer);
   const kycLabel = kycStatus === "approved" ? "approved" : kycStatus === "pending" ? "pending" : "not started";
   const cardList = cardsList.slice(0, 3).map((c, idx) => `${idx + 1}. ${c.cardId}${c.last4 ? ` (••••${c.last4})` : ""}`);
 
