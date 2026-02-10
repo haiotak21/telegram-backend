@@ -107,8 +107,11 @@ router.post("/", async (req, res) => {
     const userId = asString(body.userId);
     if (!userId) throw new Error("userId is required");
 
-    const user = await User.findOne({ userId }).lean();
-    const customer = await Customer.findOne({ userId }).lean();
+    const user = (await User.findOne({ userId }).lean()) as any;
+    if (!user) {
+      return fail(res, "User not found", 404);
+    }
+    const customer = (await Customer.findOne({ userId }).lean()) as any;
     if (!customer || customer.kycStatus !== "approved") {
       return fail(res, "You must complete KYC before requesting a card", 400);
     }

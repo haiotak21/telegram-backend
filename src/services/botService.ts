@@ -1622,8 +1622,8 @@ async function sendDepositSummary(chatId: number, method: PaymentMethod, amount:
 async function handleCardRequest(chatId: number, message?: any) {
   if (shouldSuppressOutgoing(chatId, "card_request")) return;
   const user = await User.findOne({ userId: String(chatId) }).lean();
-  const customer = await Customer.findOne({ userId: String(chatId) }).lean();
-  const kycStatus = customer?.kycStatus || "pending";
+  const customerRecord = await Customer.findOne({ userId: String(chatId) }).lean();
+  const kycStatus = customerRecord?.kycStatus || "pending";
 
   if (kycStatus !== "approved") {
     if (kycStatus === "pending") {
@@ -1666,7 +1666,7 @@ async function handleCardRequest(chatId: number, message?: any) {
     return;
   }
 
-  if (!customer?.email) {
+  if (!customerRecord?.email) {
     await bot!.sendMessage(chatId, "❌ Missing email on your KYC. Please update and resubmit KYC.", {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
@@ -1693,8 +1693,7 @@ async function handleCardRequest(chatId: number, message?: any) {
     return;
   }
 
-  const customer = await Customer.findOne({ userId: String(chatId) }).lean();
-  await submitCardRequest(String(chatId), user, customer, message, baseAmount);
+  await submitCardRequest(String(chatId), user, customerRecord, message, baseAmount);
 }
 
 async function submitCardRequest(userId: string, user: any, customer: any, message?: any, baseAmount?: number) {
