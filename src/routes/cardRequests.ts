@@ -101,6 +101,20 @@ function extractCardInfo(respData: any) {
   return { cardId, cardNumber, cvc };
 }
 
+function extractCardStatus(respData: any) {
+  return (
+    respData?.card_status ||
+    respData?.status ||
+    respData?.state ||
+    respData?.response?.card_status ||
+    respData?.response?.status ||
+    respData?.response?.state ||
+    respData?.data?.card_status ||
+    respData?.data?.status ||
+    respData?.data?.state
+  );
+}
+
 router.post("/", async (req, res) => {
   try {
     const body = req.body || {};
@@ -273,6 +287,68 @@ router.get("/", requireAdmin, async (req, res) => {
     return ok(res, { requests: enriched });
   } catch (err: any) {
     const message = err?.message || "Failed to load requests";
+    return fail(res, message, 400);
+  }
+});
+
+router.post("/:id/sync-card", requireAdmin, async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const cardIdOverride = asString(req.body?.cardId);
+    const request = await CardRequest.findById(id).lean();
+    if (!request) return fail(res, "Card request not found", 404);
+
+    const respData = request.responseData as any;
+    const extracted = extractCardInfo(respData);
+    const cardId = cardIdOverride || request.cardId || extracted.cardId;
+    if (!cardId) return fail(res, "cardId is missing on this request", 400);
+
+    const cardNumber = request.cardNumber || extracted.cardNumber;
+    const last4 = cardNumber ? String(cardNumber).slice(-4) : undefined;
+    const status = extractCardStatus(respData) || "pending";
+
+    await CardRequest.findByIdAndUpdate(id, {
+      $set: {
+        status: "approved",
+        cardId,
+        cardNumber: cardNumber || undefined,
+        cvc: request.cvc || extracted.cvc,
+      },
+    });
+
+    await Card.findOneAndUpdate(
+      { cardId: String(cardId) },
+      {
+        $set: {
+          cardId: String(cardId),
+          userId: request.userId,
+          customerEmail: request.customerEmail,
+          nameOnCard: request.nameOnCard,
+          cardType: request.cardType,
+          status,
+          last4,
+        },
+      },
+      { upsert: true, new: true }
+    );
+
+    if (request.userId) {
+      await TelegramLink.findOneAndUpdate(
+        { chatId: Number(request.userId) },
+        { $addToSet: { cardIds: String(cardId) }, $setOnInsert: { customerEmail: request.customerEmail } },
+        { upsert: true }
+      );
+      notifyCardRequestApproved(request.userId, {
+        cardId: String(cardId),
+        cardType: request.cardType,
+        nameOnCard: request.nameOnCard,
+        raw: respData,
+      }).catch(() => {});
+    }
+
+    return ok(res, { cardId: String(cardId), synced: true });
+  } catch (err: any) {
+    const message = err?.message || "Failed to sync card";
     return fail(res, message, 400);
   }
 });
