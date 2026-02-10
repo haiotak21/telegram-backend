@@ -541,8 +541,8 @@
           <label>Note (optional)</label>
           <input id="mdNote" type="text" placeholder="Reason or reference" />
           <div class="toolbar">
-            <button type="submit">Deposit</button>
-            <span class="tag">Instant credit</span>
+            <button type="submit" disabled title="Read-only">Deposit</button>
+            <span class="tag">Read-only</span>
           </div>
           <div class="status" id="manualDepositStatus">—</div>
         </form>
@@ -561,10 +561,13 @@
           <label>Mode (optional, e.g., sandbox)</label>
           <input id="tuMode" type="text" placeholder="sandbox" />
           <div class="toolbar">
-            <button type="submit">Top-up Card</button>
+            <button type="submit" disabled title="Read-only">
+              Top-up Card
+            </button>
             <button id="clearTopup" type="button" class="secondary">
               Clear
             </button>
+            <span class="tag">Read-only</span>
           </div>
           <div id="topupStatus" class="data-box">—</div>
         </form>
@@ -745,7 +748,13 @@
             <button id="reconRefresh" type="button" class="secondary">
               Load
             </button>
-            <button id="reconRunAll" type="button" class="secondary">
+            <button
+              id="reconRunAll"
+              type="button"
+              class="secondary"
+              disabled
+              title="Read-only"
+            >
               Run All
             </button>
           </div>
@@ -767,7 +776,15 @@
             <option value="true">Yes (destructive)</option>
           </select>
           <div class="toolbar">
-            <button id="resetUsersBtn" class="danger">Reset All Users</button>
+            <button
+              id="resetUsersBtn"
+              class="danger"
+              disabled
+              title="Read-only"
+            >
+              Reset All Users
+            </button>
+            <span class="tag">Read-only</span>
           </div>
           <div id="resetUsersStatus" class="status">—</div>
         </div>
@@ -864,6 +881,13 @@
       };
 
       let lastConfig = null;
+      const READ_ONLY = true;
+
+      function blockIfReadOnly(message) {
+        if (!READ_ONLY) return false;
+        showToast(message, "info");
+        return true;
+      }
 
       function showToast(msg, kind = "info") {
         const t = els.toast;
@@ -907,6 +931,16 @@
         try {
           data = await res.json();
         } catch (_) {}
+        if (data && typeof data === "object" && "ok" in data) {
+          if (data.ok === false) {
+            const message = data.error || "Request failed";
+            const err = new Error(message);
+            err.status = res.status;
+            err.data = data;
+            throw err;
+          }
+          data = data.data;
+        }
         if (!res.ok) {
           const message = data?.message || data?.error || "Request failed";
           const err = new Error(message);
@@ -965,10 +999,10 @@
               <div style="flex:1"></div>
               <button class="secondary" data-action="decline" data-id="${
                 card.dataset.id
-              }">Decline</button>
+              }" disabled title="Read-only">Decline</button>
               <button data-action="approve" data-id="${
                 card.dataset.id
-              }">Approve</button>
+              }" disabled title="Read-only">Approve</button>
             </div>
           `;
           container.appendChild(card);
@@ -1075,6 +1109,7 @@
       // Reset users handler
       if (els.resetUsersBtn) {
         els.resetUsersBtn.addEventListener("click", async () => {
+          if (blockIfReadOnly("Reset is disabled in read-only mode")) return;
           if (!hasToken()) return showToast("Missing admin token", "error");
           const confirmMsg = `Type RESET to confirm clearing all user balances and unlinking cards. This may be destructive.`;
           const r = prompt(confirmMsg);
@@ -1174,18 +1209,19 @@
             const submitted = u.submittedAt
               ? new Date(u.submittedAt).toLocaleString()
               : "-";
+            const rawStatus = u.customerKycStatus || u.kycStatus;
             const status =
-              u.kycStatus === "declined"
+              rawStatus === "declined"
                 ? "rejected"
-                : u.kycStatus || "not_started";
+                : rawStatus || "not_started";
             return `
               <div class="req-card" data-id="${u.telegramUserId}">
                 <div class="mono req-line">Telegram ID: ${u.telegramUserId || "-"}</div>
                 <div class="req-line">Name: ${name}</div>
                 <div class="req-line">Email: ${u.customerEmail || "-"}</div>
-                <div class="req-line">Customer ID: ${u.strowalletCustomerId || "-"}</div>
+                <div class="req-line">Customer ID: ${u.customerId || u.strowalletCustomerId || "-"}</div>
                 <div class="req-line">KYC Type: ${u.idType || "-"}</div>
-                <div class="req-line">Status: ${status}</div>
+                <div class="req-line">Customer KYC: ${status}</div>
                 <div class="req-line">Submitted: ${submitted}</div>
                 <div class="toolbar" style="margin-top:6px">
                   <div style="flex:1"></div>
@@ -1249,8 +1285,8 @@
                 <div class="req-line">Updated: ${updated}</div>
                 <div class="toolbar" style="margin-top:6px">
                   <button class="secondary" data-action="refresh" data-id="${c.cardId}">Refresh</button>
-                  <button class="secondary" data-action="toggle" data-status="${status}" data-id="${c.cardId}">${status === "frozen" ? "Unblock" : "Block"}</button>
-                  <button class="secondary" data-action="fund" data-id="${c.cardId}">Fund</button>
+                  <button class="secondary" data-action="toggle" data-status="${status}" data-id="${c.cardId}" disabled title="Read-only">${status === "frozen" ? "Unblock" : "Block"}</button>
+                  <button class="secondary" data-action="fund" data-id="${c.cardId}" disabled title="Read-only">Fund</button>
                   <button class="secondary" data-action="txns" data-id="${c.cardId}">Transactions</button>
                 </div>
               </div>
@@ -1341,7 +1377,7 @@
                 <div class="req-line">Status: <span class="${statusClass}">${status}</span></div>
                 <div class="req-line">Last Checked: ${checked}</div>
                 <div class="toolbar" style="margin-top:6px">
-                  <button class="secondary" data-action="force" data-id="${r.cardId}">Force Sync</button>
+                  <button class="secondary" data-action="force" data-id="${r.cardId}" disabled title="Read-only">Force Sync</button>
                   <button class="secondary" data-action="audit" data-id="${r.cardId}">Audit Txns</button>
                 </div>
               </div>
@@ -1457,6 +1493,11 @@
       }
       if (els.reconRunAll) {
         els.reconRunAll.addEventListener("click", async () => {
+          if (
+            blockIfReadOnly("Reconciliation run is disabled in read-only mode")
+          ) {
+            return;
+          }
           if (!hasToken()) {
             els.reconStatus.textContent = "Missing admin token";
             return;
@@ -1583,6 +1624,9 @@
 
       els.manualDepositForm.addEventListener("submit", async (e) => {
         e.preventDefault();
+        if (blockIfReadOnly("Manual deposits are disabled in read-only mode")) {
+          return;
+        }
         const btn = els.manualDepositForm.querySelector(
           'button[type="submit"]',
         );
@@ -1636,6 +1680,9 @@
 
       els.topupForm.addEventListener("submit", async (e) => {
         e.preventDefault();
+        if (blockIfReadOnly("Top-ups are disabled in read-only mode")) {
+          return;
+        }
         const btn = els.topupForm.querySelector('button[type="submit"]');
         setLoading(btn, true);
         els.topupStatus.textContent = "Processing...";
@@ -1702,6 +1749,13 @@
         const action = target?.dataset?.action;
         const id = target?.dataset?.id;
         if (!action || !id) return;
+        if (
+          blockIfReadOnly(
+            "Transaction decisions are disabled in read-only mode",
+          )
+        ) {
+          return;
+        }
         const card = target.closest(".txn-card");
         const statusLine = card?.querySelector(".req-line.status-line");
         const approveBtn = card?.querySelector("button[data-action='approve']");
@@ -1910,6 +1964,12 @@
           const action = target?.dataset?.action;
           const id = target?.dataset?.id;
           if (!action || !id) return;
+          if (
+            (action === "toggle" || action === "fund") &&
+            blockIfReadOnly("Card actions are disabled in read-only mode")
+          ) {
+            return;
+          }
           setLoading(target, true);
           try {
             if (action === "refresh") {
@@ -1963,6 +2023,12 @@
           const action = target?.dataset?.action;
           const id = target?.dataset?.id;
           if (!action || !id) return;
+          if (
+            action === "force" &&
+            blockIfReadOnly("Reconciliation write actions are disabled")
+          ) {
+            return;
+          }
           setLoading(target, true);
           try {
             if (action === "force") {

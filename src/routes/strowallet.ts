@@ -1,6 +1,7 @@
 import express from "express";
 import axios, { AxiosError } from "axios";
 import { z } from "zod";
+import { ok, fail } from "../utils/apiResponse";
 
 const router = express.Router();
 
@@ -73,11 +74,11 @@ function normalizeError(e: any) {
     const status = ae.response?.status ?? 400;
     const payload = ae.response?.data;
     const msg = payload?.message || payload?.error || ae.message || "Request failed";
-    return { status, body: { ok: false, error: String(msg), data: payload } };
+    return { status, message: String(msg) };
   }
   const status = e?.status ?? 400;
   const msg = e?.message ?? "Request error";
-  return { status, body: { ok: false, error: String(msg) } };
+  return { status, message: String(msg) };
 }
 
 // 1) Create Customer
@@ -161,10 +162,10 @@ router.post("/create-user", async (req, res) => {
         // ignore lookup failures
       }
     }
-    return res.status(200).json({ ok: true, data });
+    return ok(res, data, 200);
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -178,10 +179,10 @@ router.get("/getcardholder", async (req, res) => {
       customerEmail: req.query.customerEmail,
     };
     const resp = await bitvcard.get("getcardholder/", { params });
-    return res.status(200).json({ ok: true, data: resp.data });
+    return ok(res, resp.data, 200);
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -216,10 +217,10 @@ router.put("/updateCardCustomer", async (req, res) => {
     const resp = await bitvcard.put("updateCardCustomer/", payload, {
       headers: { "Content-Type": "application/json" },
     });
-    return res.status(200).json({ ok: true, data: resp.data });
+    return ok(res, resp.data, 200);
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -243,10 +244,10 @@ router.patch("/updateCardCustomer", async (req, res) => {
     const resp = await bitvcard.patch("updateCardCustomer/", payload, {
       headers: { "Content-Type": "application/json" },
     });
-    return res.status(200).json({ ok: true, data: resp.data });
+    return ok(res, resp.data, 200);
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -269,10 +270,10 @@ router.post("/create-card", async (req, res) => {
     const public_key = requirePublicKey();
     const payload = { ...body, public_key };
     const resp = await bitvcard.post("create-card/", payload);
-    return res.status(200).json({ ok: true, data: resp.data });
+    return ok(res, resp.data, 200);
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -289,10 +290,10 @@ router.post("/fund-card", async (req, res) => {
     const public_key = requirePublicKey();
     const payload = { ...body, public_key };
     const resp = await bitvcard.post("fund-card/", payload);
-    return res.status(200).json({ ok: true, data: resp.data });
+    return ok(res, resp.data, 200);
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -308,10 +309,10 @@ router.post("/fetch-card-detail", async (req, res) => {
     const public_key = requirePublicKey();
     const payload = { ...body, public_key };
     const resp = await bitvcard.post("fetch-card-detail/", payload);
-    return res.status(200).json({ ok: true, data: resp.data });
+    return ok(res, resp.data, 200);
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -328,10 +329,10 @@ router.post("/card-transactions", async (req, res) => {
     const public_key = requirePublicKey();
     const payload = { ...body, public_key };
     const resp = await bitvcard.post("card-transactions/", payload);
-    return res.status(200).json({ ok: true, data: resp.data });
+    return ok(res, resp.data, 200);
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -347,10 +348,10 @@ router.post("/action/status", async (req, res) => {
     const public_key = requirePublicKey();
     const payload = { ...body, public_key };
     const resp = await bitvcard.post("action/status/", payload);
-    return res.status(200).json({ ok: true, data: resp.data });
+    return ok(res, resp.data, 200);
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -375,10 +376,10 @@ router.get("/apicard-transactions", async (req, res) => {
     if (mode) params.mode = mode;
     if (developer_code) params.developer_code = developer_code;
     const resp = await api.get(`apicard-transactions/`, { params });
-    return res.status(200).json({ ok: true, data: resp.data });
+    return ok(res, resp.data, 200);
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -405,10 +406,10 @@ router.post("/apicard-transactions", async (req, res) => {
     if (developer_code) params.developer_code = developer_code;
 
     const resp = await api.get(`apicard-transactions/`, { params });
-    return res.status(200).json({ ok: true, data: resp.data });
+    return ok(res, resp.data, 200);
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 

@@ -2,10 +2,12 @@ import express from "express";
 import axios, { AxiosError } from "axios";
 import { z } from "zod";
 import User from "../models/User";
+import Customer from "../models/Customer";
 import Card from "../models/Card";
 import Transaction from "../models/Transaction";
 import { notifyCardStatusChanged } from "../services/botService";
 import { auditCardTransactions, getReconciliationSummary, reconcileAllCards, reconcileCard } from "../services/reconciliationService";
+import { ok, fail } from "../utils/apiResponse";
 
 const router = express.Router();
 
@@ -16,7 +18,7 @@ function requireAdmin(req: express.Request, res: express.Response, next: express
   if (!adminToken) return next();
   const provided = req.headers["x-admin-token"] as string | undefined;
   if (provided && provided === adminToken) return next();
-  return res.status(401).json({ success: false, message: "Unauthorized" });
+  return fail(res, "Unauthorized", 401);
 }
 
 function requirePublicKey() {
@@ -35,11 +37,11 @@ function normalizeError(e: any) {
     const status = ae.response?.status ?? 400;
     const payload = ae.response?.data as any;
     const msg = payload?.message || payload?.error || ae.message || "Request failed";
-    return { status, body: { success: false, message: String(msg), data: payload } };
+    return { status, message: String(msg) };
   }
   const status = e?.status ?? 400;
   const msg = e?.message ?? "Request error";
-  return { status, body: { success: false, message: String(msg) } };
+  return { status, message: String(msg) };
 }
 
 function extractField(obj: any, keys: string[]): string | undefined {
@@ -52,42 +54,6 @@ function extractField(obj: any, keys: string[]): string | undefined {
     if (v) return v;
   }
   return undefined;
-}
-
-function normalizeKycStatus(value: any): "pending" | "approved" | "declined" | undefined {
-  if (!value) return undefined;
-  const v = String(value).toLowerCase();
-  if (["approved", "verified", "success", "active", "high kyc"].includes(v)) return "approved";
-  if (["pending", "processing", "review", "unreview kyc"].includes(v)) return "pending";
-  if (["declined", "rejected", "failed", "low kyc"].includes(v)) return "declined";
-  return undefined;
-}
-
-function extractCustomerId(payload: any) {
-  return (
-    payload?.data?.customerId ||
-    payload?.data?.customer_id ||
-    payload?.data?.data?.customerId ||
-    payload?.data?.data?.customer_id ||
-    payload?.customerId ||
-    payload?.customer_id ||
-    payload?.data?.id ||
-    payload?.data?.data?.id ||
-    payload?.id
-  );
-}
-
-async function fetchCustomerStatus(params: { customerId?: string; customerEmail?: string }) {
-  const public_key = requirePublicKey();
-  const resp = await axios.get(`${BITVCARD_BASE}getcardholder/`, {
-    params: {
-      public_key,
-      customerId: params.customerId,
-      customerEmail: params.customerEmail,
-    },
-    timeout: 15000,
-  });
-  return resp.data;
 }
 
 async function fetchCardDetail(cardId: string, mode?: string) {
@@ -154,21 +120,14 @@ router.get("/stats", requireAdmin, async (_req, res) => {
   try {
     const [usersTotal, kycApproved, cardHolders, transactionsTotal] = await Promise.all([
       User.countDocuments({}),
-      User.countDocuments({ kycStatus: "approved" }),
+      Customer.countDocuments({ kycStatus: "approved" }),
       Card.distinct("userId", { cardId: { $exists: true, $ne: "" } }).then((ids) => ids.length),
       Transaction.countDocuments({}),
     ]);
-
-    res.json({
-      success: true,
-      usersTotal,
-      kycApproved,
-      cardHolders,
-      transactionsTotal,
-    });
+    return ok(res, { usersTotal, kycApproved, cardHolders, transactionsTotal });
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -204,79 +163,55 @@ router.get("/users", requireAdmin, async (req, res) => {
       .limit(limit || 50)
       .lean();
 
-    const users = items.map((u) => ({
-      telegramUserId: u.userId,
-      strowalletCustomerId: u.strowalletCustomerId,
-      kycStatus: u.kycStatus || "not_started",
-      firstName: u.firstName,
-      lastName: u.lastName,
-      customerEmail: u.customerEmail,
-      idType: u.idType,
-      submittedAt: u.kycSubmittedAt,
-    }));
+    const userIds = items.map((u) => u.userId);
+    const customers = await Customer.find({ userId: { $in: userIds } }).lean();
+    const customerMap = new Map(customers.map((c) => [c.userId, c]));
 
-    return res.json({ success: true, users });
+    const users = items.map((u) => {
+      const customer = customerMap.get(u.userId);
+      return {
+        telegramUserId: u.userId,
+        customerId: customer?.customerId || u.strowalletCustomerId,
+        kycStatus: customer?.kycStatus || "not_started",
+        customerKycStatus: customer?.kycStatus || null,
+        userKycStatus: u.kycStatus || null,
+        firstName: u.firstName,
+        lastName: u.lastName,
+        customerEmail: customer?.email || u.customerEmail,
+        idType: u.idType,
+        submittedAt: customer?.submittedAt || u.kycSubmittedAt,
+      };
+    });
+
+    return ok(res, { users });
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
 router.get("/users/:telegramUserId/kyc-status", requireAdmin, async (req, res) => {
   try {
     const telegramUserId = String(req.params.telegramUserId);
-    const refresh = String(req.query.refresh || "false").toLowerCase() === "true";
-    const user = await User.findOne({ userId: telegramUserId });
-    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+    const user = await User.findOne({ userId: telegramUserId }).lean();
+    if (!user) return fail(res, "User not found", 404);
+    const customer = await Customer.findOne({ userId: telegramUserId }).lean();
+    if (!customer) return fail(res, "Customer not found", 404);
 
-    let updatedStatus = user.kycStatus || "not_started";
-
-    if (refresh && (user.strowalletCustomerId || user.customerEmail)) {
-      try {
-        const sw = await fetchCustomerStatus({
-          customerId: user.strowalletCustomerId || undefined,
-          customerEmail: user.customerEmail || undefined,
-        });
-        const statusRaw =
-          sw?.status ||
-          sw?.kycStatus ||
-          sw?.verificationStatus ||
-          sw?.state ||
-          sw?.data?.status ||
-          sw?.data?.kycStatus ||
-          sw?.data?.verificationStatus ||
-          sw?.data?.state;
-
-        const normalized = normalizeKycStatus(statusRaw);
-        const providerCustomerId = extractCustomerId(sw);
-        if (normalized && normalized !== user.kycStatus) {
-          user.kycStatus = normalized;
-        }
-        if (providerCustomerId && !user.strowalletCustomerId) {
-          user.strowalletCustomerId = providerCustomerId;
-        }
-        if (normalized || providerCustomerId) {
-          await user.save();
-        }
-        if (normalized) updatedStatus = normalized;
-      } catch (err: any) {
-        if (err?.response?.status !== 404) throw err;
-      }
-    }
-
-    return res.json({
-      success: true,
+    return ok(res, {
       telegramUserId: user.userId,
-      strowalletCustomerId: user.strowalletCustomerId,
-      customerEmail: user.customerEmail,
-      kycStatus: updatedStatus === "declined" ? "rejected" : updatedStatus,
-      submittedAt: user.kycSubmittedAt,
+      customerId: customer.customerId || user.strowalletCustomerId,
+      customerEmail: customer.email || user.customerEmail,
+      kycStatus: customer.kycStatus,
+      customerKycStatus: customer.kycStatus,
+      userKycStatus: user.kycStatus || null,
+      submittedAt: customer.submittedAt || user.kycSubmittedAt,
       idType: user.idType,
       name: [user.firstName, user.lastName].filter(Boolean).join(" "),
     });
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -284,7 +219,7 @@ router.get("/users/:telegramUserId/kyc-debug", requireAdmin, async (req, res) =>
   try {
     const telegramUserId = String(req.params.telegramUserId);
     const user = await User.findOne({ userId: telegramUserId }).lean();
-    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+    if (!user) return fail(res, "User not found", 404);
 
     const missing = [
       user.idType ? null : "idType",
@@ -293,8 +228,7 @@ router.get("/users/:telegramUserId/kyc-debug", requireAdmin, async (req, res) =>
       user.strowalletCustomerId ? null : "strowalletCustomerId",
     ].filter(Boolean);
 
-    return res.json({
-      success: true,
+    return ok(res, {
       telegramUserId: user.userId,
       kycStatus: user.kycStatus || "not_started",
       strowalletCustomerId: user.strowalletCustomerId,
@@ -309,8 +243,8 @@ router.get("/users/:telegramUserId/kyc-debug", requireAdmin, async (req, res) =>
       missing,
     });
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -318,7 +252,7 @@ router.get("/users/:telegramUserId/kyc-payload", requireAdmin, async (req, res) 
   try {
     const telegramUserId = String(req.params.telegramUserId);
     const user = await User.findOne({ userId: telegramUserId }).lean();
-    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+    if (!user) return fail(res, "User not found", 404);
 
     const idImage = user.idImagePdfUrl || user.idImageFrontUrl || user.idImageUrl || user.idImageBackUrl;
     const payload = {
@@ -340,15 +274,14 @@ router.get("/users/:telegramUserId/kyc-payload", requireAdmin, async (req, res) 
       idType: user.idType,
     };
 
-    return res.json({
-      success: true,
+    return ok(res, {
       note: "idNumber is not stored in plain text; fill it from the user. idNumberLast4 provided for reference.",
       idNumberLast4: user.idNumberLast4,
       payload,
     });
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -379,8 +312,7 @@ router.get("/cards", requireAdmin, async (req, res) => {
     const users = await User.find({ userId: { $in: userIds } }).lean();
     const userMap = new Map(users.map((u) => [u.userId, u]));
 
-    return res.json({
-      success: true,
+    return ok(res, {
       cards: items.map((c) => ({
         cardId: c.cardId,
         userId: c.userId,
@@ -399,8 +331,8 @@ router.get("/cards", requireAdmin, async (req, res) => {
       })),
     });
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -425,10 +357,10 @@ router.post("/cards/:cardId/refresh", requireAdmin, async (req, res) => {
       },
       { upsert: true, new: true }
     );
-    return res.json({ success: true, detail: data });
+    return ok(res, { detail: data });
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -437,13 +369,13 @@ router.post("/cards/:cardId/action", requireAdmin, async (req, res) => {
     const cardId = String(req.params.cardId);
     const action = req.body?.action === "freeze" ? "freeze" : "unfreeze";
     const card = await Card.findOne({ cardId });
-    if (!card) return res.status(404).json({ success: false, message: "Card not found" });
+    if (!card) return fail(res, "Card not found", 404);
     const currentStatus = String(card.status || "").toLowerCase();
     if (action === "freeze" && currentStatus === "frozen") {
-      return res.status(400).json({ success: false, message: "Card already frozen" });
+      return fail(res, "Card already frozen", 400);
     }
     if (action === "unfreeze" && currentStatus === "active") {
-      return res.status(400).json({ success: false, message: "Card already active" });
+      return fail(res, "Card already active", 400);
     }
     const result = await actionCard(cardId, action);
     await Card.findOneAndUpdate(
@@ -452,82 +384,15 @@ router.post("/cards/:cardId/action", requireAdmin, async (req, res) => {
       { new: true }
     );
     await notifyCardStatusChanged(cardId, action === "freeze" ? "frozen" : "active");
-    return res.json({ success: true, result });
+    return ok(res, { result });
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
-router.post("/cards/:cardId/fund", requireAdmin, async (req, res) => {
-  try {
-    const cardId = String(req.params.cardId);
-    const amount = String(req.body?.amount || "0");
-    const mode = typeof req.body?.mode === "string" ? req.body.mode : undefined;
-    const result = await fundCard(cardId, amount, mode);
-
-    const data = (result as any)?.data ?? result;
-    const balanceRaw =
-      (data as any)?.balance ||
-      (data as any)?.available_balance ||
-      (data as any)?.availableBalance ||
-      (data as any)?.data?.balance ||
-      (data as any)?.data?.available_balance;
-    const currency = extractField(data, ["currency", "ccy", "iso_currency"]);
-    const amountNum = Number(amount);
-    const nextBalance = balanceRaw != null && !Number.isNaN(Number(balanceRaw)) ? Number(balanceRaw) : undefined;
-
-    const existing = await Card.findOne({ cardId }).lean();
-    const updatedBalance =
-      nextBalance != null
-        ? nextBalance
-        : existing?.balance != null && !Number.isNaN(Number(existing.balance)) && !Number.isNaN(amountNum)
-          ? Number(existing.balance) + amountNum
-          : undefined;
-
-    const updated = await Card.findOneAndUpdate(
-      { cardId },
-      {
-        $set: {
-          balance: updatedBalance != null ? String(updatedBalance) : existing?.balance,
-          currency: currency || existing?.currency,
-          lastSync: new Date(),
-        },
-      },
-      { new: true }
-    );
-
-    const userId = updated?.userId || existing?.userId;
-    const txnId = extractField(data, ["transaction_id", "transactionId", "id", "reference", "ref"]);
-    const ref = txnId || `admin-fund-${cardId}-${Date.now()}`;
-    if (userId && !Number.isNaN(amountNum)) {
-      await Transaction.findOneAndUpdate(
-        { userId, transactionType: "card", transactionNumber: ref },
-        {
-          $set: {
-            userId,
-            transactionType: "card",
-            paymentMethod: "strowallet",
-            amount: Math.abs(amountNum),
-            currency: currency || updated?.currency || existing?.currency || "USD",
-            status: "completed",
-            transactionNumber: ref,
-            metadata: {
-              cardId,
-              direction: "credit",
-              description: "Admin fund",
-            },
-            responseData: data,
-          },
-        },
-        { upsert: true, new: true }
-      );
-    }
-    return res.json({ success: true, result });
-  } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
-  }
+router.post("/cards/:cardId/fund", requireAdmin, async (_req, res) => {
+  return fail(res, "Admin funding is disabled. StroWallet is the source of truth.", 405);
 });
 
 router.get("/cards/:cardId/transactions", requireAdmin, async (req, res) => {
@@ -539,13 +404,13 @@ router.get("/cards/:cardId/transactions", requireAdmin, async (req, res) => {
       const page = Number(req.query.page || 1);
       const take = Number(req.query.take || 50);
       const data = await fetchCardHistory(cardId, page, take);
-      return res.json({ success: true, data });
+      return ok(res, { data });
     }
     const data = await fetchCardTransactions(cardId, mode);
-    return res.json({ success: true, data });
+    return ok(res, { data });
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -574,10 +439,10 @@ router.get("/transactions", requireAdmin, async (req, res) => {
       createdAt: t.createdAt,
     }));
 
-    return res.json({ success: true, transactions });
+    return ok(res, { transactions });
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -587,10 +452,10 @@ router.get("/reconciliation", requireAdmin, async (req, res) => {
     const limit = Number(req.query.limit || 50);
     const mismatchOnly = String(req.query.mismatchOnly || "false").toLowerCase() === "true";
     const items = await getReconciliationSummary(limit, mismatchOnly);
-    return res.json({ success: true, items });
+    return ok(res, { items });
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -600,10 +465,10 @@ router.post("/reconciliation/run", requireAdmin, async (req, res) => {
     const mode = typeof req.body?.mode === "string" ? req.body.mode : undefined;
     const limit = req.body?.limit ? Number(req.body.limit) : undefined;
     const results = await reconcileAllCards({ mode, notify: true, limit });
-    return res.json({ success: true, results });
+    return ok(res, { results });
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 
@@ -613,23 +478,10 @@ router.post("/reconciliation/:cardId/force", requireAdmin, async (req, res) => {
     const cardId = String(req.params.cardId);
     const mode = typeof req.body?.mode === "string" ? req.body.mode : undefined;
     const result = await reconcileCard(cardId, { mode, notify: true });
-    return res.json({ success: true, result });
+    return ok(res, { result });
   } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
-  }
-});
-
-// Audit transactions for a card
-router.get("/reconciliation/:cardId/audit", requireAdmin, async (req, res) => {
-  try {
-    const cardId = String(req.params.cardId);
-    const mode = typeof req.query.mode === "string" ? req.query.mode : undefined;
-    const result = await auditCardTransactions(cardId, { mode });
-    return res.json({ success: true, result });
-  } catch (e) {
-    const { status, body } = normalizeError(e);
-    return res.status(status).json(body);
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
   }
 });
 

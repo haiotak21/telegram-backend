@@ -13,6 +13,7 @@ import Card from "../models/Card";
 import { verifyPayment } from "./paymentVerification";
 import Transaction from "../models/Transaction";
 import User from "../models/User";
+import Customer from "../models/Customer";
 import type { PaymentMethod } from "./paymentVerification";
 import { loadPricingConfig } from "./pricingService";
 
@@ -46,7 +47,7 @@ type KycStep =
   | "userPhoto"
   | "confirm";
 
-type KycStatus = "not_started" | "pending" | "approved" | "declined";
+type KycStatus = "not_started" | "pending" | "approved" | "rejected";
 
 type CreateCardStep = "name" | "type" | "amount" | "confirm";
 interface CreateCardSession {
@@ -138,6 +139,27 @@ const cardRequestSelections = new Map<number, { amountEtb: number; feeEtb: numbe
 const recentCallbackActions = new Map<number, { action: string; at: number }>();
 const recentOutgoing = new Map<number, { key: string; at: number }>();
 const recentUpdates = new Map<string, number>();
+
+async function upsertTelegramIdentity(msg: any) {
+  const telegramId = msg?.from?.id != null ? String(msg.from.id) : undefined;
+  const chatId = msg?.chat?.id != null ? String(msg.chat.id) : undefined;
+  if (!telegramId || !chatId) return;
+  const username = msg?.from?.username ? String(msg.from.username) : undefined;
+  await User.findOneAndUpdate(
+    { $or: [{ telegramId }, { userId: telegramId }] },
+    {
+      $set: {
+        telegramId,
+        chatId,
+        username,
+      },
+      $setOnInsert: {
+        userId: telegramId,
+      },
+    },
+    { upsert: true, new: true }
+  );
+}
 
 const MENU_BUTTON: InlineKeyboardButton = { text: "📋 Menu", callback_data: "MENU" };
 const MENU_KEYBOARD: InlineKeyboardButton[][] = [
@@ -261,6 +283,7 @@ export async function initBot() {
       from: msg.from?.username || msg.from?.id,
       text: msg.text,
     });
+    await upsertTelegramIdentity(msg);
     if (shouldSuppressOutgoing(chatId, "start", 10000)) {
       console.warn("/start suppressed by rate limit", { chatId });
       return;
@@ -327,16 +350,15 @@ export async function initBot() {
 
   botRef.onText(/^\/kyc_status$/i, async (msg: any) => {
     const chatId = msg.chat.id;
-    const user = await User.findOne({ userId: String(chatId) }).lean();
-    if (!user) {
+    const customer = await Customer.findOne({ userId: String(chatId) }).lean();
+    if (!customer) {
       await bot!.sendMessage(chatId, "No KYC record found. Use /kyc to submit.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
       return;
     }
-    const refreshed = await refreshKycStatusFromStroWallet(user);
-    const status = refreshed || (user.kycStatus as KycStatus) || "not_started";
-    const label = status === "declined" ? "rejected" : status;
+    const status = customer.kycStatus || "pending";
+    const label = status === "approved" ? "Approved" : status === "pending" ? "Pending verification" : "Rejected — contact support";
     await bot!.sendMessage(chatId, `Your KYC status: ${label}.`, {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
@@ -389,28 +411,20 @@ export async function initBot() {
   botRef.onText(/^\/kyc$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "kyc")) return;
     const chatId = msg.chat.id;
-    const user = await User.findOne({ userId: String(chatId) }).lean();
-    const status = (user?.kycStatus || "not_started") as KycStatus;
-    if (status === "pending") {
-      if (!user?.strowalletCustomerId) {
-        await bot!.sendMessage(chatId, "⚠️ KYC is pending but missing a customer ID. Please resubmit your KYC.", {
-          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-        });
-        await startKycFlow(chatId, msg, "create");
-        return;
-      }
-      await bot!.sendMessage(chatId, "✅ KYC already submitted. Status: pending approval.", {
+    const customer = await Customer.findOne({ userId: String(chatId) }).lean();
+    if (customer?.kycStatus === "pending") {
+      await bot!.sendMessage(chatId, "✅ KYC already submitted. Status: pending verification.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
       return;
     }
-    if (status === "approved") {
+    if (customer?.kycStatus === "approved") {
       await bot!.sendMessage(chatId, "✅ KYC already approved.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
       return;
     }
-    if (status === "declined") {
+    if (customer?.kycStatus === "rejected") {
       await bot!.sendMessage(chatId, "❌ Your KYC was rejected. Use /kyc_edit to resubmit.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
@@ -423,20 +437,17 @@ export async function initBot() {
     if (shouldSkipCommand(msg, "kyc_edit")) return;
     const chatId = msg.chat.id;
     const user = await User.findOne({ userId: String(chatId) }).lean();
-    if (!user) {
+    const customer = await Customer.findOne({ userId: String(chatId) }).lean();
+    if (!customer) {
       await bot!.sendMessage(chatId, "No KYC record found. Use /kyc to submit.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
       return;
     }
-    if (user.kycStatus === "approved") {
+    if (customer.kycStatus === "approved") {
       await bot!.sendMessage(chatId, "✅ KYC already approved. No edits required.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
-      return;
-    }
-    if (!user.strowalletCustomerId) {
-      await startKycFlow(chatId, msg, "create", user);
       return;
     }
     await startKycFlow(chatId, msg, "edit", user);
@@ -1011,7 +1022,8 @@ export async function initBot() {
           }
 
           const user = await User.findOne({ userId: String(msg.chat.id) }).lean();
-          if (!user || user.kycStatus !== "approved") {
+          const customer = await Customer.findOne({ userId: String(msg.chat.id) }).lean();
+          if (!customer || customer.kycStatus !== "approved") {
             await bot!.sendMessage(msg.chat.id, "❌ KYC is not approved. Please complete KYC before requesting a card.", {
               reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
             });
@@ -1041,7 +1053,7 @@ export async function initBot() {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
           });
           cardRequestSelections.delete(msg.chat.id);
-          await submitCardRequest(String(msg.chat.id), user, undefined, selection.amountEtb);
+          await submitCardRequest(String(msg.chat.id), user, customer, undefined, selection.amountEtb);
         } else {
           await bot!.sendMessage(msg.chat.id, `❌ Verification failed: ${b?.message || "Unknown error"}`, {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -1089,6 +1101,15 @@ export async function notifyByEmail(email: string, message: string) {
   const link = await TelegramLink.findOne({ customerEmail: email });
   if (link) {
     await bot.sendMessage(link.chatId, message, { disable_web_page_preview: true });
+    return;
+  }
+  const customer = await Customer.findOne({ email }).lean();
+  if (customer?.userId) {
+    const user = await User.findOne({ userId: customer.userId }).lean();
+    const chatId = user?.chatId ? Number(user.chatId) : NaN;
+    if (Number.isFinite(chatId)) {
+      await bot.sendMessage(chatId, message, { disable_web_page_preview: true });
+    }
   }
 }
 
@@ -1161,7 +1182,7 @@ export async function notifyKycStatus(userId: string, status: KycStatus) {
     });
     return;
   }
-  if (status === "declined") {
+  if (status === "rejected") {
     await bot.sendMessage(chatId, "❌ Kyc verification failed upload a scan of your id or passport", {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
@@ -1169,17 +1190,7 @@ export async function notifyKycStatus(userId: string, status: KycStatus) {
 }
 
 export async function pollPendingKycUpdates() {
-  const pending = await User.find({ kycStatus: { $in: ["pending", "approved"] } }).lean();
-  if (!pending.length) return { checked: 0, updated: 0 };
-  let updated = 0;
-  for (const user of pending) {
-    const nextStatus = await refreshKycStatusFromStroWallet(user);
-    if (nextStatus && nextStatus !== user.kycStatus) {
-      updated += 1;
-      await notifyKycStatus(String(user.userId), nextStatus);
-    }
-  }
-  return { checked: pending.length, updated };
+  return { checked: 0, updated: 0 };
 }
 
 function buildInstanceId() {
@@ -1611,30 +1622,24 @@ async function sendDepositSummary(chatId: number, method: PaymentMethod, amount:
 async function handleCardRequest(chatId: number, message?: any) {
   if (shouldSuppressOutgoing(chatId, "card_request")) return;
   const user = await User.findOne({ userId: String(chatId) }).lean();
-  const kycStatus = (user?.kycStatus || "not_started") as KycStatus;
+  const customer = await Customer.findOne({ userId: String(chatId) }).lean();
+  const kycStatus = customer?.kycStatus || "pending";
 
   if (kycStatus !== "approved") {
     if (kycStatus === "pending") {
-      const refreshed = await refreshKycStatusFromStroWallet(user);
-      if (refreshed === "approved") {
-        await bot!.sendMessage(chatId, "✅ KYC approved. You can now request a card.", {
-          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-        });
-      } else {
-        await bot!.sendMessage(chatId, "⏳ KYC pending approval. Please wait and try again later.", {
-          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-        });
-        return;
-      }
-    } else if (kycStatus === "declined") {
-      await bot!.sendMessage(chatId, "❌ KYC was declined. Please resubmit with /kyc.", {
+      await bot!.sendMessage(chatId, "⏳ KYC pending verification. Please wait and try again later.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
       return;
-    } else {
-      await startKycFlow(chatId, message);
+    }
+    if (kycStatus === "rejected") {
+      await bot!.sendMessage(chatId, "❌ KYC was rejected. Please resubmit with /kyc.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
       return;
     }
+    await startKycFlow(chatId, message);
+    return;
   }
 
   const userId = String(chatId);
@@ -1661,7 +1666,7 @@ async function handleCardRequest(chatId: number, message?: any) {
     return;
   }
 
-  if (!user?.customerEmail) {
+  if (!customer?.email) {
     await bot!.sendMessage(chatId, "❌ Missing email on your KYC. Please update and resubmit KYC.", {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
@@ -1688,10 +1693,11 @@ async function handleCardRequest(chatId: number, message?: any) {
     return;
   }
 
-  await submitCardRequest(String(chatId), user, message, baseAmount);
+  const customer = await Customer.findOne({ userId: String(chatId) }).lean();
+  await submitCardRequest(String(chatId), user, customer, message, baseAmount);
 }
 
-async function submitCardRequest(userId: string, user: any, message?: any, baseAmount?: number) {
+async function submitCardRequest(userId: string, user: any, customer: any, message?: any, baseAmount?: number) {
   const nameOnCard = [user.firstName, user.lastName].filter(Boolean).join(" ") || message?.from?.first_name || "StroWallet User";
   const amount = baseAmount != null ? String(baseAmount) : String(getCardRequestBaseAmount());
   try {
@@ -1700,9 +1706,9 @@ async function submitCardRequest(userId: string, user: any, message?: any, baseA
       nameOnCard,
       cardType: "visa",
       amount,
-      customerEmail: user.customerEmail,
+      customerEmail: customer?.email || user?.customerEmail,
     });
-    if (resp?.data?.success) {
+    if (resp?.data?.ok) {
       await bot!.sendMessage(Number(userId), "✅ Your card request has been submitted to StroWallet. You'll be notified once approved.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
@@ -1712,7 +1718,7 @@ async function submitCardRequest(userId: string, user: any, message?: any, baseA
       });
     }
   } catch (e: any) {
-    const messageText = e?.response?.data?.message || "Your card request could not be approved.";
+    const messageText = e?.response?.data?.error || "Your card request could not be approved.";
     await bot!.sendMessage(Number(userId), `❌ ${messageText}`, {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
@@ -1721,13 +1727,14 @@ async function submitCardRequest(userId: string, user: any, message?: any, baseA
 
 async function startCreateCardFlow(chatId: number, message?: any) {
   const user = await User.findOne({ userId: String(chatId) }).lean();
-  const status = (user?.kycStatus || "not_started") as KycStatus;
+  const customer = await Customer.findOne({ userId: String(chatId) }).lean();
+  const status = customer?.kycStatus || "pending";
   if (status !== "approved") {
     if (status === "pending") {
-      await bot!.sendMessage(chatId, "⏳ KYC pending approval. Please wait before creating a card.", {
+      await bot!.sendMessage(chatId, "⏳ KYC pending verification. Please wait before creating a card.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
-    } else if (status === "declined") {
+    } else if (status === "rejected") {
       await bot!.sendMessage(chatId, "❌ Your KYC was rejected. Use /kyc_edit to resubmit.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
@@ -1824,14 +1831,15 @@ function buildCreateCardSummary(data: CreateCardSession["data"]) {
 
 async function submitCreateCard(chatId: number, session: CreateCardSession) {
   const user = await User.findOne({ userId: String(chatId) }).lean();
-  if (!user || user.kycStatus !== "approved") {
+  const customer = await Customer.findOne({ userId: String(chatId) }).lean();
+  if (!customer || customer.kycStatus !== "approved") {
     createCardSessions.delete(chatId);
     await bot!.sendMessage(chatId, "❌ You must complete and pass KYC before creating a card.", {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
     return;
   }
-  const customerEmail = user.customerEmail;
+  const customerEmail = customer.email || user?.customerEmail;
   if (!customerEmail) {
     createCardSessions.delete(chatId);
     await bot!.sendMessage(chatId, "❌ Missing email. Please update your KYC email and try again.", {
@@ -2501,6 +2509,45 @@ async function submitKyc(chatId: number, session: KycSession) {
       { upsert: true, new: true }
     );
 
+    await Customer.findOneAndUpdate(
+      { userId: String(chatId) },
+      {
+        $set: {
+          customerId: customerId || undefined,
+          email: data.customerEmail,
+          telegramId: user?.telegramId || String(chatId),
+          chatId: user?.chatId || String(chatId),
+          username: user?.username,
+          firstName: data.firstName,
+          lastName: data.lastName,
+          dateOfBirth: data.dateOfBirth,
+          phoneNumber: data.phoneNumber,
+          line1: data.line1,
+          city: data.city,
+          state: data.state,
+          zipCode: data.zipCode,
+          country: data.country,
+          houseNumber: data.houseNumber,
+          idType: data.idType,
+          idNumberEncrypted,
+          idNumberLast4,
+          idImageUrl: idImageForApi,
+          idImageFrontUrl: data.idImageFront,
+          idImageBackUrl: data.idImageBack,
+          idImagePdfUrl: data.idImagePdf,
+          userPhotoUrl: data.userPhoto,
+          kycStatus: "pending",
+          submittedAt: new Date(),
+          approvedAt: undefined,
+          rawPayload: {
+            request: session.mode === "edit" ? updatePayload : createPayload,
+            response: resp,
+          },
+        },
+      },
+      { upsert: true, new: true }
+    );
+
     kycSessions.delete(chatId);
     await bot!.sendMessage(chatId, session.mode === "edit"
       ? "✅ Your updated KYC has been submitted successfully. Status: pending approval."
@@ -2565,15 +2612,16 @@ function normalizeKycStatus(value: any): KycStatus | undefined {
   const v = String(value).toLowerCase();
   if (["approved", "verified", "success", "active", "high kyc"].includes(v)) return "approved";
   if (["pending", "processing", "review", "unreview kyc"].includes(v)) return "pending";
-  if (["declined", "rejected", "failed", "low kyc"].includes(v)) return "declined";
+  if (["declined", "rejected", "failed", "low kyc"].includes(v)) return "rejected";
   return undefined;
 }
 
 async function sendUserInfo(chatId: number, message?: any) {
   if (shouldSuppressOutgoing(chatId, "user_info")) return;
-  const [link, user, cards] = await Promise.all([
+  const [link, user, customer, cards] = await Promise.all([
     TelegramLink.findOne({ chatId }).lean(),
     User.findOne({ userId: String(chatId) }).lean(),
+    Customer.findOne({ userId: String(chatId) }).lean(),
     Card.find({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean(),
   ]);
 
@@ -2581,7 +2629,7 @@ async function sendUserInfo(chatId: number, message?: any) {
   const currency = user?.currency || "USDT";
   const cardsList = cards || [];
   const email = user?.customerEmail || link?.customerEmail;
-  const kycStatus = user?.kycStatus || "not_started";
+  const kycStatus = customer?.kycStatus || "not_started";
   const kycLabel = kycStatus === "approved" ? "approved" : kycStatus === "pending" ? "pending" : "not started";
   const cardList = cardsList.slice(0, 3).map((c, idx) => `${idx + 1}. ${c.cardId}${c.last4 ? ` (••••${c.last4})` : ""}`);
 

@@ -1,6 +1,7 @@
 import express from "express";
 import { z } from "zod";
 import { validateTelebirrTransaction, validateCBETransaction, LegacyPaymentMethod } from "../services/paymentServiceLegacy";
+import { ok, fail } from "../utils/apiResponse";
 
 const router = express.Router();
 
@@ -20,11 +21,11 @@ router.post("/validate-transaction", async (req, res) => {
         ? await validateTelebirrTransaction(txn)
         : await validateCBETransaction(txn);
 
-    if (result.success) return res.json(result);
-    return res.status(400).json(result);
+    if (result.success) return ok(res, result);
+    return fail(res, result.message || "Validation failed", 400);
   } catch (err: any) {
     const message = err?.errors?.[0]?.message || err?.message || "Invalid request";
-    return res.status(400).json({ success: false, message });
+    return fail(res, message, 400);
   }
 });
 export default router;

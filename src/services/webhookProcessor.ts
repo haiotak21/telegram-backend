@@ -2,6 +2,7 @@ import { WebhookEvent } from "../models/WebhookEvent";
 import Card from "../models/Card";
 import Transaction from "../models/Transaction";
 import User from "../models/User";
+import Customer from "../models/Customer";
 import { notifyByCardId, notifyByEmail } from "./botService";
 
 function extractField(obj: any, keys: string[]): string | undefined {
@@ -38,11 +39,60 @@ export async function processStroWalletEvent(payload: any) {
 
   const cardId = extractField(payload, ["card_id", "cardId", "id", "card"]);
   const customerEmail = extractField(payload, ["customerEmail", "email"]);
+  const customerId = extractField(payload, ["customerId", "customer_id", "cardholderId", "card_holder_id"]);
+  const kycStatus = normalizeKycStatus(extractField(payload, [
+    "kycStatus",
+    "status",
+    "verificationStatus",
+    "state",
+    "kyc_state",
+  ]));
 
   const message = formatMessage(type, payload);
 
   if (cardId) await notifyByCardId(cardId, message);
   if (customerEmail) await notifyByEmail(customerEmail, message);
+
+  if (kycStatus && (customerId || customerEmail)) {
+    const existing = await Customer.findOne({
+      $or: [
+        ...(customerId ? [{ customerId }] : []),
+        ...(customerEmail ? [{ email: customerEmail }] : []),
+      ],
+    }).lean();
+
+    let userId = existing?.userId;
+    if (!userId && (customerId || customerEmail)) {
+      const user = await User.findOne({
+        $or: [
+          ...(customerId ? [{ strowalletCustomerId: customerId }] : []),
+          ...(customerEmail ? [{ customerEmail }] : []),
+        ],
+      }).lean();
+      userId = user?.userId;
+    }
+
+    if (userId) {
+      await Customer.findOneAndUpdate(
+        { userId },
+        {
+          $set: {
+            customerId: customerId || existing?.customerId,
+            email: customerEmail || existing?.email,
+            kycStatus,
+            approvedAt: kycStatus === "approved" ? new Date() : undefined,
+          },
+        },
+        { upsert: true, new: true }
+      );
+
+      await User.findOneAndUpdate(
+        { userId },
+        { $set: { kycStatus } },
+        { new: true }
+      );
+    }
+  }
 
   if (type === "card.created" && cardId) {
     const data = payload?.data || payload;
@@ -142,6 +192,15 @@ export async function processStroWalletEvent(payload: any) {
       );
     }
   }
+}
+
+function normalizeKycStatus(value?: string): "pending" | "approved" | "rejected" | undefined {
+  if (!value) return undefined;
+  const v = value.toLowerCase();
+  if (["approved", "verified", "success", "active", "high kyc"].includes(v)) return "approved";
+  if (["pending", "processing", "review", "unreview kyc"].includes(v)) return "pending";
+  if (["declined", "rejected", "failed", "low kyc"].includes(v)) return "rejected";
+  return undefined;
 }
 
 async function resolveUserId(customerEmail?: string, cardId?: string) {

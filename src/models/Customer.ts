@@ -1,19 +1,18 @@
 import mongoose, { Schema, Document, Model } from "mongoose";
 
-export interface IUser extends Document {
+export type CustomerKycStatus = "pending" | "approved" | "rejected";
+
+export interface ICustomer extends Document {
+  customerId?: string;
   userId: string;
+  email?: string;
   telegramId?: string;
   chatId?: string;
   username?: string;
-  balance: number;
-  currency?: string;
-  kycStatus?: "not_started" | "pending" | "approved" | "declined" | "rejected";
-  strowalletCustomerId?: string;
   firstName?: string;
   lastName?: string;
   dateOfBirth?: string;
   phoneNumber?: string;
-  customerEmail?: string;
   line1?: string;
   city?: string;
   state?: string;
@@ -28,26 +27,26 @@ export interface IUser extends Document {
   idImageBackUrl?: string;
   idImagePdfUrl?: string;
   userPhotoUrl?: string;
-  kycSubmittedAt?: Date;
+  kycStatus: CustomerKycStatus;
+  submittedAt?: Date;
+  approvedAt?: Date;
+  rawPayload?: any;
   createdAt: Date;
   updatedAt: Date;
 }
 
-const UserSchema = new Schema<IUser>(
+const CustomerSchema = new Schema<ICustomer>(
   {
-    userId: { type: String, required: true, unique: true, index: true },
-    telegramId: { type: String, unique: true, sparse: true, index: true },
+    customerId: { type: String, index: true },
+    userId: { type: String, required: true, index: true },
+    email: { type: String, index: true },
+    telegramId: { type: String, index: true },
     chatId: { type: String },
     username: { type: String },
-    balance: { type: Number, required: true, default: 0 },
-    currency: { type: String, default: "USDT" },
-    kycStatus: { type: String, enum: ["not_started", "pending", "approved", "declined", "rejected"], default: "not_started", index: true },
-    strowalletCustomerId: { type: String },
     firstName: { type: String },
     lastName: { type: String },
     dateOfBirth: { type: String },
     phoneNumber: { type: String },
-    customerEmail: { type: String },
     line1: { type: String },
     city: { type: String },
     state: { type: String },
@@ -62,11 +61,16 @@ const UserSchema = new Schema<IUser>(
     idImageBackUrl: { type: String },
     idImagePdfUrl: { type: String },
     userPhotoUrl: { type: String },
-    kycSubmittedAt: { type: Date },
+    kycStatus: { type: String, enum: ["pending", "approved", "rejected"], default: "pending", index: true },
+    submittedAt: { type: Date },
+    approvedAt: { type: Date },
+    rawPayload: { type: Schema.Types.Mixed },
   },
   { timestamps: true }
 );
 
-export const User: Model<IUser> = mongoose.models.User || mongoose.model<IUser>("User", UserSchema);
+CustomerSchema.index({ customerId: 1, userId: 1 }, { unique: true, sparse: true });
 
-export default User;
+export const Customer: Model<ICustomer> = mongoose.models.Customer || mongoose.model<ICustomer>("Customer", CustomerSchema);
+
+export default Customer;

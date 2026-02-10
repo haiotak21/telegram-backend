@@ -18,6 +18,7 @@ import { connectDB, disconnectDB } from "./db";
 import { initBot, pollPendingKycUpdates } from "./services/botService";
 import { reconcileAllCards } from "./services/reconciliationService";
 import { processStroWalletEvent } from "./services/webhookProcessor";
+import { ok, fail } from "./utils/apiResponse";
 
 dotenv.config();
 
@@ -28,7 +29,7 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 connectDB().catch((e) => console.error("DB init failed:", e));
 initBot().catch((e) => console.error("Bot init failed:", e));
 
-const kycPollIntervalMs = Number(process.env.KYC_POLL_INTERVAL_MS || 600000);
+const kycPollIntervalMs = Number(process.env.KYC_POLL_INTERVAL_MS || 0);
 let kycPollRunning = false;
 if (Number.isFinite(kycPollIntervalMs) && kycPollIntervalMs > 0) {
   setInterval(async () => {
@@ -77,16 +78,16 @@ app.post(
         const digest = hmac.update(raw).digest("hex");
         const valid = safeCompareHex(digest, signatureHeader);
         if (!valid) {
-          return res.status(400).json({ ok: false, error: "Invalid webhook signature" });
+          return fail(res, "Invalid webhook signature", 400);
         }
       }
 
       // Persist + notify
       processStroWalletEvent(payload).catch((e) => console.error("Webhook processing error:", e));
       console.log("StroWallet webhook received:", payload?.id, payload?.type);
-      return res.status(200).json({ ok: true });
+      return ok(res, {});
     } catch (err: any) {
-      return res.status(400).json({ ok: false, error: "Malformed webhook payload" });
+      return fail(res, "Malformed webhook payload", 400);
     }
   }
 );
@@ -98,7 +99,7 @@ app.use(express.json({ limit: "25mb" }));
 
 // Health check
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "strowallet-proxy", version: "1.0.0" });
+  return ok(res, { service: "strowallet-proxy", version: "1.0.0" });
 });
 
 // Mount StroWallet proxy router
@@ -127,7 +128,7 @@ app.get(/^\/admin\/.*$/, (_req, res) => {
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const message = err?.message || "Unexpected error";
   const status = err?.status || 500;
-  res.status(status).json({ ok: false, error: message });
+  fail(res, message, status);
 });
 
 app.listen(PORT, () => {

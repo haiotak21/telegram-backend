@@ -1,6 +1,7 @@
 import express from "express";
 import { z } from "zod";
 import { verifyPayment } from "../services/paymentVerification";
+import { ok, fail } from "../utils/apiResponse";
 
 const router = express.Router();
 
@@ -19,7 +20,7 @@ function createRateLimiter(maxRequests: number, windowMs: number) {
     recent.push(now);
     hits.set(key, recent);
     if (recent.length > maxRequests) {
-      return res.status(429).json({ success: false, message: "Too many verification attempts. Please try again later." });
+      return fail(res, "Too many verification attempts. Please try again later.", 429);
     }
     next();
   };
@@ -34,10 +35,13 @@ router.post("/verify", rateLimit, async (req, res) => {
       paymentMethod: parsed.paymentMethod,
       transactionNumber: parsed.transactionNumber,
     });
-    return res.status(result.status).json(result.body);
+    if (result.body.success) {
+      return ok(res, result.body, result.status);
+    }
+    return fail(res, result.body.message || "Validation failed", result.status);
   } catch (err: any) {
     const message = err?.errors?.[0]?.message || err?.message || "Invalid request";
-    return res.status(err?.status || 400).json({ success: false, message });
+    return fail(res, message, err?.status || 400);
   }
 });
 

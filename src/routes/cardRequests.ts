@@ -3,8 +3,10 @@ import axios, { AxiosError } from "axios";
 import CardRequest from "../models/CardRequest";
 import { TelegramLink } from "../models/TelegramLink";
 import User from "../models/User";
+import Customer from "../models/Customer";
 import Card from "../models/Card";
 import { notifyCardRequestApproved, notifyCardRequestDeclined } from "../services/botService";
+import { ok, fail } from "../utils/apiResponse";
 
 const router = express.Router();
 
@@ -37,7 +39,7 @@ function requireAdmin(req: express.Request, res: express.Response, next: express
   if (!adminToken) return next();
   const provided = req.headers["x-admin-token"] as string | undefined;
   if (provided && provided === adminToken) return next();
-  return res.status(401).json({ success: false, message: "Unauthorized" });
+  return fail(res, "Unauthorized", 401);
 }
 
 function requirePublicKey() {
@@ -58,11 +60,11 @@ function normalizeError(e: any) {
     const validation = payload?.data?.errors || payload?.errors;
     const validationMsg = validation ? JSON.stringify(validation) : undefined;
     const msg = payload?.message || payload?.error || validationMsg || ae.message || "Request failed";
-    return { status, body: { success: false, message: String(msg), data: payload } };
+    return { status, message: String(msg) };
   }
   const status = e?.status ?? 400;
   const msg = e?.message ?? "Request error";
-  return { status, body: { success: false, message: String(msg) } };
+  return { status, message: String(msg) };
 }
 
 function buildBitvcardClient() {
@@ -106,19 +108,20 @@ router.post("/", async (req, res) => {
     if (!userId) throw new Error("userId is required");
 
     const user = await User.findOne({ userId }).lean();
-    if (!user || user.kycStatus !== "approved") {
-      return res.status(400).json({ success: false, message: "You must complete KYC before requesting a card" });
+    const customer = await Customer.findOne({ userId }).lean();
+    if (!customer || customer.kycStatus !== "approved") {
+      return fail(res, "You must complete KYC before requesting a card", 400);
     }
 
     // Block new requests if user already has an active card
     const activeCard = await Card.findOne({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
     if (activeCard) {
-      return res.status(400).json({ success: false, message: "User already has an active card" });
+      return fail(res, "User already has an active card", 400);
     }
 
     const existing = await CardRequest.findOne({ userId, status: { $in: ["pending", "approved"] } }).lean();
     if (existing) {
-      return res.status(400).json({ success: false, message: "You already have an active or approved card request" });
+      return fail(res, "You already have an active or approved card request", 400);
     }
 
     // Enforce minimum amount of 3
@@ -130,9 +133,9 @@ router.post("/", async (req, res) => {
     if (reqCardType !== "visa" && reqCardType !== "mastercard") reqCardType = "visa";
 
     const nameOnCard = asString(body.nameOnCard) || [user.firstName, user.lastName].filter(Boolean).join(" ") || "StroWallet User";
-    const customerEmail = asEmail(body.customerEmail) || user.customerEmail;
+    const customerEmail = asEmail(body.customerEmail) || customer.email || user.customerEmail;
     if (!customerEmail) {
-      return res.status(400).json({ success: false, message: "customerEmail is required to create a card" });
+      return fail(res, "customerEmail is required to create a card", 400);
     }
 
     const request = await CardRequest.create({
@@ -168,7 +171,7 @@ router.post("/", async (req, res) => {
         request.responseData = respData;
         await request.save();
         notifyCardRequestDeclined(request.userId, request.decisionReason).catch(() => {});
-        return res.status(502).json({ success: false, message: request.decisionReason, request, data: respData });
+        return fail(res, request.decisionReason, 502);
       }
 
       request.status = "approved";
@@ -211,19 +214,19 @@ router.post("/", async (req, res) => {
 
       notifyCardRequestApproved(request.userId, { cardId, cardType: reqCardType, nameOnCard, raw: respData }).catch(() => {});
 
-      return res.status(201).json({ success: true, request, cardId, response: respData });
+      return ok(res, { request, cardId, response: respData }, 201);
     } catch (e: any) {
-      const { status, body } = normalizeError(e);
+      const { status, message } = normalizeError(e);
       request.status = "declined";
-      request.decisionReason = body?.message || "Card request failed";
-      request.responseData = body?.data;
+      request.decisionReason = message || "Card request failed";
+      request.responseData = undefined;
       await request.save();
       notifyCardRequestDeclined(request.userId, request.decisionReason).catch(() => {});
-      return res.status(status).json({ success: false, message: request.decisionReason, request, data: body?.data });
+      return fail(res, request.decisionReason, status);
     }
   } catch (err: any) {
     const message = err?.errors?.[0]?.message || err?.message || "Invalid payload";
-    res.status(400).json({ success: false, message });
+    return fail(res, message, 400);
   }
 });
 
@@ -264,19 +267,19 @@ router.get("/", requireAdmin, async (req, res) => {
       };
     });
 
-    res.json({ success: true, requests: enriched });
+    return ok(res, { requests: enriched });
   } catch (err: any) {
     const message = err?.message || "Failed to load requests";
-    res.status(400).json({ success: false, message });
+    return fail(res, message, 400);
   }
 });
 
 router.post("/:id/approve", requireAdmin, async (_req, res) => {
-  return res.status(405).json({ success: false, message: "Admin approval is disabled. StroWallet auto-approves." });
+  return fail(res, "Admin approval is disabled. StroWallet auto-approves.", 405);
 });
 
 router.post("/:id/decline", requireAdmin, async (_req, res) => {
-  return res.status(405).json({ success: false, message: "Admin decline is disabled. StroWallet auto-approves." });
+  return fail(res, "Admin decline is disabled. StroWallet auto-approves.", 405);
 });
 
 export default router;
