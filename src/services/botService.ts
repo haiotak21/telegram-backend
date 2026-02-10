@@ -2641,20 +2641,20 @@ function resolveKycStatus(user?: any, customer?: any): KycStatus | "not_started"
 
 async function sendUserInfo(chatId: number, message?: any) {
   if (shouldSuppressOutgoing(chatId, "user_info")) return;
-  const [link, user, customer, cards] = await Promise.all([
+  const [link, user, customer] = await Promise.all([
     TelegramLink.findOne({ chatId }).lean(),
     User.findOne({ userId: String(chatId) }).lean(),
     Customer.findOne({ userId: String(chatId) }).lean(),
-    Card.find({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean(),
   ]);
+  const cardIds = await getUserCardIds(chatId);
 
   const balance = user?.balance ?? 0;
   const currency = user?.currency || "USDT";
-  const cardsList = cards || [];
+  const cardsList = cardIds || [];
   const email = user?.customerEmail || link?.customerEmail;
   const kycStatus = resolveKycStatus(user, customer);
   const kycLabel = kycStatus === "approved" ? "approved" : kycStatus === "pending" ? "pending" : "not started";
-  const cardList = cardsList.slice(0, 3).map((c, idx) => `${idx + 1}. ${c.cardId}${c.last4 ? ` (••••${c.last4})` : ""}`);
+  const cardList = cardsList.slice(0, 3).map((id, idx) => `${idx + 1}. ${id}`);
 
   const lines = [
     "👤 Your Profile",

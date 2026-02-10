@@ -77,6 +77,16 @@ function buildBitvcardClient() {
   });
 }
 
+async function fetchCardDetail(cardId: string, mode?: string) {
+  const public_key = requirePublicKey();
+  const resp = await axios.post(
+    `${BITVCARD_BASE}fetch-card-detail/`,
+    { card_id: cardId, public_key, mode },
+    { timeout: 15000 }
+  );
+  return resp.data;
+}
+
 function extractCardInfo(respData: any) {
   const cardId =
     respData?.card_id ||
@@ -305,7 +315,20 @@ router.post("/:id/sync-card", requireAdmin, async (req, res) => {
 
     const cardNumber = request.cardNumber || extracted.cardNumber;
     const last4 = cardNumber ? String(cardNumber).slice(-4) : undefined;
-    const status = extractCardStatus(respData) || "pending";
+    let status = extractCardStatus(respData) || "pending";
+    let currency: string | undefined;
+    let balance: any;
+    let availableBalance: any;
+    try {
+      const detailResp = await fetchCardDetail(String(cardId), normalizeMode(request.mode));
+      const detail = detailResp?.data ?? detailResp;
+      status = extractCardStatus(detail) || status;
+      currency = detail?.currency || detail?.ccy;
+      balance = detail?.balance || detail?.available_balance;
+      availableBalance = detail?.available_balance;
+    } catch (e) {
+      // Non-fatal: keep existing status if upstream fetch fails.
+    }
 
     await CardRequest.findByIdAndUpdate(id, {
       $set: {
@@ -327,6 +350,9 @@ router.post("/:id/sync-card", requireAdmin, async (req, res) => {
           cardType: request.cardType,
           status,
           last4,
+          currency,
+          balance,
+          availableBalance,
         },
       },
       { upsert: true, new: true }
