@@ -2797,12 +2797,20 @@ async function sendWalletSummary(chatId: number, message?: any) {
 
 async function sendMyCards(chatId: number, message?: any) {
   const userId = String(chatId);
-  const [user, customer, latestRequest, primaryCard] = await Promise.all([
+  const [user, customer, link, cardIds] = await Promise.all([
     User.findOne({ userId }).lean(),
     Customer.findOne({ userId }).lean(),
-    CardRequest.findOne({ userId }).sort({ updatedAt: -1 }).lean(),
-    Card.findOne({ userId }).sort({ updatedAt: -1 }).lean(),
+    TelegramLink.findOne({ chatId }).lean(),
+    getUserCardIds(chatId),
   ]);
+  const customerEmail = customer?.email || user?.customerEmail || link?.customerEmail;
+  const [latestRequest, primaryCard] = await Promise.all([
+    CardRequest.findOne({ $or: [{ userId }, { customerEmail }] }).sort({ updatedAt: -1 }).lean(),
+    Card.findOne({ $or: [{ userId }, { customerEmail }] }).sort({ updatedAt: -1 }).lean(),
+  ]);
+  const linkedCardId = cardIds[0];
+  const linkedCard = linkedCardId ? await Card.findOne({ cardId: linkedCardId }).lean() : null;
+  const resolvedCard = linkedCard || primaryCard;
 
   const kycStatus = resolveKycStatus(user, customer);
   if (kycStatus !== "approved") {
@@ -2818,9 +2826,10 @@ async function sendMyCards(chatId: number, message?: any) {
     return;
   }
 
-  const card = primaryCard || (latestRequest?.cardId ? await Card.findOne({ cardId: latestRequest.cardId }).lean() : null);
+  const card = resolvedCard || (latestRequest?.cardId ? await Card.findOne({ cardId: latestRequest.cardId }).lean() : null);
+  const cardId = card?.cardId || latestRequest?.cardId || linkedCardId;
 
-  if (!card) {
+  if (!card && !cardId) {
     if (!latestRequest) {
       const lines = [
         "💳 Virtual Card",
@@ -2883,14 +2892,23 @@ async function sendMyCards(chatId: number, message?: any) {
     }
   }
 
-  if (!card) {
+  if (!card && !cardId) {
     await editOrSend(chatId, message, "No card yet. Request a card to get started.", {
       inline_keyboard: [[MENU_BUTTON]],
     });
     return;
   }
 
-  if (isFrozenStatus(card.status)) {
+  const activeCard = card || {
+    cardId: cardId as string,
+    status: latestRequest?.status === "approved" ? "active" : latestRequest?.status,
+    cardType: latestRequest?.cardType,
+    last4: latestRequest?.cardNumber?.slice(-4),
+    currency: user?.currency || "USD",
+    balance: user?.balance,
+  };
+
+  if (isFrozenStatus(activeCard.status)) {
     const lines = [
       "💳 Your Virtual Card",
       "",
@@ -2901,17 +2919,17 @@ async function sendMyCards(chatId: number, message?: any) {
     ];
     await editOrSend(chatId, message, lines.join("\n"), {
       inline_keyboard: [
-        [{ text: "🔥 Unfreeze Card", callback_data: `CARD_UNFREEZE::${card.cardId}` }],
-        [{ text: "🔍 Transactions", callback_data: `CARD_TXN::${card.cardId}` }],
+        [{ text: "🔥 Unfreeze Card", callback_data: `CARD_UNFREEZE::${activeCard.cardId}` }],
+        [{ text: "🔍 Transactions", callback_data: `CARD_TXN::${activeCard.cardId}` }],
         [MENU_BUTTON],
       ],
     });
     return;
   }
 
-  const last4 = card.last4 || latestRequest?.cardNumber?.slice(-4);
-  const cardType = card.cardType || latestRequest?.cardType || "Virtual USD Card";
-  const balanceLabel = formatCardMoney(card.balance ?? user?.balance, card.currency || user?.currency || "USD");
+  const last4 = activeCard.last4 || latestRequest?.cardNumber?.slice(-4);
+  const cardType = activeCard.cardType || latestRequest?.cardType || "Virtual USD Card";
+  const balanceLabel = formatCardMoney(activeCard.balance ?? user?.balance, activeCard.currency || user?.currency || "USD");
   const expiry = extractExpiry(latestRequest?.responseData || latestRequest?.metadata || {});
   const lines = [
     "💳 Your Virtual Card",
@@ -2924,10 +2942,10 @@ async function sendMyCards(chatId: number, message?: any) {
 
   await editOrSend(chatId, message, lines.join("\n"), {
     inline_keyboard: [
-      [{ text: "🔐 View Card Details", callback_data: `CARD_REVEAL::${card.cardId}` }],
+      [{ text: "🔐 View Card Details", callback_data: `CARD_REVEAL::${activeCard.cardId}` }],
       [
-        { text: "🔍 Transactions", callback_data: `CARD_TXN::${card.cardId}` },
-        { text: "❄️ Freeze Card", callback_data: `CARD_FREEZE::${card.cardId}` },
+        { text: "🔍 Transactions", callback_data: `CARD_TXN::${activeCard.cardId}` },
+        { text: "❄️ Freeze Card", callback_data: `CARD_FREEZE::${activeCard.cardId}` },
       ],
       [MENU_BUTTON],
     ],
