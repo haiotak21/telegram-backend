@@ -15,6 +15,17 @@ const router = express.Router();
 
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
 
+function getDefaultMode() {
+  return process.env.STROWALLET_DEFAULT_MODE || (process.env.NODE_ENV !== "production" ? "sandbox" : undefined);
+}
+
+function normalizeMode(mode?: string) {
+  if (!mode) return undefined;
+  const m = String(mode).toLowerCase();
+  if (m === "live") return undefined;
+  return m;
+}
+
 function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
   const adminToken = process.env.ADMIN_API_TOKEN;
   if (!adminToken) return next();
