@@ -140,6 +140,9 @@ const CardLinkSchema = z
     last4: z.string().min(4).max(4).optional(),
     currency: z.string().min(1).optional(),
     balance: z.string().optional(),
+    cardNumber: z.string().min(6).optional(),
+    cvc: z.string().min(3).max(4).optional(),
+    expiry: z.string().min(4).optional(),
   })
   .refine((v) => v.customerEmail || v.userId, {
     message: "customerEmail or userId is required",
@@ -305,8 +308,10 @@ router.post("/cards/link", requireAdmin, async (req, res) => {
     }
 
     const detail = await fetchCardDetail(cardId, normalizeMode(getDefaultMode())).catch(() => null);
+    const providedCardNumber = body.cardNumber?.trim();
     const last4 =
       body.last4 ||
+      (providedCardNumber ? providedCardNumber.slice(-4) : undefined) ||
       extractField(detail, ["last4", "card_last4", "cardLast4", "cardSuffix"]) ||
       (extractField(detail, ["card_number", "cardNumber"]) || "").slice(-4) ||
       undefined;
@@ -354,8 +359,16 @@ router.post("/cards/link", requireAdmin, async (req, res) => {
             ...(customerEmail ? [{ customerEmail }] : []),
           ],
         },
-        { $set: { cardId, status: "approved" } },
-        { new: true }
+        {
+          $set: {
+            cardId,
+            status: "approved",
+            ...(providedCardNumber ? { cardNumber: providedCardNumber } : {}),
+            ...(body.cvc ? { cvc: body.cvc } : {}),
+            ...(body.expiry ? { "metadata.expiry": body.expiry } : {}),
+          },
+        },
+        { new: true, upsert: true }
       );
     }
 
