@@ -3170,7 +3170,7 @@ async function sendCardSensitiveDetails(chatId: number, cardId: string) {
   const local = await CardRequest.findOne({ cardId, status: "approved" }).lean();
   const localExpiry = extractExpiry(local?.responseData || local?.metadata || {});
   const remote = await fetchCardDetailSafe(cardId);
-  const cardNumber = local?.cardNumber || remote?.card_number || remote?.cardNumber;
+  const cardNumber = local?.cardNumber || remote?.card_number;
   const cvc = local?.cvc || remote?.cvc;
   const expiry = localExpiry || extractExpiry(remote);
 
