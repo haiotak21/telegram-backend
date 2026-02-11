@@ -350,21 +350,7 @@ export async function initBot() {
 
   botRef.onText(/^\/kyc_status$/i, async (msg: any) => {
     const chatId = msg.chat.id;
-    const [user, customer] = await Promise.all([
-      User.findOne({ userId: String(chatId) }).lean(),
-      Customer.findOne({ userId: String(chatId) }).lean(),
-    ]);
-    const status = resolveKycStatus(user, customer);
-    if (status === "not_started") {
-      await bot!.sendMessage(chatId, "No KYC record found. Use /kyc to submit.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
-    }
-    const label = status === "approved" ? "Approved" : status === "pending" ? "Pending verification" : "Rejected — contact support";
-    await bot!.sendMessage(chatId, `Your KYC status: ${label}.`, {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
+    await sendKycStatus(chatId);
   });
 
   botRef.onText(/^\/create_card$/i, async (msg: any) => {
@@ -380,7 +366,7 @@ export async function initBot() {
 
   botRef.onText(/^\/mycard(s)?$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "mycard")) return;
-    return sendMyCardSummary(msg.chat.id);
+    return sendMyCards(msg.chat.id, msg);
   });
 
   botRef.onText(/^\/cardstatus$/i, async (msg: any) => {
@@ -650,6 +636,32 @@ export async function initBot() {
     if (action === "MENU") {
       await bot!.answerCallbackQuery(query.id).catch(() => { });
       return sendMenu(chatId, query.message);
+    }
+
+    if (action === "KYC_STATUS") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      await sendKycStatus(chatId);
+      return;
+    }
+
+    if (action === "KYC_START") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      await startKycFlow(chatId, query.message);
+      return;
+    }
+
+    if (action.startsWith("CARD_REVEAL::")) {
+      const cardId = action.replace("CARD_REVEAL::", "");
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      await sendCardRevealPrompt(chatId, cardId);
+      return;
+    }
+
+    if (action.startsWith("CARD_REVEAL_CONFIRM::")) {
+      const cardId = action.replace("CARD_REVEAL_CONFIRM::", "");
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      await sendCardSensitiveDetails(chatId, cardId);
+      return;
     }
 
     if (action === "MENU_VERIFY") {
@@ -2639,6 +2651,49 @@ function resolveKycStatus(user?: any, customer?: any): KycStatus | "not_started"
   return normalized || (raw === "not_started" ? "not_started" : "pending");
 }
 
+async function sendKycStatus(chatId: number) {
+  const [user, customer] = await Promise.all([
+    User.findOne({ userId: String(chatId) }).lean(),
+    Customer.findOne({ userId: String(chatId) }).lean(),
+  ]);
+  const status = resolveKycStatus(user, customer);
+  if (status === "not_started") {
+    await bot!.sendMessage(chatId, "No KYC record found. Use /kyc to submit.", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+    return;
+  }
+  const label = status === "approved" ? "Approved" : status === "pending" ? "Pending verification" : "Rejected — contact support";
+  await bot!.sendMessage(chatId, `Your KYC status: ${label}.`, {
+    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+  });
+}
+
+function formatMaskedCard(last4?: string) {
+  return `**** **** **** ${last4 || "----"}`;
+}
+
+function formatMoney(value: any, currency?: string) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return undefined;
+  const normalized = (currency || "USD").toUpperCase();
+  if (normalized === "USD" || normalized === "USDT") return `$${amount.toFixed(2)}`;
+  return `${amount.toFixed(2)} ${normalized}`;
+}
+
+function extractExpiry(detail: any) {
+  if (!detail) return undefined;
+  const month = detail?.exp_month || detail?.expiry_month || detail?.expMonth || detail?.expiryMonth;
+  const year = detail?.exp_year || detail?.expiry_year || detail?.expYear || detail?.expiryYear;
+  if (month && year) return `${String(month).padStart(2, "0")}/${String(year).slice(-2)}`;
+  const raw = detail?.expiry || detail?.expiry_date || detail?.exp || detail?.expDate;
+  return raw ? String(raw) : undefined;
+}
+
+function isFrozenStatus(raw?: string) {
+  return String(raw || "").toLowerCase().includes("frozen");
+}
+
 async function sendUserInfo(chatId: number, message?: any) {
   if (shouldSuppressOutgoing(chatId, "user_info")) return;
   const [link, user, customer] = await Promise.all([
@@ -2741,25 +2796,142 @@ async function sendWalletSummary(chatId: number, message?: any) {
 
 
 async function sendMyCards(chatId: number, message?: any) {
-  const cardIds = await getUserCardIds(chatId);
+  const userId = String(chatId);
+  const [user, customer, latestRequest, primaryCard] = await Promise.all([
+    User.findOne({ userId }).lean(),
+    Customer.findOne({ userId }).lean(),
+    CardRequest.findOne({ userId }).sort({ updatedAt: -1 }).lean(),
+    Card.findOne({ userId }).sort({ updatedAt: -1 }).lean(),
+  ]);
 
-  if (!cardIds.length) {
-    if (shouldSuppressOutgoing(chatId, "my_cards_empty")) return;
+  const kycStatus = resolveKycStatus(user, customer);
+  if (kycStatus !== "approved") {
+    const label = kycStatus === "pending" ? "Pending" : kycStatus === "rejected" ? "Rejected" : "Not started";
+    const lines = [
+      "⚠️ KYC Required",
+      "You must complete KYC before requesting a card.",
+      `KYC Status: ${label}`,
+    ];
+    await editOrSend(chatId, message, lines.join("\n"), {
+      inline_keyboard: [[{ text: "✅ Complete KYC", callback_data: "KYC_START" }], [MENU_BUTTON]],
+    });
+    return;
+  }
+
+  const card = primaryCard || (latestRequest?.cardId ? await Card.findOne({ cardId: latestRequest.cardId }).lean() : null);
+
+  if (!card) {
+    if (!latestRequest) {
+      const lines = [
+        "💳 Virtual Card",
+        "",
+        "You don't have a card yet.",
+        "",
+        "To get a card:",
+        "• Complete KYC",
+        "• Request a virtual card",
+        "",
+        "👇 Choose an option:",
+      ];
+      await editOrSend(chatId, message, lines.join("\n"), {
+        inline_keyboard: [
+          [{ text: "➕ Request Card", callback_data: "MENU_CREATE_CARD" }],
+          [{ text: "📝 KYC Status", callback_data: "KYC_STATUS" }],
+          [MENU_BUTTON],
+        ],
+      });
+      return;
+    }
+
+    if (latestRequest.status === "pending" || latestRequest.status === "approved") {
+      const lines = [
+        "💳 Virtual Card",
+        "",
+        "Status: ⏳ Pending Approval",
+        "",
+        "Your card request is being reviewed.",
+        "This usually takes a few minutes.",
+        "",
+        "You'll be notified once your card is ready.",
+      ];
+      await editOrSend(chatId, message, lines.join("\n"), {
+        inline_keyboard: [[{ text: "🔄 Refresh Status", callback_data: "MENU_MY_CARDS" }], [MENU_BUTTON]],
+      });
+      return;
+    }
+
+    if (latestRequest.status === "declined") {
+      const reason = latestRequest.decisionReason || latestRequest.adminNote;
+      const lines = [
+        "💳 Virtual Card",
+        "",
+        "❌ Card Request Failed",
+        "",
+        "Reason:",
+        reason ? `• ${reason}` : "• KYC not approved\n• Invalid details\n• Provider rejection",
+        "",
+        "Please fix the issue and try again.",
+      ];
+      await editOrSend(chatId, message, lines.join("\n"), {
+        inline_keyboard: [
+          [{ text: "📝 Check KYC Status", callback_data: "KYC_STATUS" }],
+          [{ text: "➕ Request Card Again", callback_data: "MENU_CREATE_CARD" }],
+          [MENU_BUTTON],
+        ],
+      });
+      return;
+    }
+  }
+
+  if (!card) {
     await editOrSend(chatId, message, "No card yet. Request a card to get started.", {
       inline_keyboard: [[MENU_BUTTON]],
     });
     return;
   }
 
-  if (!shouldSuppressOutgoing(chatId, "my_cards_fetch")) {
-    await editOrSend(chatId, message, `Fetching ${cardIds.length} card(s)...`, {
-      inline_keyboard: [[MENU_BUTTON]],
+  if (isFrozenStatus(card.status)) {
+    const lines = [
+      "💳 Your Virtual Card",
+      "",
+      "Status: ❄️ Frozen",
+      "Reason: Temporary freeze",
+      "",
+      "You can unfreeze your card anytime.",
+    ];
+    await editOrSend(chatId, message, lines.join("\n"), {
+      inline_keyboard: [
+        [{ text: "🔥 Unfreeze Card", callback_data: `CARD_UNFREEZE::${card.cardId}` }],
+        [{ text: "🔍 Transactions", callback_data: `CARD_TXN::${card.cardId}` }],
+        [MENU_BUTTON],
+      ],
     });
+    return;
   }
 
-  for (const cardId of cardIds) {
-    await sendCardDetail(chatId, cardId);
-  }
+  const last4 = card.last4 || latestRequest?.cardNumber?.slice(-4);
+  const cardType = card.cardType || latestRequest?.cardType || "Virtual USD Card";
+  const balanceLabel = formatMoney(card.balance ?? user?.balance, card.currency || user?.currency || "USD");
+  const expiry = extractExpiry(latestRequest?.responseData || latestRequest?.metadata || {});
+  const lines = [
+    "💳 Your Virtual Card",
+    `Card Type: ${cardType}`,
+    "Status: ✅ Active",
+    `Card Number: ${formatMaskedCard(last4)}`,
+    expiry ? `Expiry Date: ${expiry}` : undefined,
+    balanceLabel ? `Balance: ${balanceLabel}` : undefined,
+  ].filter(Boolean) as string[];
+
+  await editOrSend(chatId, message, lines.join("\n"), {
+    inline_keyboard: [
+      [{ text: "🔐 View Card Details", callback_data: `CARD_REVEAL::${card.cardId}` }],
+      [
+        { text: "🔍 Transactions", callback_data: `CARD_TXN::${card.cardId}` },
+        { text: "❄️ Freeze Card", callback_data: `CARD_FREEZE::${card.cardId}` },
+      ],
+      [MENU_BUTTON],
+    ],
+  });
 }
 
 function isLikelyCardId(value?: string) {
@@ -2856,19 +3028,20 @@ async function sendCardDetail(chatId: number, cardId: string) {
         balance: walletBalance,
         available_balance: local.amount || undefined,
         currency: card?.currency || "USD",
-        card_number: local.cardNumber,
-        cvc: local.cvc,
         last4: card?.last4,
+        expiry: extractExpiry(local.responseData || local.metadata || {}),
       };
       const text = buildCardDetailMessage(detail, cardId);
+      const freezeAction = isFrozenStatus(detail.status) ? "CARD_UNFREEZE" : "CARD_FREEZE";
+      const freezeLabel = isFrozenStatus(detail.status) ? "🔥 Unfreeze" : "❄️ Freeze";
       await bot!.sendMessage(chatId, text, {
         reply_markup: {
           inline_keyboard: [
             [
+              { text: "🔐 View Card Details", callback_data: `CARD_REVEAL::${cardId}` },
               { text: "🔍 Transactions", callback_data: `CARD_TXN::${cardId}` },
-              { text: "❄️ Freeze", callback_data: `CARD_FREEZE::${cardId}` },
-              { text: "🔥 Unfreeze", callback_data: `CARD_UNFREEZE::${cardId}` },
             ],
+            [{ text: freezeLabel, callback_data: `${freezeAction}::${cardId}` }],
             [MENU_BUTTON],
           ],
         },
@@ -2888,10 +3061,61 @@ async function sendCardDetail(chatId: number, cardId: string) {
       last4: card?.last4,
     };
     const text = buildCardDetailMessage(detail, cardId);
-    await bot!.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+    const freezeAction = isFrozenStatus(detail.status) ? "CARD_UNFREEZE" : "CARD_FREEZE";
+    const freezeLabel = isFrozenStatus(detail.status) ? "🔥 Unfreeze" : "❄️ Freeze";
+    await bot!.sendMessage(chatId, text, {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "🔐 View Card Details", callback_data: `CARD_REVEAL::${cardId}` },
+            { text: "🔍 Transactions", callback_data: `CARD_TXN::${cardId}` },
+          ],
+          [{ text: freezeLabel, callback_data: `${freezeAction}::${cardId}` }],
+          [MENU_BUTTON],
+        ],
+      },
+    });
   } catch (err: any) {
     await sendFriendlyError(chatId, err?.requestId);
   }
+}
+
+async function sendCardRevealPrompt(chatId: number, cardId: string) {
+  const lines = [
+    "🔐 Confirm to view full card details.",
+    "This helps prevent accidental exposure.",
+  ];
+  await bot!.sendMessage(chatId, lines.join("\n"), {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "Show Details", callback_data: `CARD_REVEAL_CONFIRM::${cardId}` }],
+        [{ text: "Cancel", callback_data: "MENU_MY_CARDS" }],
+        [MENU_BUTTON],
+      ],
+    },
+  });
+}
+
+async function sendCardSensitiveDetails(chatId: number, cardId: string) {
+  const local = await CardRequest.findOne({ cardId, status: "approved" }).lean();
+  if (!local?.cardNumber || !local?.cvc) {
+    await bot!.sendMessage(chatId, "Full card details are not available. Please try again later or contact support.", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+    return;
+  }
+
+  const expiry = extractExpiry(local.responseData || local.metadata || {});
+  const lines = [
+    "🔐 Card Details",
+    `Card Number: ${local.cardNumber}`,
+    `CVV: ${local.cvc}`,
+    expiry ? `Expiry: ${expiry}` : undefined,
+  ].filter(Boolean) as string[];
+
+  await bot!.sendMessage(chatId, lines.join("\n"), {
+    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+  });
 }
 
 async function sendCardTransactions(chatId: number, cardId?: string) {
@@ -3047,14 +3271,12 @@ function buildCardDetailMessage(detail: any, cardId: string) {
   const currency = detail?.currency || detail?.ccy || "";
   const name = detail?.name_on_card || detail?.name || "Card";
   const brand = detail?.brand || detail?.card_type || "";
-  const cardNumber = detail?.card_number || detail?.cardNumber;
-  const cvc = detail?.cvc;
+  const expiry = detail?.expiry || detail?.expiry_date || detail?.exp || detail?.expDate;
 
   const lines = [
     `💳 ${name}${brand ? ` (${brand})` : ""}`,
     `ID: ${cardId}${last4 ? ` (••••${last4})` : ""}`,
-    cardNumber ? `Number: ${cardNumber}` : undefined,
-    cvc ? `CVC: ${cvc}` : undefined,
+    expiry ? `Expiry: ${expiry}` : undefined,
     `Status: ${status}`,
     balance ? `Balance: ${balance}${currency ? ` ${currency}` : ""}` : undefined,
   ].filter(Boolean) as string[];
