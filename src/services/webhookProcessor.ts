@@ -1,5 +1,7 @@
 import { WebhookEvent } from "../models/WebhookEvent";
 import Card from "../models/Card";
+import CardRequest from "../models/CardRequest";
+import { TelegramLink } from "../models/TelegramLink";
 import Transaction from "../models/Transaction";
 import User from "../models/User";
 import Customer from "../models/Customer";
@@ -116,6 +118,38 @@ export async function processStroWalletEvent(payload: any) {
       },
       { upsert: true, new: true }
     );
+
+    if (userId) {
+      const chatId = Number(userId);
+      if (Number.isFinite(chatId)) {
+        await TelegramLink.findOneAndUpdate(
+          { chatId },
+          { $addToSet: { cardIds: cardId }, ...(customerEmail ? { $set: { customerEmail } } : {}) },
+          { upsert: true, new: true }
+        );
+      }
+    }
+
+    if (customerEmail) {
+      await TelegramLink.findOneAndUpdate(
+        { customerEmail },
+        { $addToSet: { cardIds: cardId } },
+        { upsert: true, new: true }
+      );
+    }
+
+    if (userId || customerEmail) {
+      await CardRequest.findOneAndUpdate(
+        {
+          $or: [
+            ...(userId ? [{ userId }] : []),
+            ...(customerEmail ? [{ customerEmail }] : []),
+          ],
+        },
+        { $set: { cardId, status: "approved" } },
+        { new: true }
+      );
+    }
   }
 
   if ((type === "card.frozen" || type === "card.unfrozen" || type === "card.unfreeze") && cardId) {
@@ -207,6 +241,14 @@ async function resolveUserId(customerEmail?: string, cardId?: string) {
   if (cardId) {
     const card = await Card.findOne({ cardId }).lean();
     if (card?.userId) return card.userId;
+  }
+  if (customerEmail) {
+    const customer = await Customer.findOne({ email: customerEmail }).lean();
+    if (customer?.userId) return customer.userId;
+  }
+  if (customerEmail) {
+    const link = await TelegramLink.findOne({ customerEmail }).lean();
+    if (link?.chatId != null) return String(link.chatId);
   }
   if (customerEmail) {
     const user = await User.findOne({ customerEmail }).lean();

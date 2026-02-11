@@ -2811,9 +2811,10 @@ async function sendMyCards(chatId: number, message?: any) {
   const linkedCardId = cardIds[0];
   const linkedCard = linkedCardId ? await Card.findOne({ cardId: linkedCardId }).lean() : null;
   const resolvedCard = linkedCard || primaryCard;
+  const resolvedCardId = resolvedCard?.cardId || latestRequest?.cardId || linkedCardId;
 
   const kycStatus = resolveKycStatus(user, customer);
-  if (kycStatus !== "approved") {
+  if (kycStatus !== "approved" && !resolvedCardId) {
     const label = kycStatus === "pending" ? "Pending" : kycStatus === "rejected" ? "Rejected" : "Not started";
     const lines = [
       "⚠️ KYC Required",
@@ -2908,6 +2909,9 @@ async function sendMyCards(chatId: number, message?: any) {
     balance: user?.balance,
   };
 
+  const remoteDetail = !card?.last4 || !card?.balance || !card?.currency ? await fetchCardDetailSafe(activeCard.cardId) : null;
+  const mergedDetail = remoteDetail || {};
+
   if (isFrozenStatus(activeCard.status)) {
     const lines = [
       "💳 Your Virtual Card",
@@ -2927,10 +2931,13 @@ async function sendMyCards(chatId: number, message?: any) {
     return;
   }
 
-  const last4 = activeCard.last4 || latestRequest?.cardNumber?.slice(-4);
-  const cardType = activeCard.cardType || latestRequest?.cardType || "Virtual USD Card";
-  const balanceLabel = formatCardMoney(activeCard.balance ?? user?.balance, activeCard.currency || user?.currency || "USD");
-  const expiry = extractExpiry(latestRequest?.responseData || latestRequest?.metadata || {});
+  const last4 = mergedDetail.last4 || activeCard.last4 || latestRequest?.cardNumber?.slice(-4);
+  const cardType = mergedDetail.card_type || activeCard.cardType || latestRequest?.cardType || "Virtual USD Card";
+  const balanceLabel = formatCardMoney(
+    mergedDetail.balance ?? mergedDetail.available_balance ?? activeCard.balance ?? user?.balance,
+    mergedDetail.currency || activeCard.currency || user?.currency || "USD"
+  );
+  const expiry = extractExpiry(mergedDetail) || extractExpiry(latestRequest?.responseData || latestRequest?.metadata || {});
   const lines = [
     "💳 Your Virtual Card",
     `Card Type: ${cardType}`,
@@ -3067,16 +3074,17 @@ async function sendCardDetail(chatId: number, cardId: string) {
       return;
     }
 
-    // If not local, return a minimal synthetic card to avoid upstream 403
+    const remote = await fetchCardDetailSafe(cardId);
     const detail = {
       card_id: cardId,
-      name_on_card: "Virtual Card",
-      card_type: "virtual",
-      status: card?.status || "active",
-      balance: walletBalance,
-      available_balance: undefined,
-      currency: card?.currency || "USD",
-      last4: card?.last4,
+      name_on_card: remote?.name_on_card || "Virtual Card",
+      card_type: remote?.card_type || "virtual",
+      status: remote?.status || card?.status || "active",
+      balance: remote?.balance || remote?.available_balance || walletBalance,
+      available_balance: remote?.available_balance,
+      currency: remote?.currency || card?.currency || "USD",
+      last4: remote?.last4 || card?.last4,
+      expiry: extractExpiry(remote),
     };
     const text = buildCardDetailMessage(detail, cardId);
     const freezeAction = isFrozenStatus(detail.status) ? "CARD_UNFREEZE" : "CARD_FREEZE";
@@ -3116,18 +3124,23 @@ async function sendCardRevealPrompt(chatId: number, cardId: string) {
 
 async function sendCardSensitiveDetails(chatId: number, cardId: string) {
   const local = await CardRequest.findOne({ cardId, status: "approved" }).lean();
-  if (!local?.cardNumber || !local?.cvc) {
+  const localExpiry = extractExpiry(local?.responseData || local?.metadata || {});
+  const remote = await fetchCardDetailSafe(cardId);
+  const cardNumber = local?.cardNumber || remote?.card_number || remote?.cardNumber;
+  const cvc = local?.cvc || remote?.cvc;
+  const expiry = localExpiry || extractExpiry(remote);
+
+  if (!cardNumber || !cvc) {
     await bot!.sendMessage(chatId, "Full card details are not available. Please try again later or contact support.", {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
     return;
   }
 
-  const expiry = extractExpiry(local.responseData || local.metadata || {});
   const lines = [
     "🔐 Card Details",
-    `Card Number: ${local.cardNumber}`,
-    `CVV: ${local.cvc}`,
+    `Card Number: ${cardNumber}`,
+    `CVV: ${cvc}`,
     expiry ? `Expiry: ${expiry}` : undefined,
   ].filter(Boolean) as string[];
 
@@ -3302,14 +3315,25 @@ function buildCardDetailMessage(detail: any, cardId: string) {
   return lines.join("\n");
 }
 
+async function fetchCardDetailSafe(cardId: string) {
+  try {
+    const resp = await callStroWallet("fetch-card-detail", "post", { card_id: cardId }, { silentOnStatus: [400, 403, 404] });
+    if (!resp) return null;
+    const payload = resp?.data || resp?.response || resp;
+    return payload?.data || payload?.card || payload || null;
+  } catch {
+    return null;
+  }
+}
+
 async function callStroWallet(
   path: string,
   method: "get" | "post" | "put",
   data?: any,
   options?: { silentOnStatus?: number[] }
 ) {
-  // Short-circuit problematic endpoints with synthetic responses
-  if (path === "fetch-card-detail") {
+  // Optional: allow synthetic card detail in non-production environments
+  if (path === "fetch-card-detail" && String(process.env.STROWALLET_FAKE_FETCH || "").toLowerCase() === "true") {
     const cardId = data?.card_id || "CARD";
     return {
       ok: true,
