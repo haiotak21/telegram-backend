@@ -2673,7 +2673,7 @@ function formatMaskedCard(last4?: string) {
   return `**** **** **** ${last4 || "----"}`;
 }
 
-function formatMoney(value: any, currency?: string) {
+function formatCardMoney(value: any, currency?: string) {
   const amount = Number(value);
   if (!Number.isFinite(amount)) return undefined;
   const normalized = (currency || "USD").toUpperCase();
@@ -2911,7 +2911,7 @@ async function sendMyCards(chatId: number, message?: any) {
 
   const last4 = card.last4 || latestRequest?.cardNumber?.slice(-4);
   const cardType = card.cardType || latestRequest?.cardType || "Virtual USD Card";
-  const balanceLabel = formatMoney(card.balance ?? user?.balance, card.currency || user?.currency || "USD");
+  const balanceLabel = formatCardMoney(card.balance ?? user?.balance, card.currency || user?.currency || "USD");
   const expiry = extractExpiry(latestRequest?.responseData || latestRequest?.metadata || {});
   const lines = [
     "💳 Your Virtual Card",
