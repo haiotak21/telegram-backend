@@ -54,7 +54,9 @@ async function run() {
   };
 
   try {
-    const cursor = eventsColl.find({ type: "card.created" }).sort({ receivedAt: -1 });
+    const cursor = eventsColl
+      .find({ type: "card.created" })
+      .sort({ receivedAt: -1 });
     while (await cursor.hasNext()) {
       const event = await cursor.next();
       stats.scanned += 1;
@@ -65,7 +67,12 @@ async function run() {
         continue;
       }
       const customerEmail = extractField(payload, ["customerEmail", "email"]);
-      const customerId = extractField(payload, ["customerId", "customer_id", "cardholderId", "card_holder_id"]);
+      const customerId = extractField(payload, [
+        "customerId",
+        "customer_id",
+        "cardholderId",
+        "card_holder_id",
+      ]);
 
       let userId;
       if (customerEmail) {
@@ -91,7 +98,7 @@ async function run() {
             lastSync: new Date(),
           },
         },
-        { upsert: true }
+        { upsert: true },
       );
 
       if (userId) {
@@ -99,8 +106,11 @@ async function run() {
         if (Number.isFinite(chatId)) {
           await linksColl.updateOne(
             { chatId },
-            { $addToSet: { cardIds: cardId }, ...(customerEmail ? { $set: { customerEmail } } : {}) },
-            { upsert: true }
+            {
+              $addToSet: { cardIds: cardId },
+              ...(customerEmail ? { $set: { customerEmail } } : {}),
+            },
+            { upsert: true },
           );
         }
       }
@@ -109,7 +119,7 @@ async function run() {
         await linksColl.updateOne(
           { customerEmail },
           { $addToSet: { cardIds: cardId } },
-          { upsert: true }
+          { upsert: true },
         );
       }
 
@@ -121,7 +131,7 @@ async function run() {
               ...(customerEmail ? [{ customerEmail }] : []),
             ],
           },
-          { $set: { cardId, status: "approved" } }
+          { $set: { cardId, status: "approved" } },
         );
       }
 

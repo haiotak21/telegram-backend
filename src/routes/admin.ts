@@ -4,6 +4,8 @@ import { z } from "zod";
 import User from "../models/User";
 import Customer from "../models/Customer";
 import Card from "../models/Card";
+import CardRequest from "../models/CardRequest";
+import { TelegramLink } from "../models/TelegramLink";
 import Transaction from "../models/Transaction";
 import { notifyCardStatusChanged } from "../services/botService";
 import { auditCardTransactions, getReconciliationSummary, reconcileAllCards, reconcileCard } from "../services/reconciliationService";
@@ -115,6 +117,22 @@ const TransactionQuerySchema = z.object({
   cardId: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
+
+const CardLinkSchema = z
+  .object({
+    cardId: z.string().min(1),
+    customerEmail: z.string().email().optional(),
+    userId: z.string().min(1).optional(),
+    nameOnCard: z.string().min(1).optional(),
+    cardType: z.string().min(1).optional(),
+    status: z.string().min(1).optional(),
+    last4: z.string().min(4).max(4).optional(),
+    currency: z.string().min(1).optional(),
+    balance: z.string().optional(),
+  })
+  .refine((v) => v.customerEmail || v.userId, {
+    message: "customerEmail or userId is required",
+  });
 
 router.get("/stats", requireAdmin, async (_req, res) => {
   try {
@@ -245,6 +263,92 @@ router.get("/users/:telegramUserId/kyc-debug", requireAdmin, async (req, res) =>
       submittedAt: user.kycSubmittedAt,
       missing,
     });
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.post("/cards/link", requireAdmin, async (req, res) => {
+  try {
+    const body = CardLinkSchema.parse(req.body || {});
+    const cardId = body.cardId.trim();
+    let userId = body.userId;
+    let customerEmail = body.customerEmail;
+
+    if (!userId && customerEmail) {
+      const customer = await Customer.findOne({ email: customerEmail }).lean();
+      if (customer?.userId) userId = customer.userId;
+    }
+    if (!userId && customerEmail) {
+      const user = await User.findOne({ customerEmail }).lean();
+      if (user?.userId) userId = user.userId;
+    }
+    if (userId && !customerEmail) {
+      const customer = await Customer.findOne({ userId }).lean();
+      customerEmail = customer?.email;
+      if (!customerEmail) {
+        const user = await User.findOne({ userId }).lean();
+        customerEmail = user?.customerEmail;
+      }
+    }
+
+    const detail = await fetchCardDetail(cardId, normalizeMode(getDefaultMode())).catch(() => null);
+    const last4 =
+      body.last4 ||
+      extractField(detail, ["last4", "card_last4", "cardLast4", "cardSuffix"]) ||
+      (extractField(detail, ["card_number", "cardNumber"]) || "").slice(-4) ||
+      undefined;
+
+    const cardUpdate: any = {
+      cardId,
+      userId: userId || undefined,
+      customerEmail: customerEmail || undefined,
+      nameOnCard: body.nameOnCard || extractField(detail, ["name_on_card", "nameOnCard", "name"]),
+      cardType: body.cardType || extractField(detail, ["card_type", "cardType", "brand"]),
+      status: body.status || extractField(detail, ["card_status", "status", "state"]) || "active",
+      last4,
+      currency: body.currency || extractField(detail, ["currency", "ccy"]),
+      balance: body.balance || extractField(detail, ["balance", "available_balance", "availableBalance"]),
+      availableBalance: extractField(detail, ["available_balance", "availableBalance"]),
+      lastSync: new Date(),
+    };
+
+    await Card.findOneAndUpdate({ cardId }, { $set: cardUpdate }, { upsert: true, new: true });
+
+    if (userId) {
+      const chatId = Number(userId);
+      if (Number.isFinite(chatId)) {
+        await TelegramLink.findOneAndUpdate(
+          { chatId },
+          { $addToSet: { cardIds: cardId }, ...(customerEmail ? { $set: { customerEmail } } : {}) },
+          { upsert: true }
+        );
+      }
+    }
+
+    if (customerEmail) {
+      await TelegramLink.findOneAndUpdate(
+        { customerEmail },
+        { $addToSet: { cardIds: cardId } },
+        { upsert: true }
+      );
+    }
+
+    if (userId || customerEmail) {
+      await CardRequest.findOneAndUpdate(
+        {
+          $or: [
+            ...(userId ? [{ userId }] : []),
+            ...(customerEmail ? [{ customerEmail }] : []),
+          ],
+        },
+        { $set: { cardId, status: "approved" } },
+        { new: true }
+      );
+    }
+
+    return ok(res, { cardId, userId, customerEmail, linked: true });
   } catch (e) {
     const { status, message } = normalizeError(e);
     return fail(res, message, status);
