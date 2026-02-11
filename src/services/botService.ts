@@ -2694,6 +2694,50 @@ function isFrozenStatus(raw?: string) {
   return String(raw || "").toLowerCase().includes("frozen");
 }
 
+function pickNestedField(obj: any, keys: string[]): string | undefined {
+  if (!obj || typeof obj !== "object") return undefined;
+  for (const key of keys) {
+    if (obj[key] != null) return String(obj[key]);
+  }
+  for (const val of Object.values(obj)) {
+    if (val && typeof val === "object") {
+      const nested = pickNestedField(val, keys);
+      if (nested != null) return nested;
+    }
+  }
+  return undefined;
+}
+
+function normalizeCardDetail(raw: any) {
+  if (!raw || typeof raw !== "object") return null;
+  const cardNumber = pickNestedField(raw, ["card_number", "cardNumber"]);
+  const cvc = pickNestedField(raw, ["cvc", "cvv"]);
+  const status = pickNestedField(raw, ["card_status", "status", "state"]);
+  const balance = pickNestedField(raw, ["balance", "available_balance", "availableBalance"]);
+  const currency = pickNestedField(raw, ["currency", "ccy"]);
+  const last4Raw = pickNestedField(raw, ["last4", "card_last4", "cardLast4", "cardSuffix"]);
+  const last4 = last4Raw || (cardNumber ? cardNumber.slice(-4) : undefined);
+  const cardType = pickNestedField(raw, ["card_type", "cardType", "brand"]);
+  const nameOnCard = pickNestedField(raw, ["name_on_card", "nameOnCard", "name"]);
+  const expMonth = pickNestedField(raw, ["exp_month", "expiry_month", "expMonth", "expiryMonth"]);
+  const expYear = pickNestedField(raw, ["exp_year", "expiry_year", "expYear", "expiryYear"]);
+  const expiry = pickNestedField(raw, ["expiry", "expiry_date", "exp", "expDate"]);
+  return {
+    card_number: cardNumber,
+    cvc,
+    status,
+    balance,
+    available_balance: pickNestedField(raw, ["available_balance", "availableBalance"]),
+    currency,
+    last4,
+    card_type: cardType,
+    name_on_card: nameOnCard,
+    exp_month: expMonth,
+    exp_year: expYear,
+    expiry,
+  };
+}
+
 async function sendUserInfo(chatId: number, message?: any) {
   if (shouldSuppressOutgoing(chatId, "user_info")) return;
   const [link, user, customer] = await Promise.all([
@@ -3320,7 +3364,8 @@ async function fetchCardDetailSafe(cardId: string) {
     const resp = await callStroWallet("fetch-card-detail", "post", { card_id: cardId }, { silentOnStatus: [400, 403, 404] });
     if (!resp) return null;
     const payload = resp?.data || resp?.response || resp;
-    return payload?.data || payload?.card || payload || null;
+    const raw = payload?.data || payload?.response || payload?.card || payload;
+    return normalizeCardDetail(raw) || null;
   } catch {
     return null;
   }
