@@ -2954,7 +2954,7 @@ async function sendMyCards(chatId: number, message?: any) {
   };
 
   const remoteDetail = !card?.last4 || !card?.balance || !card?.currency ? await fetchCardDetailSafe(activeCard.cardId) : null;
-  const mergedDetail = remoteDetail || {};
+  const mergedDetail = remoteDetail || null;
 
   if (isFrozenStatus(activeCard.status)) {
     const lines = [
@@ -2975,11 +2975,11 @@ async function sendMyCards(chatId: number, message?: any) {
     return;
   }
 
-  const last4 = mergedDetail.last4 || activeCard.last4 || latestRequest?.cardNumber?.slice(-4);
-  const cardType = mergedDetail.card_type || activeCard.cardType || latestRequest?.cardType || "Virtual USD Card";
+  const last4 = mergedDetail?.last4 || activeCard.last4 || latestRequest?.cardNumber?.slice(-4);
+  const cardType = mergedDetail?.card_type || activeCard.cardType || latestRequest?.cardType || "Virtual USD Card";
   const balanceLabel = formatCardMoney(
-    mergedDetail.balance ?? mergedDetail.available_balance ?? activeCard.balance ?? user?.balance,
-    mergedDetail.currency || activeCard.currency || user?.currency || "USD"
+    mergedDetail?.balance ?? mergedDetail?.available_balance ?? activeCard.balance ?? user?.balance,
+    mergedDetail?.currency || activeCard.currency || user?.currency || "USD"
   );
   const expiry = extractExpiry(mergedDetail) || extractExpiry(latestRequest?.responseData || latestRequest?.metadata || {});
   const lines = [
