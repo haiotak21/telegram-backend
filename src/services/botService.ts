@@ -2723,13 +2723,18 @@ function normalizeCardDetail(raw: any) {
   const expYear = pickNestedField(raw, ["exp_year", "expiry_year", "expYear", "expiryYear"]);
   const expiry = pickNestedField(raw, ["expiry", "expiry_date", "exp", "expDate"]);
   const billingRaw = pickNestedField(raw, ["billing", "billing_address", "billingAddress"]);
+  const billingStreet = pickNestedField(raw, ["billing_street", "billingStreet"]);
+  const billingCity = pickNestedField(raw, ["billing_city", "billingCity"]);
+  const billingState = pickNestedField(raw, ["billing_state", "billingState"]);
+  const billingZip = pickNestedField(raw, ["billing_zip_code", "billing_zip", "billingZip", "billingZipCode"]);
+  const billingCountry = pickNestedField(raw, ["billing_country", "billingCountry"]);
   const line1 = pickNestedField(raw, ["line1", "address", "addressLine1", "address_line1"]);
   const city = pickNestedField(raw, ["city", "town"]);
   const state = pickNestedField(raw, ["state", "province", "region"]);
   const zip = pickNestedField(raw, ["zip", "zipCode", "postal", "postalCode"]);
   const country = pickNestedField(raw, ["country"]);
-  const billingParts = [line1, city].filter(Boolean).join(", ");
-  const addressParts = [state, zip, country].filter(Boolean).join(", ");
+  const billingParts = [billingStreet || line1, billingCity || city].filter(Boolean).join(", ");
+  const addressParts = [billingState || state, billingZip || zip, billingCountry || country].filter(Boolean).join(", ");
   const billing = billingRaw || (billingParts ? billingParts : undefined);
   const address = addressParts ? addressParts : undefined;
   return {
