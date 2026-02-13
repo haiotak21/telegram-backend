@@ -3344,6 +3344,8 @@ function extractCardTransactions(payload: any): any[] {
   const candidates = [
     payload?.data?.transactions,
     payload?.data?.data,
+    payload?.data?.response?.card_transactions,
+    payload?.response?.card_transactions,
     payload?.data,
     payload?.transactions,
     payload?.response?.transactions,
