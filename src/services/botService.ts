@@ -3185,10 +3185,14 @@ async function sendCardRevealPrompt(chatId: number, cardId: string) {
 async function sendCardSensitiveDetails(chatId: number, cardId: string) {
   const local = await CardRequest.findOne({ cardId, status: "approved" }).lean();
   const localExpiry = extractExpiry(local?.responseData || local?.metadata || {});
+  const localBilling = local?.metadata?.billing;
+  const localAddress = local?.metadata?.address;
   const remote = await fetchCardDetailSafe(cardId);
   const cardNumber = local?.cardNumber || remote?.card_number;
   const cvc = local?.cvc || remote?.cvc;
   const expiry = localExpiry || extractExpiry(remote);
+  const billing = localBilling || remote?.billing;
+  const address = localAddress || remote?.address;
 
   if (!cardNumber || !cvc) {
     await bot!.sendMessage(chatId, "Full card details are not available. Please try again later or contact support.", {
@@ -3202,6 +3206,8 @@ async function sendCardSensitiveDetails(chatId: number, cardId: string) {
     `Card Number: ${cardNumber}`,
     `CVV: ${cvc}`,
     expiry ? `Expiry: ${expiry}` : undefined,
+    billing ? `Billing: ${billing}` : undefined,
+    address ? `Address: ${address}` : undefined,
   ].filter(Boolean) as string[];
 
   await bot!.sendMessage(chatId, lines.join("\n"), {
