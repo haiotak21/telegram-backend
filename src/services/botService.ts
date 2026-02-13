@@ -1548,6 +1548,10 @@ async function handleMenuSelection(action: string, chatId: number, message?: any
     const cardId = action.replace("CARD_TXN::", "");
     return sendCardTransactions(chatId, cardId);
   }
+  if (action.startsWith("TXN_DETAIL::")) {
+    const txnId = action.replace("TXN_DETAIL::", "");
+    return sendCardTransactionDetail(chatId, txnId);
+  }
   if (action.startsWith("CARD_FREEZE::")) {
     const cardId = action.replace("CARD_FREEZE::", "");
     return handleFreezeAction(chatId, cardId, "freeze");
@@ -3238,11 +3242,21 @@ async function sendCardTransactions(chatId: number, cardId?: string) {
       return;
     }
 
+    try {
+      const resp = await callStroWallet("card-transactions", "post", { card_id: targetCardId }, { silentOnStatus: [400, 403, 404] });
+      const items = extractCardTransactions(resp?.data || resp);
+      if (items.length) {
+        await cacheCardTransactions(userId, targetCardId, items);
+      }
+    } catch {
+      // If upstream fails, fall back to cached transactions.
+    }
+
     const query: any = { userId, transactionType: "card" };
     query["metadata.cardId"] = targetCardId;
     const txns = await Transaction.find(query)
       .sort({ createdAt: -1 })
-      .limit(5)
+      .limit(8)
       .lean();
 
     if (!txns.length) {
@@ -3250,20 +3264,78 @@ async function sendCardTransactions(chatId: number, cardId?: string) {
       return;
     }
 
-    const lines = ["📄 Recent Card Transactions", ""];
+    const lines = ["📊 Recent Transactions", ""];
+    const keyboard: InlineKeyboardButton[][] = [];
+
     for (const t of txns) {
       const meta = (t as any).metadata || {};
       const direction = meta.direction === "debit" ? "-" : "+";
-      const amount = `${direction}${Number((t as any).amount || 0).toFixed(2)}`;
+      const amountValue = Number((t as any).amount || 0);
       const currency = (t as any).currency || "USD";
-      const desc = meta.description || "Card transaction";
-      lines.push(`${amount} ${currency}  ${desc}`);
+      const statusIcon = formatTxnStatusIcon((t as any).status || meta.rawStatus);
+      const label = formatTxnLabel(meta.direction, meta.description);
+      const dateLabel = formatTxnDate(meta.date) || formatTxnDate((t as any).createdAt);
+      const amountLabel = `${direction} $${amountValue.toFixed(2)}`;
+      lines.push(`${statusIcon} ${label}`);
+      lines.push(`${amountLabel}`);
+      if (dateLabel) lines.push(`${dateLabel}`);
+      lines.push("");
+
+      keyboard.push([
+        {
+          text: `${label} ${amountLabel}`,
+          callback_data: `TXN_DETAIL::${(t as any)._id}`,
+        },
+      ]);
     }
 
-    await bot!.sendMessage(chatId, lines.join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+    keyboard.push([MENU_BUTTON]);
+    await bot!.sendMessage(chatId, lines.join("\n"), { reply_markup: { inline_keyboard: keyboard } });
   } catch (err: any) {
     await sendFriendlyError(chatId, err?.requestId);
   }
+}
+
+async function sendCardTransactionDetail(chatId: number, txnId: string) {
+  const txn = await Transaction.findById(txnId).lean();
+  if (!txn) {
+    await bot!.sendMessage(chatId, "Transaction not found.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+    return;
+  }
+
+  const meta = (txn as any).metadata || {};
+  const direction = meta.direction === "debit" ? "-" : "+";
+  const amountValue = Number((txn as any).amount || 0);
+  const currency = (txn as any).currency || "USD";
+  const status = (txn as any).status || meta.rawStatus || "completed";
+  const statusIcon = formatTxnStatusIcon(status);
+  const label = formatTxnLabel(meta.direction, meta.description);
+  const dateLabel = formatTxnDate(meta.date) || formatTxnDate((txn as any).createdAt);
+
+  let reason = undefined as string | undefined;
+  if (status === "failed") {
+    reason = meta.reason || meta.declineReason || meta.rawStatus;
+  }
+
+  let cardSuffix = "";
+  if (meta.cardId) {
+    const card = await Card.findOne({ cardId: meta.cardId }).lean();
+    if (card?.last4) cardSuffix = `**** ${card.last4}`;
+  }
+
+  const lines = [
+    `${statusIcon} ${label}`,
+    `Amount: ${direction} $${amountValue.toFixed(2)}`,
+    meta.description ? `Merchant: ${meta.description}` : undefined,
+    `Status: ${statusIcon} ${status.charAt(0).toUpperCase() + status.slice(1)}`,
+    dateLabel ? `Date: ${dateLabel}` : undefined,
+    cardSuffix ? `Card: ${cardSuffix}` : undefined,
+    reason ? `Reason: ${reason}` : undefined,
+  ].filter(Boolean) as string[];
+
+  await bot!.sendMessage(chatId, lines.join("\n"), {
+    reply_markup: { inline_keyboard: [[{ text: "⬅️ Back to Transactions", callback_data: `CARD_TXN::${meta.cardId}` }], [MENU_BUTTON]] },
+  });
 }
 
 function extractCardTransactions(payload: any): any[] {
@@ -3307,6 +3379,7 @@ function normalizeTxnItem(item: any) {
   const txnId = item?.transactionId || item?.transaction_id || item?.id || item?.ref || item?.reference;
   const directionRaw = item?.direction || item?.type || item?.transaction_type || item?.drCr;
   const direction = normalizeTxnDirection(directionRaw, amount);
+  const dateRaw = item?.date || item?.created_at || item?.createdAt || item?.transactionDate || item?.time;
   return {
     transactionNumber: txnId ? String(txnId) : undefined,
     amount,
@@ -3314,6 +3387,7 @@ function normalizeTxnItem(item: any) {
     description,
     status: normalizeTxnStatus(statusRaw),
     direction,
+    date: dateRaw ? String(dateRaw) : undefined,
   };
 }
 
@@ -3341,6 +3415,7 @@ async function cacheCardTransactions(userId: string, cardId: string, items: any[
             direction: normalized.direction,
             description: normalized.description,
             rawStatus: normalized.status,
+            date: normalized.date,
           },
           responseData: item,
         },
@@ -3348,6 +3423,31 @@ async function cacheCardTransactions(userId: string, cardId: string, items: any[
       { upsert: true, new: true }
     );
   }
+}
+
+function formatTxnDate(value?: string | Date) {
+  if (!value) return undefined;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return undefined;
+  const datePart = date.toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" });
+  const timePart = date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+  return `${datePart} · ${timePart}`;
+}
+
+function formatTxnStatusIcon(status?: string) {
+  const v = (status || "").toLowerCase();
+  if (v.includes("fail") || v.includes("decline") || v.includes("deny")) return "🔴";
+  if (v.includes("pending") || v.includes("review")) return "🟡";
+  return "🟢";
+}
+
+function formatTxnLabel(direction?: string, description?: string) {
+  const desc = (description || "").toLowerCase();
+  if (desc.includes("fee")) return "Fee";
+  if (desc.includes("top up") || desc.includes("top-up") || desc.includes("topup") || desc.includes("fund")) {
+    return "Card Top-Up";
+  }
+  return direction === "credit" ? "Card Credit" : "Card Payment";
 }
 
 async function handleFreezeAction(chatId: number, cardId: string, action: "freeze" | "unfreeze") {
