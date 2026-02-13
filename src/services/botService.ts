@@ -2722,6 +2722,16 @@ function normalizeCardDetail(raw: any) {
   const expMonth = pickNestedField(raw, ["exp_month", "expiry_month", "expMonth", "expiryMonth"]);
   const expYear = pickNestedField(raw, ["exp_year", "expiry_year", "expYear", "expiryYear"]);
   const expiry = pickNestedField(raw, ["expiry", "expiry_date", "exp", "expDate"]);
+  const billingRaw = pickNestedField(raw, ["billing", "billing_address", "billingAddress"]);
+  const line1 = pickNestedField(raw, ["line1", "address", "addressLine1", "address_line1"]);
+  const city = pickNestedField(raw, ["city", "town"]);
+  const state = pickNestedField(raw, ["state", "province", "region"]);
+  const zip = pickNestedField(raw, ["zip", "zipCode", "postal", "postalCode"]);
+  const country = pickNestedField(raw, ["country"]);
+  const billingParts = [line1, city].filter(Boolean).join(", ");
+  const addressParts = [state, zip, country].filter(Boolean).join(", ");
+  const billing = billingRaw || (billingParts ? billingParts : undefined);
+  const address = addressParts ? addressParts : undefined;
   return {
     card_number: cardNumber,
     cvc,
@@ -2735,6 +2745,8 @@ function normalizeCardDetail(raw: any) {
     exp_month: expMonth,
     exp_year: expYear,
     expiry,
+    billing,
+    address,
   };
 }
 
@@ -2982,6 +2994,8 @@ async function sendMyCards(chatId: number, message?: any) {
     mergedDetail?.currency || activeCard.currency || user?.currency || "USD"
   );
   const expiry = extractExpiry(mergedDetail) || extractExpiry(latestRequest?.responseData || latestRequest?.metadata || {});
+  const billing = mergedDetail?.billing || latestRequest?.metadata?.billing;
+  const address = mergedDetail?.address || latestRequest?.metadata?.address;
   const lines = [
     "💳 Your Virtual Card",
     `Card Type: ${cardType}`,
@@ -2989,6 +3003,8 @@ async function sendMyCards(chatId: number, message?: any) {
     `Card Number: ${formatMaskedCard(last4)}`,
     expiry ? `Expiry Date: ${expiry}` : undefined,
     balanceLabel ? `Balance: ${balanceLabel}` : undefined,
+    billing ? `Billing: ${billing}` : undefined,
+    address ? `Address: ${address}` : undefined,
   ].filter(Boolean) as string[];
 
   await editOrSend(chatId, message, lines.join("\n"), {
@@ -3347,6 +3363,8 @@ function buildCardDetailMessage(detail: any, cardId: string) {
   const name = detail?.name_on_card || detail?.name || "Card";
   const brand = detail?.brand || detail?.card_type || "";
   const expiry = detail?.expiry || detail?.expiry_date || detail?.exp || detail?.expDate;
+  const billing = detail?.billing;
+  const address = detail?.address;
 
   const lines = [
     `💳 ${name}${brand ? ` (${brand})` : ""}`,
@@ -3354,6 +3372,8 @@ function buildCardDetailMessage(detail: any, cardId: string) {
     expiry ? `Expiry: ${expiry}` : undefined,
     `Status: ${status}`,
     balance ? `Balance: ${balance}${currency ? ` ${currency}` : ""}` : undefined,
+    billing ? `Billing: ${billing}` : undefined,
+    address ? `Address: ${address}` : undefined,
   ].filter(Boolean) as string[];
 
   return lines.join("\n");
