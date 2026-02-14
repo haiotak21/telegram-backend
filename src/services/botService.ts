@@ -3326,7 +3326,7 @@ async function sendCardTransactionDetail(chatId: number, txnId: string) {
   const lines = [
     `${statusIcon} ${label}`,
     `Amount: ${direction} $${amountValue.toFixed(2)}`,
-    meta.description ? `Merchant: ${meta.description}` : undefined,
+    meta.description ? `Description: ${meta.description}` : undefined,
     `Status: ${statusIcon} ${status.charAt(0).toUpperCase() + status.slice(1)}`,
     dateLabel ? `Date: ${dateLabel}` : undefined,
     cardSuffix ? `Card: ${cardSuffix}` : undefined,
