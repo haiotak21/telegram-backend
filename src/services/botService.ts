@@ -3304,12 +3304,14 @@ async function sendCardTransactionDetail(chatId: number, txnId: string) {
   }
 
   const meta = (txn as any).metadata || {};
+  const responseData = (txn as any).responseData || {};
   const direction = meta.direction === "debit" ? "-" : "+";
   const amountValue = Number((txn as any).amount || 0);
   const currency = (txn as any).currency || "USD";
   const status = (txn as any).status || meta.rawStatus || "completed";
   const statusIcon = formatTxnStatusIcon(status);
-  const label = formatTxnLabel(meta.direction, meta.description);
+  const rawDescription = meta.description || responseData.description || responseData.merchant || responseData.merchant_name || responseData.narrative;
+  const label = formatTxnLabel(meta.direction, rawDescription);
   const dateLabel = formatTxnDate(meta.date) || formatTxnDate((txn as any).createdAt);
 
   let reason = undefined as string | undefined;
@@ -3326,7 +3328,7 @@ async function sendCardTransactionDetail(chatId: number, txnId: string) {
   const lines = [
     `${statusIcon} ${label}`,
     `Amount: ${direction} $${amountValue.toFixed(2)}`,
-    meta.description ? `Description: ${meta.description}` : undefined,
+    rawDescription ? `Description: ${rawDescription}` : undefined,
     `Status: ${statusIcon} ${status.charAt(0).toUpperCase() + status.slice(1)}`,
     dateLabel ? `Date: ${dateLabel}` : undefined,
     cardSuffix ? `Card: ${cardSuffix}` : undefined,
@@ -3375,7 +3377,7 @@ function normalizeTxnDirection(raw?: string, amount?: number) {
 function normalizeTxnItem(item: any) {
   const amountRaw = item?.amount ?? item?.transactionAmount ?? item?.total ?? item?.value;
   const amount = amountRaw != null && !Number.isNaN(Number(amountRaw)) ? Number(amountRaw) : undefined;
-  const description = item?.description || item?.merchant || item?.merchant_name || item?.narration;
+  const description = item?.description || item?.merchant || item?.merchant_name || item?.narration || item?.narrative;
   const currency = item?.currency || item?.ccy || item?.iso_currency;
   const statusRaw = item?.status || item?.state || item?.result;
   const txnId = item?.transactionId || item?.transaction_id || item?.id || item?.ref || item?.reference;
