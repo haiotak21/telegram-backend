@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const zod_1 = require("zod");
 const depositService_1 = require("../services/depositService");
+const apiResponse_1 = require("../utils/apiResponse");
 const router = express_1.default.Router();
 const DepositSchema = zod_1.z.object({
     userId: zod_1.z.union([zod_1.z.string(), zod_1.z.number()]).transform((v) => String(v)),
@@ -23,12 +24,12 @@ router.post("/deposit", async (req, res) => {
             transactionNumber: body.transactionNumber,
         });
         if (result.success)
-            return res.json(result);
-        return res.status(400).json(result);
+            return (0, apiResponse_1.ok)(res, result);
+        return (0, apiResponse_1.fail)(res, result.message || "Deposit failed", 400);
     }
     catch (err) {
         const message = err?.errors?.[0]?.message || err?.message || "Invalid request";
-        return res.status(400).json({ success: false, message });
+        return (0, apiResponse_1.fail)(res, message, 400);
     }
 });
 exports.default = router;

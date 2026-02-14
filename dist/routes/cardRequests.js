@@ -8,8 +8,10 @@ const axios_1 = __importDefault(require("axios"));
 const CardRequest_1 = __importDefault(require("../models/CardRequest"));
 const TelegramLink_1 = require("../models/TelegramLink");
 const User_1 = __importDefault(require("../models/User"));
+const Customer_1 = __importDefault(require("../models/Customer"));
 const Card_1 = __importDefault(require("../models/Card"));
 const botService_1 = require("../services/botService");
+const apiResponse_1 = require("../utils/apiResponse");
 const router = express_1.default.Router();
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
 function getDefaultMode() {
@@ -41,7 +43,7 @@ function requireAdmin(req, res, next) {
     const provided = req.headers["x-admin-token"];
     if (provided && provided === adminToken)
         return next();
-    return res.status(401).json({ success: false, message: "Unauthorized" });
+    return (0, apiResponse_1.fail)(res, "Unauthorized", 401);
 }
 function requirePublicKey() {
     const key = process.env.STROWALLET_PUBLIC_KEY;
@@ -60,11 +62,11 @@ function normalizeError(e) {
         const validation = payload?.data?.errors || payload?.errors;
         const validationMsg = validation ? JSON.stringify(validation) : undefined;
         const msg = payload?.message || payload?.error || validationMsg || ae.message || "Request failed";
-        return { status, body: { success: false, message: String(msg), data: payload } };
+        return { status, message: String(msg) };
     }
     const status = e?.status ?? 400;
     const msg = e?.message ?? "Request error";
-    return { status, body: { success: false, message: String(msg) } };
+    return { status, message: String(msg) };
 }
 function buildBitvcardClient() {
     return axios_1.default.create({
@@ -74,6 +76,11 @@ function buildBitvcardClient() {
             Authorization: process.env.STROWALLET_API_KEY ? `Bearer ${process.env.STROWALLET_API_KEY}` : undefined,
         },
     });
+}
+async function fetchCardDetail(cardId, mode) {
+    const public_key = requirePublicKey();
+    const resp = await axios_1.default.post(`${BITVCARD_BASE}fetch-card-detail/`, { card_id: cardId, public_key, mode }, { timeout: 15000 });
+    return resp.data;
 }
 function extractCardInfo(respData) {
     const cardId = respData?.card_id ||
@@ -95,24 +102,39 @@ function extractCardInfo(respData) {
         respData?.response?.cvv;
     return { cardId, cardNumber, cvc };
 }
+function extractCardStatus(respData) {
+    return (respData?.card_status ||
+        respData?.status ||
+        respData?.state ||
+        respData?.response?.card_status ||
+        respData?.response?.status ||
+        respData?.response?.state ||
+        respData?.data?.card_status ||
+        respData?.data?.status ||
+        respData?.data?.state);
+}
 router.post("/", async (req, res) => {
     try {
         const body = req.body || {};
         const userId = asString(body.userId);
         if (!userId)
             throw new Error("userId is required");
-        const user = await User_1.default.findOne({ userId }).lean();
-        if (!user || user.kycStatus !== "approved") {
-            return res.status(400).json({ success: false, message: "You must complete KYC before requesting a card" });
+        const user = (await User_1.default.findOne({ userId }).lean());
+        if (!user) {
+            return (0, apiResponse_1.fail)(res, "User not found", 404);
         }
-        // Block new requests if user already has an active card
+        const customer = (await Customer_1.default.findOne({ userId }).lean());
+        // Block new requests if user already has a card or approved request
         const activeCard = await Card_1.default.findOne({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
         if (activeCard) {
-            return res.status(400).json({ success: false, message: "User already has an active card" });
+            return (0, apiResponse_1.fail)(res, "User already has an active card", 400);
         }
         const existing = await CardRequest_1.default.findOne({ userId, status: { $in: ["pending", "approved"] } }).lean();
         if (existing) {
-            return res.status(400).json({ success: false, message: "You already have an active or approved card request" });
+            return (0, apiResponse_1.fail)(res, "You already have an active or approved card request", 400);
+        }
+        if (!customer || customer.kycStatus !== "approved") {
+            return (0, apiResponse_1.fail)(res, "You must complete KYC before requesting a card", 400);
         }
         // Enforce minimum amount of 3
         let reqAmount = Number(body.amount);
@@ -124,9 +146,9 @@ router.post("/", async (req, res) => {
         if (reqCardType !== "visa" && reqCardType !== "mastercard")
             reqCardType = "visa";
         const nameOnCard = asString(body.nameOnCard) || [user.firstName, user.lastName].filter(Boolean).join(" ") || "StroWallet User";
-        const customerEmail = asEmail(body.customerEmail) || user.customerEmail;
+        const customerEmail = asEmail(body.customerEmail) || customer.email || user.customerEmail;
         if (!customerEmail) {
-            return res.status(400).json({ success: false, message: "customerEmail is required to create a card" });
+            return (0, apiResponse_1.fail)(res, "customerEmail is required to create a card", 400);
         }
         const request = await CardRequest_1.default.create({
             userId,
@@ -158,7 +180,7 @@ router.post("/", async (req, res) => {
                 request.responseData = respData;
                 await request.save();
                 (0, botService_1.notifyCardRequestDeclined)(request.userId, request.decisionReason).catch(() => { });
-                return res.status(502).json({ success: false, message: request.decisionReason, request, data: respData });
+                return (0, apiResponse_1.fail)(res, request.decisionReason, 502);
             }
             request.status = "approved";
             request.cardId = cardId;
@@ -188,21 +210,21 @@ router.post("/", async (req, res) => {
             }, { upsert: true, new: true });
             await TelegramLink_1.TelegramLink.findOneAndUpdate({ chatId: Number(request.userId) }, { $addToSet: { cardIds: cardId }, $setOnInsert: { customerEmail } }, { upsert: true });
             (0, botService_1.notifyCardRequestApproved)(request.userId, { cardId, cardType: reqCardType, nameOnCard, raw: respData }).catch(() => { });
-            return res.status(201).json({ success: true, request, cardId, response: respData });
+            return (0, apiResponse_1.ok)(res, { request, cardId, response: respData }, 201);
         }
         catch (e) {
-            const { status, body } = normalizeError(e);
+            const { status, message } = normalizeError(e);
             request.status = "declined";
-            request.decisionReason = body?.message || "Card request failed";
-            request.responseData = body?.data;
+            request.decisionReason = message || "Card request failed";
+            request.responseData = undefined;
             await request.save();
             (0, botService_1.notifyCardRequestDeclined)(request.userId, request.decisionReason).catch(() => { });
-            return res.status(status).json({ success: false, message: request.decisionReason, request, data: body?.data });
+            return (0, apiResponse_1.fail)(res, request.decisionReason, status);
         }
     }
     catch (err) {
         const message = err?.errors?.[0]?.message || err?.message || "Invalid payload";
-        res.status(400).json({ success: false, message });
+        return (0, apiResponse_1.fail)(res, message, 400);
     }
 });
 router.get("/", requireAdmin, async (req, res) => {
@@ -240,17 +262,84 @@ router.get("/", requireAdmin, async (req, res) => {
                 last4,
             };
         });
-        res.json({ success: true, requests: enriched });
+        return (0, apiResponse_1.ok)(res, { requests: enriched });
     }
     catch (err) {
         const message = err?.message || "Failed to load requests";
-        res.status(400).json({ success: false, message });
+        return (0, apiResponse_1.fail)(res, message, 400);
+    }
+});
+router.post("/:id/sync-card", requireAdmin, async (req, res) => {
+    try {
+        const id = String(req.params.id);
+        const cardIdOverride = asString(req.body?.cardId);
+        const request = await CardRequest_1.default.findById(id).lean();
+        if (!request)
+            return (0, apiResponse_1.fail)(res, "Card request not found", 404);
+        const respData = request.responseData;
+        const extracted = extractCardInfo(respData);
+        const cardId = cardIdOverride || request.cardId || extracted.cardId;
+        if (!cardId)
+            return (0, apiResponse_1.fail)(res, "cardId is missing on this request", 400);
+        const cardNumber = request.cardNumber || extracted.cardNumber;
+        const last4 = cardNumber ? String(cardNumber).slice(-4) : undefined;
+        let status = extractCardStatus(respData) || "pending";
+        let currency;
+        let balance;
+        let availableBalance;
+        try {
+            const detailResp = await fetchCardDetail(String(cardId), normalizeMode(request.mode));
+            const detail = detailResp?.data ?? detailResp;
+            status = extractCardStatus(detail) || status;
+            currency = detail?.currency || detail?.ccy;
+            balance = detail?.balance || detail?.available_balance;
+            availableBalance = detail?.available_balance;
+        }
+        catch (e) {
+            // Non-fatal: keep existing status if upstream fetch fails.
+        }
+        await CardRequest_1.default.findByIdAndUpdate(id, {
+            $set: {
+                status: "approved",
+                cardId,
+                cardNumber: cardNumber || undefined,
+                cvc: request.cvc || extracted.cvc,
+            },
+        });
+        await Card_1.default.findOneAndUpdate({ cardId: String(cardId) }, {
+            $set: {
+                cardId: String(cardId),
+                userId: request.userId,
+                customerEmail: request.customerEmail,
+                nameOnCard: request.nameOnCard,
+                cardType: request.cardType,
+                status,
+                last4,
+                currency,
+                balance,
+                availableBalance,
+            },
+        }, { upsert: true, new: true });
+        if (request.userId) {
+            await TelegramLink_1.TelegramLink.findOneAndUpdate({ chatId: Number(request.userId) }, { $addToSet: { cardIds: String(cardId) }, $setOnInsert: { customerEmail: request.customerEmail } }, { upsert: true });
+            (0, botService_1.notifyCardRequestApproved)(request.userId, {
+                cardId: String(cardId),
+                cardType: request.cardType,
+                nameOnCard: request.nameOnCard,
+                raw: respData,
+            }).catch(() => { });
+        }
+        return (0, apiResponse_1.ok)(res, { cardId: String(cardId), synced: true });
+    }
+    catch (err) {
+        const message = err?.message || "Failed to sync card";
+        return (0, apiResponse_1.fail)(res, message, 400);
     }
 });
 router.post("/:id/approve", requireAdmin, async (_req, res) => {
-    return res.status(405).json({ success: false, message: "Admin approval is disabled. StroWallet auto-approves." });
+    return (0, apiResponse_1.fail)(res, "Admin approval is disabled. StroWallet auto-approves.", 405);
 });
 router.post("/:id/decline", requireAdmin, async (_req, res) => {
-    return res.status(405).json({ success: false, message: "Admin decline is disabled. StroWallet auto-approves." });
+    return (0, apiResponse_1.fail)(res, "Admin decline is disabled. StroWallet auto-approves.", 405);
 });
 exports.default = router;

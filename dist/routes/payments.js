@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const zod_1 = require("zod");
 const paymentVerification_1 = require("../services/paymentVerification");
+const apiResponse_1 = require("../utils/apiResponse");
 const router = express_1.default.Router();
 const VerifyRequestSchema = zod_1.z.object({
     paymentMethod: zod_1.z.enum(["telebirr", "cbe"]),
@@ -21,7 +22,7 @@ function createRateLimiter(maxRequests, windowMs) {
         recent.push(now);
         hits.set(key, recent);
         if (recent.length > maxRequests) {
-            return res.status(429).json({ success: false, message: "Too many verification attempts. Please try again later." });
+            return (0, apiResponse_1.fail)(res, "Too many verification attempts. Please try again later.", 429);
         }
         next();
     };
@@ -34,11 +35,14 @@ router.post("/verify", rateLimit, async (req, res) => {
             paymentMethod: parsed.paymentMethod,
             transactionNumber: parsed.transactionNumber,
         });
-        return res.status(result.status).json(result.body);
+        if (result.body.success) {
+            return (0, apiResponse_1.ok)(res, result.body, result.status);
+        }
+        return (0, apiResponse_1.fail)(res, result.body.message || "Validation failed", result.status);
     }
     catch (err) {
         const message = err?.errors?.[0]?.message || err?.message || "Invalid request";
-        return res.status(err?.status || 400).json({ success: false, message });
+        return (0, apiResponse_1.fail)(res, message, err?.status || 400);
     }
 });
 exports.default = router;

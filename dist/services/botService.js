@@ -29,6 +29,7 @@ const Card_1 = __importDefault(require("../models/Card"));
 const paymentVerification_1 = require("./paymentVerification");
 const Transaction_1 = __importDefault(require("../models/Transaction"));
 const User_1 = __importDefault(require("../models/User"));
+const Customer_1 = __importDefault(require("../models/Customer"));
 const pricingService_1 = require("./pricingService");
 let bot = null;
 const pendingActions = new Map();
@@ -81,6 +82,23 @@ const cardRequestSelections = new Map();
 const recentCallbackActions = new Map();
 const recentOutgoing = new Map();
 const recentUpdates = new Map();
+async function upsertTelegramIdentity(msg) {
+    const telegramId = msg?.from?.id != null ? String(msg.from.id) : undefined;
+    const chatId = msg?.chat?.id != null ? String(msg.chat.id) : undefined;
+    if (!telegramId || !chatId)
+        return;
+    const username = msg?.from?.username ? String(msg.from.username) : undefined;
+    await User_1.default.findOneAndUpdate({ $or: [{ telegramId }, { userId: telegramId }] }, {
+        $set: {
+            telegramId,
+            chatId,
+            username,
+        },
+        $setOnInsert: {
+            userId: telegramId,
+        },
+    }, { upsert: true, new: true });
+}
 const MENU_BUTTON = { text: "📋 Menu", callback_data: "MENU" };
 const MENU_KEYBOARD = [
     [
@@ -144,8 +162,7 @@ async function initBot() {
     const pollingEnabled = String(process.env.TELEGRAM_POLLING_ENABLED ?? "true").toLowerCase() !== "false";
     const replicaId = process.env.RAILWAY_REPLICA_ID || process.env.REPLICA_ID;
     if (replicaId && replicaId !== "0") {
-        console.warn(`Skipping Telegram bot polling on replica ${replicaId}`);
-        return;
+        console.warn(`Replica detected (${replicaId}); relying on bot lock to prevent multiple pollers.`);
     }
     if (!pollingEnabled) {
         console.warn("TELEGRAM_POLLING_ENABLED is false; bot polling disabled");
@@ -159,9 +176,15 @@ async function initBot() {
     }
     const botRef = new node_telegram_bot_api_1.default(activeToken, { polling: false });
     await botRef.deleteWebHook({ drop_pending_updates: true }).catch(() => { });
+    botRef.on("polling_error", (err) => {
+        console.error("Telegram polling error:", err);
+    });
     await botRef.startPolling();
     bot = botRef;
     console.log("Telegram bot started");
+    botRef.getMe().then((me) => {
+        console.log(`Telegram bot identity: @${me.username} (${me.id})`);
+    }).catch(() => { });
     startBotLockHeartbeat(lockOwner, botRef, BOT_LOCK_TTL_MS);
     botRef.setMyCommands([
         { command: "start", description: "Show welcome message" },
@@ -184,26 +207,41 @@ async function initBot() {
         { command: "status", description: "Show current links" },
         { command: "verify", description: "Verify a payment transaction" },
     ]).catch(() => { });
-    botRef.onText(/^\/start$/i, async (msg) => {
+    botRef.onText(/^\/start(?:@[\w_]+)?(?:\s+.*)?$/i, async (msg) => {
         const chatId = msg.chat.id;
-        if (shouldSuppressOutgoing(chatId, "start", 10000))
+        console.log("Telegram /start received", {
+            chatId,
+            from: msg.from?.username || msg.from?.id,
+            text: msg.text,
+        });
+        await upsertTelegramIdentity(msg);
+        if (shouldSuppressOutgoing(chatId, "start", 10000)) {
+            console.warn("/start suppressed by rate limit", { chatId });
             return;
-        if (shouldSkipCommand(msg, "start", 10000))
+        }
+        if (shouldSkipCommand(msg, "start", 10000)) {
+            console.warn("/start skipped as duplicate", { chatId });
             return;
+        }
         const [link, cardCount] = await Promise.all([
             TelegramLink_1.TelegramLink.findOne({ chatId }),
             Card_1.default.countDocuments({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }),
         ]);
-        await bot.sendMessage(chatId, buildWelcomeMessage(), {
-            parse_mode: "HTML",
-            disable_web_page_preview: true,
-            reply_markup: { inline_keyboard: MENU_KEYBOARD },
-        });
-        await bot.sendMessage(chatId, buildProfileCard(msg, link || undefined, cardCount), {
-            parse_mode: "HTML",
-            disable_web_page_preview: true,
-            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-        });
+        try {
+            await bot.sendMessage(chatId, buildWelcomeMessage(), {
+                parse_mode: "HTML",
+                disable_web_page_preview: true,
+                reply_markup: { inline_keyboard: MENU_KEYBOARD },
+            });
+            await bot.sendMessage(chatId, buildProfileCard(msg, link || undefined, cardCount), {
+                parse_mode: "HTML",
+                disable_web_page_preview: true,
+                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
+        }
+        catch (err) {
+            console.error("Failed to respond to /start", { chatId, err });
+        }
     });
     botRef.onText(/^\/menu$/i, async (msg) => {
         if (shouldSkipCommand(msg, "menu", 4000))
@@ -238,19 +276,7 @@ async function initBot() {
     });
     botRef.onText(/^\/kyc_status$/i, async (msg) => {
         const chatId = msg.chat.id;
-        const user = await User_1.default.findOne({ userId: String(chatId) }).lean();
-        if (!user) {
-            await bot.sendMessage(chatId, "No KYC record found. Use /kyc to submit.", {
-                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-            });
-            return;
-        }
-        const refreshed = await refreshKycStatusFromStroWallet(user);
-        const status = refreshed || user.kycStatus || "not_started";
-        const label = status === "declined" ? "rejected" : status;
-        await bot.sendMessage(chatId, `Your KYC status: ${label}.`, {
-            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-        });
+        await sendKycStatus(chatId);
     });
     botRef.onText(/^\/create_card$/i, async (msg) => {
         const chatId = msg.chat.id;
@@ -265,7 +291,7 @@ async function initBot() {
     botRef.onText(/^\/mycard(s)?$/i, async (msg) => {
         if (shouldSkipCommand(msg, "mycard"))
             return;
-        return sendMyCardSummary(msg.chat.id);
+        return sendMyCards(msg.chat.id, msg);
     });
     botRef.onText(/^\/cardstatus$/i, async (msg) => {
         if (shouldSkipCommand(msg, "cardstatus"))
@@ -299,17 +325,13 @@ async function initBot() {
         if (shouldSkipCommand(msg, "kyc"))
             return;
         const chatId = msg.chat.id;
-        const user = await User_1.default.findOne({ userId: String(chatId) }).lean();
-        const status = (user?.kycStatus || "not_started");
+        const [user, customer] = await Promise.all([
+            User_1.default.findOne({ userId: String(chatId) }).lean(),
+            Customer_1.default.findOne({ userId: String(chatId) }).lean(),
+        ]);
+        const status = resolveKycStatus(user, customer);
         if (status === "pending") {
-            if (!user?.strowalletCustomerId) {
-                await bot.sendMessage(chatId, "⚠️ KYC is pending but missing a customer ID. Please resubmit your KYC.", {
-                    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-                });
-                await startKycFlow(chatId, msg, "create");
-                return;
-            }
-            await bot.sendMessage(chatId, "✅ KYC already submitted. Status: pending approval.", {
+            await bot.sendMessage(chatId, "✅ KYC already submitted. Status: pending verification.", {
                 reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
             });
             return;
@@ -320,7 +342,7 @@ async function initBot() {
             });
             return;
         }
-        if (status === "declined") {
+        if (status === "rejected") {
             await bot.sendMessage(chatId, "❌ Your KYC was rejected. Use /kyc_edit to resubmit.", {
                 reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
             });
@@ -332,21 +354,27 @@ async function initBot() {
         if (shouldSkipCommand(msg, "kyc_edit"))
             return;
         const chatId = msg.chat.id;
-        const user = await User_1.default.findOne({ userId: String(chatId) }).lean();
-        if (!user) {
+        const [user, customer] = await Promise.all([
+            User_1.default.findOne({ userId: String(chatId) }).lean(),
+            Customer_1.default.findOne({ userId: String(chatId) }).lean(),
+        ]);
+        const status = resolveKycStatus(user, customer);
+        if (status === "not_started") {
             await bot.sendMessage(chatId, "No KYC record found. Use /kyc to submit.", {
                 reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
             });
             return;
         }
-        if (user.kycStatus === "approved") {
+        if (status === "approved") {
             await bot.sendMessage(chatId, "✅ KYC already approved. No edits required.", {
                 reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
             });
             return;
         }
-        if (!user.strowalletCustomerId) {
-            await startKycFlow(chatId, msg, "create", user);
+        if (status === "pending") {
+            await bot.sendMessage(chatId, "⏳ KYC is pending verification. Please wait for approval.", {
+                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
             return;
         }
         await startKycFlow(chatId, msg, "edit", user);
@@ -518,6 +546,28 @@ async function initBot() {
             await bot.answerCallbackQuery(query.id).catch(() => { });
             return sendMenu(chatId, query.message);
         }
+        if (action === "KYC_STATUS") {
+            await bot.answerCallbackQuery(query.id).catch(() => { });
+            await sendKycStatus(chatId);
+            return;
+        }
+        if (action === "KYC_START") {
+            await bot.answerCallbackQuery(query.id).catch(() => { });
+            await startKycFlow(chatId, query.message);
+            return;
+        }
+        if (action.startsWith("CARD_REVEAL::")) {
+            const cardId = action.replace("CARD_REVEAL::", "");
+            await bot.answerCallbackQuery(query.id).catch(() => { });
+            await sendCardRevealPrompt(chatId, cardId);
+            return;
+        }
+        if (action.startsWith("CARD_REVEAL_CONFIRM::")) {
+            const cardId = action.replace("CARD_REVEAL_CONFIRM::", "");
+            await bot.answerCallbackQuery(query.id).catch(() => { });
+            await sendCardSensitiveDetails(chatId, cardId);
+            return;
+        }
         if (action === "MENU_VERIFY") {
             await editOrSend(chatId, query.message, "Choose payment method to verify:", {
                 inline_keyboard: [
@@ -610,6 +660,11 @@ async function initBot() {
     });
     botRef.on("message", async (msg) => {
         const chatId = msg.chat.id;
+        console.log("Telegram message received", {
+            chatId,
+            from: msg.from?.username || msg.from?.id,
+            text: msg.text,
+        });
         const messageKey = msg.message_id ? `msg:${chatId}:${msg.message_id}` : `msg:${chatId}:${Date.now()}`;
         if (isDuplicateUpdate(messageKey, 20000))
             return;
@@ -890,7 +945,8 @@ async function initBot() {
                         }
                     }
                     const user = await User_1.default.findOne({ userId: String(msg.chat.id) }).lean();
-                    if (!user || user.kycStatus !== "approved") {
+                    const customer = await Customer_1.default.findOne({ userId: String(msg.chat.id) }).lean();
+                    if (!customer || customer.kycStatus !== "approved") {
                         await bot.sendMessage(msg.chat.id, "❌ KYC is not approved. Please complete KYC before requesting a card.", {
                             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
                         });
@@ -917,7 +973,7 @@ async function initBot() {
                         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
                     });
                     cardRequestSelections.delete(msg.chat.id);
-                    await submitCardRequest(String(msg.chat.id), user, undefined, selection.amountEtb);
+                    await submitCardRequest(String(msg.chat.id), user, customer, undefined, selection.amountEtb);
                 }
                 else {
                     await bot.sendMessage(msg.chat.id, `❌ Verification failed: ${b?.message || "Unknown error"}`, {
@@ -969,6 +1025,15 @@ async function notifyByEmail(email, message) {
     const link = await TelegramLink_1.TelegramLink.findOne({ customerEmail: email });
     if (link) {
         await bot.sendMessage(link.chatId, message, { disable_web_page_preview: true });
+        return;
+    }
+    const customer = await Customer_1.default.findOne({ email }).lean();
+    if (customer?.userId) {
+        const user = await User_1.default.findOne({ userId: customer.userId }).lean();
+        const chatId = user?.chatId ? Number(user.chatId) : NaN;
+        if (Number.isFinite(chatId)) {
+            await bot.sendMessage(chatId, message, { disable_web_page_preview: true });
+        }
     }
 }
 async function notifyCardStatusChanged(cardId, status) {
@@ -1042,25 +1107,14 @@ async function notifyKycStatus(userId, status) {
         });
         return;
     }
-    if (status === "declined") {
+    if (status === "rejected") {
         await bot.sendMessage(chatId, "❌ Kyc verification failed upload a scan of your id or passport", {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
         });
     }
 }
 async function pollPendingKycUpdates() {
-    const pending = await User_1.default.find({ kycStatus: { $in: ["pending", "approved"] } }).lean();
-    if (!pending.length)
-        return { checked: 0, updated: 0 };
-    let updated = 0;
-    for (const user of pending) {
-        const nextStatus = await refreshKycStatusFromStroWallet(user);
-        if (nextStatus && nextStatus !== user.kycStatus) {
-            updated += 1;
-            await notifyKycStatus(String(user.userId), nextStatus);
-        }
-    }
-    return { checked: pending.length, updated };
+    return { checked: 0, updated: 0 };
 }
 function buildInstanceId() {
     const replica = process.env.RAILWAY_REPLICA_ID || process.env.REPLICA_ID || "none";
@@ -1071,7 +1125,17 @@ async function acquireBotLock(ownerId, ttlMs) {
     const expiresAt = new Date(now.getTime() + ttlMs);
     try {
         const lock = (await BotLock_1.default.findOneAndUpdate({ key: BOT_LOCK_KEY, $or: [{ expiresAt: { $lte: now } }, { ownerId }] }, { $set: { ownerId, expiresAt }, $setOnInsert: { key: BOT_LOCK_KEY, createdAt: now } }, { upsert: true, new: true }).lean());
-        return lock?.ownerId === ownerId;
+        if (lock?.ownerId === ownerId)
+            return true;
+        // Recover from clock-skewed locks that stay in the future and block polling.
+        const existing = (await BotLock_1.default.findOne({ key: BOT_LOCK_KEY }).lean());
+        const maxSkewMs = ttlMs * 2;
+        if (existing?.expiresAt && existing.expiresAt.getTime() - now.getTime() > maxSkewMs) {
+            console.warn("Bot lock expires far in the future; forcing takeover.");
+            const forced = (await BotLock_1.default.findOneAndUpdate({ key: BOT_LOCK_KEY }, { $set: { ownerId, expiresAt } }, { new: true }).lean());
+            return forced?.ownerId === ownerId;
+        }
+        return false;
     }
     catch (err) {
         if (err?.code === 11000)
@@ -1134,7 +1198,7 @@ function shouldSkipCommand(msg, key, ttlMs = 1500) {
     const chatId = msg?.chat?.id;
     const messageId = msg?.message_id;
     if (chatId != null && messageId != null) {
-        if (isDuplicateUpdate(`msg:${chatId}:${messageId}`))
+        if (isDuplicateUpdate(`cmdmsg:${chatId}:${messageId}`))
             return true;
     }
     if (chatId != null && shouldSuppressOutgoing(chatId, `cmd:${key}`, ttlMs))
@@ -1367,6 +1431,10 @@ async function handleMenuSelection(action, chatId, message) {
         const cardId = action.replace("CARD_TXN::", "");
         return sendCardTransactions(chatId, cardId);
     }
+    if (action.startsWith("TXN_DETAIL::")) {
+        const txnId = action.replace("TXN_DETAIL::", "");
+        return sendCardTransactionDetail(chatId, txnId);
+    }
     if (action.startsWith("CARD_FREEZE::")) {
         const cardId = action.replace("CARD_FREEZE::", "");
         return handleFreezeAction(chatId, cardId, "freeze");
@@ -1460,39 +1528,31 @@ async function handleCardRequest(chatId, message) {
     if (shouldSuppressOutgoing(chatId, "card_request"))
         return;
     const user = await User_1.default.findOne({ userId: String(chatId) }).lean();
-    const kycStatus = (user?.kycStatus || "not_started");
+    const customerRecord = await Customer_1.default.findOne({ userId: String(chatId) }).lean();
+    const kycStatus = customerRecord?.kycStatus || "pending";
+    const userId = String(chatId);
+    const existingCard = await Card_1.default.findOne({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
+    const approvedRequest = await CardRequest_1.default.findOne({ userId, status: "approved" }).lean();
+    if (existingCard || approvedRequest) {
+        await bot.sendMessage(chatId, "❌ You already have a card. Multiple cards are not allowed.", {
+            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+    }
     if (kycStatus !== "approved") {
         if (kycStatus === "pending") {
-            const refreshed = await refreshKycStatusFromStroWallet(user);
-            if (refreshed === "approved") {
-                await bot.sendMessage(chatId, "✅ KYC approved. You can now request a card.", {
-                    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-                });
-            }
-            else {
-                await bot.sendMessage(chatId, "⏳ KYC pending approval. Please wait and try again later.", {
-                    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-                });
-                return;
-            }
-        }
-        else if (kycStatus === "declined") {
-            await bot.sendMessage(chatId, "❌ KYC was declined. Please resubmit with /kyc.", {
+            await bot.sendMessage(chatId, "⏳ KYC pending verification. Please wait and try again later.", {
                 reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
             });
             return;
         }
-        else {
-            await startKycFlow(chatId, message);
+        if (kycStatus === "rejected") {
+            await bot.sendMessage(chatId, "❌ KYC was rejected. Please resubmit with /kyc.", {
+                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
             return;
         }
-    }
-    const userId = String(chatId);
-    const existingCard = await Card_1.default.findOne({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
-    if (existingCard) {
-        await bot.sendMessage(chatId, "❌ You already have a card. Multiple cards are not allowed.", {
-            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-        });
+        await startKycFlow(chatId, message);
         return;
     }
     const pendingRequest = await CardRequest_1.default.findOne({ userId, status: "pending" }).lean();
@@ -1502,14 +1562,7 @@ async function handleCardRequest(chatId, message) {
         });
         return;
     }
-    const approvedRequest = await CardRequest_1.default.findOne({ userId, status: "approved" }).lean();
-    if (approvedRequest) {
-        await bot.sendMessage(chatId, "✅ Your card request was already approved. Check My Card.", {
-            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-        });
-        return;
-    }
-    if (!user?.customerEmail) {
+    if (!customerRecord?.email) {
         await bot.sendMessage(chatId, "❌ Missing email on your KYC. Please update and resubmit KYC.", {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
         });
@@ -1533,9 +1586,9 @@ async function handleCardRequest(chatId, message) {
         });
         return;
     }
-    await submitCardRequest(String(chatId), user, message, baseAmount);
+    await submitCardRequest(String(chatId), user, customerRecord, message, baseAmount);
 }
-async function submitCardRequest(userId, user, message, baseAmount) {
+async function submitCardRequest(userId, user, customer, message, baseAmount) {
     const nameOnCard = [user.firstName, user.lastName].filter(Boolean).join(" ") || message?.from?.first_name || "StroWallet User";
     const amount = baseAmount != null ? String(baseAmount) : String(getCardRequestBaseAmount());
     try {
@@ -1544,9 +1597,9 @@ async function submitCardRequest(userId, user, message, baseAmount) {
             nameOnCard,
             cardType: "visa",
             amount,
-            customerEmail: user.customerEmail,
+            customerEmail: customer?.email || user?.customerEmail,
         });
-        if (resp?.data?.success) {
+        if (resp?.data?.ok) {
             await bot.sendMessage(Number(userId), "✅ Your card request has been submitted to StroWallet. You'll be notified once approved.", {
                 reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
             });
@@ -1558,7 +1611,7 @@ async function submitCardRequest(userId, user, message, baseAmount) {
         }
     }
     catch (e) {
-        const messageText = e?.response?.data?.message || "Your card request could not be approved.";
+        const messageText = e?.response?.data?.error || "Your card request could not be approved.";
         await bot.sendMessage(Number(userId), `❌ ${messageText}`, {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
         });
@@ -1566,14 +1619,15 @@ async function submitCardRequest(userId, user, message, baseAmount) {
 }
 async function startCreateCardFlow(chatId, message) {
     const user = await User_1.default.findOne({ userId: String(chatId) }).lean();
-    const status = (user?.kycStatus || "not_started");
+    const customer = await Customer_1.default.findOne({ userId: String(chatId) }).lean();
+    const status = customer?.kycStatus || "pending";
     if (status !== "approved") {
         if (status === "pending") {
-            await bot.sendMessage(chatId, "⏳ KYC pending approval. Please wait before creating a card.", {
+            await bot.sendMessage(chatId, "⏳ KYC pending verification. Please wait before creating a card.", {
                 reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
             });
         }
-        else if (status === "declined") {
+        else if (status === "rejected") {
             await bot.sendMessage(chatId, "❌ Your KYC was rejected. Use /kyc_edit to resubmit.", {
                 reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
             });
@@ -1623,14 +1677,10 @@ async function handleCreateCardMessage(msg, session) {
 async function promptCreateCardStep(chatId, session) {
     switch (session.step) {
         case "type":
-            await bot.sendMessage(chatId, "Select card type:", {
-                reply_markup: {
-                    inline_keyboard: [[
-                            { text: "Visa", callback_data: "CARD_TYPE::visa" },
-                            { text: "Mastercard", callback_data: "CARD_TYPE::mastercard" },
-                        ], [MENU_BUTTON]],
-                },
-            });
+            session.data.cardType = "visa";
+            session.step = "amount";
+            createCardSessions.set(chatId, session);
+            await promptCreateCardStep(chatId, session);
             break;
         case "amount":
             await bot.sendMessage(chatId, "Enter initial amount (minimum 3). You can skip to use 3:", {
@@ -1645,10 +1695,12 @@ async function promptCreateCardStep(chatId, session) {
             break;
         case "confirm":
             await bot.sendMessage(chatId, buildCreateCardSummary(session.data), {
-                reply_markup: { inline_keyboard: [[
+                reply_markup: {
+                    inline_keyboard: [[
                             { text: "✅ Create Card", callback_data: "CARD_CONFIRM::yes" },
                             { text: "❌ Cancel", callback_data: "CARD_CONFIRM::no" },
-                        ], [MENU_BUTTON]] },
+                        ], [MENU_BUTTON]]
+                },
             });
             break;
     }
@@ -1664,14 +1716,15 @@ function buildCreateCardSummary(data) {
 }
 async function submitCreateCard(chatId, session) {
     const user = await User_1.default.findOne({ userId: String(chatId) }).lean();
-    if (!user || user.kycStatus !== "approved") {
+    const customer = await Customer_1.default.findOne({ userId: String(chatId) }).lean();
+    if (!customer || customer.kycStatus !== "approved") {
         createCardSessions.delete(chatId);
         await bot.sendMessage(chatId, "❌ You must complete and pass KYC before creating a card.", {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
         });
         return;
     }
-    const customerEmail = user.customerEmail;
+    const customerEmail = customer.email || user?.customerEmail;
     if (!customerEmail) {
         createCardSessions.delete(chatId);
         await bot.sendMessage(chatId, "❌ Missing email. Please update your KYC email and try again.", {
@@ -2302,6 +2355,40 @@ async function submitKyc(chatId, session) {
                 kycSubmittedAt: new Date(),
             },
         }, { upsert: true, new: true });
+        await Customer_1.default.findOneAndUpdate({ userId: String(chatId) }, {
+            $set: {
+                customerId: customerId || undefined,
+                email: data.customerEmail,
+                telegramId: user?.telegramId || String(chatId),
+                chatId: user?.chatId || String(chatId),
+                username: user?.username,
+                firstName: data.firstName,
+                lastName: data.lastName,
+                dateOfBirth: data.dateOfBirth,
+                phoneNumber: data.phoneNumber,
+                line1: data.line1,
+                city: data.city,
+                state: data.state,
+                zipCode: data.zipCode,
+                country: data.country,
+                houseNumber: data.houseNumber,
+                idType: data.idType,
+                idNumberEncrypted,
+                idNumberLast4,
+                idImageUrl: idImageForApi,
+                idImageFrontUrl: data.idImageFront,
+                idImageBackUrl: data.idImageBack,
+                idImagePdfUrl: data.idImagePdf,
+                userPhotoUrl: data.userPhoto,
+                kycStatus: "pending",
+                submittedAt: new Date(),
+                approvedAt: undefined,
+                rawPayload: {
+                    request: session.mode === "edit" ? updatePayload : createPayload,
+                    response: resp,
+                },
+            },
+        }, { upsert: true, new: true });
         kycSessions.delete(chatId);
         await bot.sendMessage(chatId, session.mode === "edit"
             ? "✅ Your updated KYC has been submitted successfully. Status: pending approval."
@@ -2361,33 +2448,155 @@ function normalizeKycStatus(value) {
     if (["pending", "processing", "review", "unreview kyc"].includes(v))
         return "pending";
     if (["declined", "rejected", "failed", "low kyc"].includes(v))
-        return "declined";
+        return "rejected";
     return undefined;
+}
+function resolveKycStatus(user, customer) {
+    if (customer?.kycStatus)
+        return customer.kycStatus;
+    const raw = user?.kycStatus;
+    if (!raw)
+        return "not_started";
+    const normalized = normalizeKycStatus(raw);
+    return normalized || (raw === "not_started" ? "not_started" : "pending");
+}
+async function sendKycStatus(chatId) {
+    const [user, customer] = await Promise.all([
+        User_1.default.findOne({ userId: String(chatId) }).lean(),
+        Customer_1.default.findOne({ userId: String(chatId) }).lean(),
+    ]);
+    const status = resolveKycStatus(user, customer);
+    if (status === "not_started") {
+        await bot.sendMessage(chatId, "No KYC record found. Use /kyc to submit.", {
+            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+    }
+    const label = status === "approved" ? "Approved" : status === "pending" ? "Pending verification" : "Rejected — contact support";
+    await bot.sendMessage(chatId, `Your KYC status: ${label}.`, {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+}
+function formatMaskedCard(last4) {
+    return `**** **** **** ${last4 || "----"}`;
+}
+function formatCardMoney(value, currency) {
+    const amount = Number(value);
+    if (!Number.isFinite(amount))
+        return undefined;
+    const normalized = (currency || "USD").toUpperCase();
+    if (normalized === "USD" || normalized === "USDT")
+        return `$${amount.toFixed(2)}`;
+    return `${amount.toFixed(2)} ${normalized}`;
+}
+function extractExpiry(detail) {
+    if (!detail)
+        return undefined;
+    const month = detail?.exp_month || detail?.expiry_month || detail?.expMonth || detail?.expiryMonth;
+    const year = detail?.exp_year || detail?.expiry_year || detail?.expYear || detail?.expiryYear;
+    if (month && year)
+        return `${String(month).padStart(2, "0")}/${String(year).slice(-2)}`;
+    const raw = detail?.expiry || detail?.expiry_date || detail?.exp || detail?.expDate;
+    return raw ? String(raw) : undefined;
+}
+function isFrozenStatus(raw) {
+    return String(raw || "").toLowerCase().includes("frozen");
+}
+function pickNestedField(obj, keys) {
+    if (!obj || typeof obj !== "object")
+        return undefined;
+    for (const key of keys) {
+        if (obj[key] != null)
+            return String(obj[key]);
+    }
+    for (const val of Object.values(obj)) {
+        if (val && typeof val === "object") {
+            const nested = pickNestedField(val, keys);
+            if (nested != null)
+                return nested;
+        }
+    }
+    return undefined;
+}
+function normalizeCardDetail(raw) {
+    if (!raw || typeof raw !== "object")
+        return null;
+    const cardNumber = pickNestedField(raw, ["card_number", "cardNumber"]);
+    const cvc = pickNestedField(raw, ["cvc", "cvv"]);
+    const status = pickNestedField(raw, ["card_status", "status", "state"]);
+    const balance = pickNestedField(raw, ["balance", "available_balance", "availableBalance"]);
+    const currency = pickNestedField(raw, ["currency", "ccy"]);
+    const last4Raw = pickNestedField(raw, ["last4", "card_last4", "cardLast4", "cardSuffix"]);
+    const last4 = last4Raw || (cardNumber ? cardNumber.slice(-4) : undefined);
+    const cardType = pickNestedField(raw, ["card_type", "cardType", "brand"]);
+    const nameOnCard = pickNestedField(raw, ["name_on_card", "nameOnCard", "name"]);
+    const expMonth = pickNestedField(raw, ["exp_month", "expiry_month", "expMonth", "expiryMonth"]);
+    const expYear = pickNestedField(raw, ["exp_year", "expiry_year", "expYear", "expiryYear"]);
+    const expiry = pickNestedField(raw, ["expiry", "expiry_date", "exp", "expDate"]);
+    const billingRaw = pickNestedField(raw, ["billing", "billing_address", "billingAddress"]);
+    const billingStreet = pickNestedField(raw, ["billing_street", "billingStreet"]);
+    const billingCity = pickNestedField(raw, ["billing_city", "billingCity"]);
+    const billingState = pickNestedField(raw, ["billing_state", "billingState"]);
+    const billingZip = pickNestedField(raw, ["billing_zip_code", "billing_zip", "billingZip", "billingZipCode"]);
+    const billingCountry = pickNestedField(raw, ["billing_country", "billingCountry"]);
+    const line1 = pickNestedField(raw, ["line1", "address", "addressLine1", "address_line1"]);
+    const city = pickNestedField(raw, ["city", "town"]);
+    const state = pickNestedField(raw, ["state", "province", "region"]);
+    const zip = pickNestedField(raw, ["zip", "zipCode", "postal", "postalCode"]);
+    const country = pickNestedField(raw, ["country"]);
+    const billingParts = [billingStreet || line1, billingCity || city].filter(Boolean).join(", ");
+    const addressParts = [billingState || state, billingZip || zip, billingCountry || country].filter(Boolean).join(", ");
+    const billing = billingRaw || (billingParts ? billingParts : undefined);
+    const address = addressParts ? addressParts : undefined;
+    return {
+        card_number: cardNumber,
+        cvc,
+        status,
+        balance,
+        available_balance: pickNestedField(raw, ["available_balance", "availableBalance"]),
+        currency,
+        last4,
+        card_type: cardType,
+        name_on_card: nameOnCard,
+        exp_month: expMonth,
+        exp_year: expYear,
+        expiry,
+        billing,
+        address,
+    };
 }
 async function sendUserInfo(chatId, message) {
     if (shouldSuppressOutgoing(chatId, "user_info"))
         return;
-    const [link, user, cards] = await Promise.all([
+    const [link, user, customer, primaryCard] = await Promise.all([
         TelegramLink_1.TelegramLink.findOne({ chatId }).lean(),
         User_1.default.findOne({ userId: String(chatId) }).lean(),
-        Card_1.default.find({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean(),
+        Customer_1.default.findOne({ userId: String(chatId) }).lean(),
+        getPrimaryCardForUser(String(chatId)),
     ]);
-    const balance = user?.balance ?? 0;
+    const baseBalance = user?.balance ?? 0;
     const currency = user?.currency || "USDT";
-    const cardsList = cards || [];
     const email = user?.customerEmail || link?.customerEmail;
-    const kycStatus = user?.kycStatus || "not_started";
-    const kycLabel = kycStatus === "approved" ? "approved" : kycStatus === "pending" ? "pending" : "not started";
-    const cardList = cardsList.slice(0, 3).map((c, idx) => `${idx + 1}. ${c.cardId}${c.last4 ? ` (••••${c.last4})` : ""}`);
+    const kycStatus = resolveKycStatus(user, customer);
+    const kycLabel = kycStatus === "approved" ? "Approved ✅" : kycStatus === "pending" ? "Pending ⏳" : "Not started";
+    const cardId = primaryCard?.cardId;
+    const remoteDetail = cardId ? await fetchCardDetailSafe(cardId) : null;
+    const balance = remoteDetail?.balance ?? baseBalance;
+    const last4 = remoteDetail?.last4 || primaryCard?.last4 || primaryCard?.cardNumber?.slice(-4);
+    const cardStatusRaw = remoteDetail?.status || primaryCard?.status;
+    const cardStatus = cardStatusRaw ? String(cardStatusRaw) : undefined;
+    const cardStatusLabel = cardStatus ? cardStatus.charAt(0).toUpperCase() + cardStatus.slice(1) : undefined;
     const lines = [
         "👤 Your Profile",
         `User ID: ${chatId}`,
         email ? `Email: ${email}` : "Email: not linked (use /linkemail your@example.com)",
-        `KYC: ${kycLabel} (use /kyc to submit)`,
-        `Wallet: ${balance} ${currency}`,
-        `Cards: ${cardsList.length || 0}${cardsList.length ? " (see below)" : ""}`,
-        cardList.length ? cardList.join("\n") : undefined,
-        !cardsList.length ? "Tip: Request a card from admin to get started." : undefined,
+        `KYC: ${kycLabel} (use /kyc to resubmit)`,
+        "",
+        `Wallet: ${Number(balance).toFixed(2)} ${currency}`,
+        `Cards: ${primaryCard ? 1 : 0}`,
+        primaryCard ? "💳 Virtual Card" : undefined,
+        primaryCard && cardStatusLabel ? `• Status: ${cardStatusLabel}` : undefined,
+        primaryCard && last4 ? `• Last 4 digits: ${last4}` : undefined,
     ].filter(Boolean);
     await editOrSend(chatId, message, lines.join("\n"), {
         inline_keyboard: [
@@ -2409,79 +2618,233 @@ function chunk(items, size) {
 async function sendWalletSummary(chatId, message) {
     if (shouldSuppressOutgoing(chatId, "wallet_summary"))
         return;
-    const [link, user, cards] = await Promise.all([
+    const [link, user, primaryCard] = await Promise.all([
         TelegramLink_1.TelegramLink.findOne({ chatId }).lean(),
         User_1.default.findOne({ userId: String(chatId) }).lean(),
-        Card_1.default.find({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean(),
+        getPrimaryCardForUser(String(chatId)),
     ]);
-    const cardId = cards?.[0]?.cardId || link?.cardIds?.[0];
-    const walletBalance = user?.balance ?? 0;
-    if (!cardId) {
-        const lines = ["💼 Wallet", `Balance: ${walletBalance} USD`, "No card yet. Request a card to get started."];
-        await editOrSend(chatId, message, lines.join("\n"), { inline_keyboard: [[MENU_BUTTON]] });
-        return;
-    }
-    // Prefer local synthetic detail if available
-    const local = await CardRequest_1.default.findOne({ cardId, status: "approved" }).lean();
-    if (local) {
-        const lines = [
-            "💼 Wallet",
-            `Balance: ${walletBalance} USD`,
-            `Card: ${cardId}`,
-            `Name: ${local.nameOnCard || "Virtual Card"}`,
-            local.cardNumber ? `Number: ${local.cardNumber}` : undefined,
-            local.cvc ? `CVC: ${local.cvc}` : undefined,
-        ].filter(Boolean);
-        await editOrSend(chatId, message, lines.join("\n"), {
-            inline_keyboard: [[{ text: "🔍 My Cards", callback_data: "MENU_MY_CARDS" }], [MENU_BUTTON]],
-        });
-        return;
-    }
-    // Fallback: try upstream detail
-    try {
-        const resp = await callStroWallet("fetch-card-detail", "post", { card_id: cardId });
-        const detail = resp?.data ?? resp;
-        const lines = [
-            "💼 Wallet",
-            `Balance: ${walletBalance} USD`,
-            `Card: ${cardId}`,
-            detail?.name_on_card ? `Name: ${detail.name_on_card}` : undefined,
-            detail?.card_number ? `Number: ${detail.card_number}` : undefined,
-            detail?.cvc ? `CVC: ${detail.cvc}` : undefined,
-        ].filter(Boolean);
-        await editOrSend(chatId, message, lines.join("\n"), {
-            inline_keyboard: [[{ text: "🔍 My Cards", callback_data: "MENU_MY_CARDS" }], [MENU_BUTTON]],
-        });
-    }
-    catch (err) {
-        await sendFriendlyError(chatId, err?.requestId);
-    }
+    const baseWalletBalance = user?.balance ?? 0;
+    const currency = user?.currency || "USD";
+    const cardId = primaryCard?.cardId || link?.cardIds?.[0];
+    const remoteDetail = cardId ? await fetchCardDetailSafe(cardId) : null;
+    const walletBalance = remoteDetail?.balance ?? baseWalletBalance;
+    const last4 = remoteDetail?.last4 || primaryCard?.last4 || primaryCard?.cardNumber?.slice(-4);
+    const lines = [
+        "💼 Your Wallet",
+        `Balance: ${Number(walletBalance).toFixed(2)} ${currency}`,
+        `Currency: ${currency}`,
+        "Status: Active",
+        "",
+        cardId ? "Linked Card:" : "Linked Card: None",
+        cardId ? `💳 Virtual Card (${last4 ? `**** ${last4}` : "linked"})` : undefined,
+    ];
+    await editOrSend(chatId, message, lines.join("\n"), {
+        inline_keyboard: [[{ text: "🔍 My Cards", callback_data: "MENU_MY_CARDS" }], [MENU_BUTTON]],
+    });
 }
 async function sendMyCards(chatId, message) {
-    const cards = await Card_1.default.find({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
-    const legacyLink = await TelegramLink_1.TelegramLink.findOne({ chatId }).lean();
-    const cardIds = cards.length ? cards.map((c) => c.cardId) : legacyLink?.cardIds || [];
-    if (!cardIds.length) {
-        if (shouldSuppressOutgoing(chatId, "my_cards_empty"))
+    if (!shouldSuppressOutgoing(chatId, "my_cards_loading", 1500)) {
+        await editOrSend(chatId, message, "Loading your card...", {
+            inline_keyboard: [[MENU_BUTTON]],
+        });
+    }
+    const userId = String(chatId);
+    const [user, customer, link, cardIds] = await Promise.all([
+        User_1.default.findOne({ userId }).lean(),
+        Customer_1.default.findOne({ userId }).lean(),
+        TelegramLink_1.TelegramLink.findOne({ chatId }).lean(),
+        getUserCardIds(chatId),
+    ]);
+    const customerEmail = customer?.email || user?.customerEmail || link?.customerEmail;
+    const [latestRequest, primaryCard] = await Promise.all([
+        CardRequest_1.default.findOne({ $or: [{ userId }, { customerEmail }] }).sort({ updatedAt: -1 }).lean(),
+        Card_1.default.findOne({ $or: [{ userId }, { customerEmail }] }).sort({ updatedAt: -1 }).lean(),
+    ]);
+    const linkedCardId = cardIds[0];
+    const linkedCard = linkedCardId ? await Card_1.default.findOne({ cardId: linkedCardId }).lean() : null;
+    const resolvedCard = linkedCard || primaryCard;
+    const resolvedCardId = resolvedCard?.cardId || latestRequest?.cardId || linkedCardId;
+    const kycStatus = resolveKycStatus(user, customer);
+    if (kycStatus !== "approved" && !resolvedCardId) {
+        const label = kycStatus === "pending" ? "Pending" : kycStatus === "rejected" ? "Rejected" : "Not started";
+        const lines = [
+            "⚠️ KYC Required",
+            "You must complete KYC before requesting a card.",
+            `KYC Status: ${label}`,
+        ];
+        await editOrSend(chatId, message, lines.join("\n"), {
+            inline_keyboard: [[{ text: "✅ Complete KYC", callback_data: "KYC_START" }], [MENU_BUTTON]],
+        });
+        return;
+    }
+    const card = resolvedCard || (latestRequest?.cardId ? await Card_1.default.findOne({ cardId: latestRequest.cardId }).lean() : null);
+    const cardId = card?.cardId || latestRequest?.cardId || linkedCardId;
+    if (!card && !cardId) {
+        if (!latestRequest) {
+            const lines = [
+                "💳 Virtual Card",
+                "",
+                "You don't have a card yet.",
+                "",
+                "To get a card:",
+                "• Complete KYC",
+                "• Request a virtual card",
+                "",
+                "👇 Choose an option:",
+            ];
+            await editOrSend(chatId, message, lines.join("\n"), {
+                inline_keyboard: [
+                    [{ text: "➕ Request Card", callback_data: "MENU_CREATE_CARD" }],
+                    [{ text: "📝 KYC Status", callback_data: "KYC_STATUS" }],
+                    [MENU_BUTTON],
+                ],
+            });
             return;
+        }
+        if (latestRequest.status === "pending" || latestRequest.status === "approved") {
+            const lines = [
+                "💳 Virtual Card",
+                "",
+                "Status: ⏳ Pending Approval",
+                "",
+                "Your card request is being reviewed.",
+                "This usually takes a few minutes.",
+                "",
+                "You'll be notified once your card is ready.",
+            ];
+            await editOrSend(chatId, message, lines.join("\n"), {
+                inline_keyboard: [[{ text: "🔄 Refresh Status", callback_data: "MENU_MY_CARDS" }], [MENU_BUTTON]],
+            });
+            return;
+        }
+        if (latestRequest.status === "declined") {
+            const reason = latestRequest.decisionReason || latestRequest.adminNote;
+            const lines = [
+                "💳 Virtual Card",
+                "",
+                "❌ Card Request Failed",
+                "",
+                "Reason:",
+                reason ? `• ${reason}` : "• KYC not approved\n• Invalid details\n• Provider rejection",
+                "",
+                "Please fix the issue and try again.",
+            ];
+            await editOrSend(chatId, message, lines.join("\n"), {
+                inline_keyboard: [
+                    [{ text: "📝 Check KYC Status", callback_data: "KYC_STATUS" }],
+                    [{ text: "➕ Request Card Again", callback_data: "MENU_CREATE_CARD" }],
+                    [MENU_BUTTON],
+                ],
+            });
+            return;
+        }
+    }
+    if (!card && !cardId) {
         await editOrSend(chatId, message, "No card yet. Request a card to get started.", {
             inline_keyboard: [[MENU_BUTTON]],
         });
         return;
     }
-    if (!shouldSuppressOutgoing(chatId, "my_cards_fetch")) {
-        await editOrSend(chatId, message, `Fetching ${cardIds.length} card(s)...`, {
-            inline_keyboard: [[MENU_BUTTON]],
+    const activeCard = card || {
+        cardId: cardId,
+        status: latestRequest?.status === "approved" ? "active" : latestRequest?.status,
+        cardType: latestRequest?.cardType,
+        last4: latestRequest?.cardNumber?.slice(-4),
+        currency: user?.currency || "USD",
+        balance: user?.balance,
+    };
+    const remoteDetail = !card?.last4 || !card?.balance || !card?.currency ? await fetchCardDetailSafe(activeCard.cardId) : null;
+    const mergedDetail = remoteDetail || null;
+    if (isFrozenStatus(activeCard.status)) {
+        const lines = [
+            "💳 Your Virtual Card",
+            "",
+            "Status: ❄️ Frozen",
+            "Reason: Temporary freeze",
+            "",
+            "You can unfreeze your card anytime.",
+        ];
+        await editOrSend(chatId, message, lines.join("\n"), {
+            inline_keyboard: [
+                [{ text: "🔥 Unfreeze Card", callback_data: `CARD_UNFREEZE::${activeCard.cardId}` }],
+                [{ text: "🔍 Transactions", callback_data: `CARD_TXN::${activeCard.cardId}` }],
+                [MENU_BUTTON],
+            ],
         });
+        return;
     }
-    for (const cardId of cardIds) {
-        await sendCardDetail(chatId, cardId);
+    const last4 = mergedDetail?.last4 || activeCard.last4 || latestRequest?.cardNumber?.slice(-4);
+    const cardType = mergedDetail?.card_type || activeCard.cardType || latestRequest?.cardType || "Virtual USD Card";
+    const balanceLabel = formatCardMoney(mergedDetail?.balance ?? mergedDetail?.available_balance ?? activeCard.balance ?? user?.balance, mergedDetail?.currency || activeCard.currency || user?.currency || "USD");
+    const expiry = extractExpiry(mergedDetail) || extractExpiry(latestRequest?.responseData || latestRequest?.metadata || {});
+    const billing = mergedDetail?.billing || latestRequest?.metadata?.billing;
+    const address = mergedDetail?.address || latestRequest?.metadata?.address;
+    const lines = [
+        "💳 Your Virtual Card",
+        `Card Type: ${cardType}`,
+        "Status: ✅ Active",
+        `Card Number: ${formatMaskedCard(last4)}`,
+        expiry ? `Expiry Date: ${expiry}` : undefined,
+        balanceLabel ? `Balance: ${balanceLabel}` : undefined,
+        billing ? `Billing: ${billing}` : undefined,
+        address ? `Address: ${address}` : undefined,
+    ].filter(Boolean);
+    await editOrSend(chatId, message, lines.join("\n"), {
+        inline_keyboard: [
+            [{ text: "🔐 View Card Details", callback_data: `CARD_REVEAL::${activeCard.cardId}` }],
+            [
+                { text: "🔍 Transactions", callback_data: `CARD_TXN::${activeCard.cardId}` },
+                { text: "❄️ Freeze Card", callback_data: `CARD_FREEZE::${activeCard.cardId}` },
+            ],
+            [MENU_BUTTON],
+        ],
+    });
+}
+function isLikelyCardId(value) {
+    if (!value)
+        return false;
+    if (value.startsWith("/"))
+        return false;
+    if (value.length < 6)
+        return false;
+    return /^[A-Za-z0-9_-]+$/.test(value) || /^[A-Za-z0-9-]{6,}$/.test(value);
+}
+async function getUserCardIds(chatId) {
+    const userId = String(chatId);
+    const cards = await Card_1.default.find({ userId }).lean();
+    const cardIdsFromCards = cards.map((c) => c.cardId).filter(isLikelyCardId);
+    if (cardIdsFromCards.length)
+        return Array.from(new Set(cardIdsFromCards));
+    const requests = await CardRequest_1.default.find({ userId, status: "approved", cardId: { $exists: true, $ne: "" } }).lean();
+    const requestIds = requests.map((r) => String(r.cardId)).filter(isLikelyCardId);
+    if (requestIds.length)
+        return Array.from(new Set(requestIds));
+    const legacyLink = await TelegramLink_1.TelegramLink.findOne({ chatId }).lean();
+    const legacyIds = (legacyLink?.cardIds || []).filter(isLikelyCardId);
+    if (legacyLink && legacyIds.length !== (legacyLink.cardIds || []).length) {
+        await TelegramLink_1.TelegramLink.updateOne({ chatId }, { $set: { cardIds: legacyIds } });
     }
+    return Array.from(new Set(legacyIds));
 }
 async function getPrimaryCardForUser(userId) {
-    return Card_1.default.findOne({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } })
+    const card = await Card_1.default.findOne({ userId })
         .sort({ updatedAt: -1 })
         .lean();
+    if (card)
+        return card;
+    const request = await CardRequest_1.default.findOne({ userId, status: "approved", cardId: { $exists: true, $ne: "" } })
+        .sort({ updatedAt: -1 })
+        .lean();
+    if (!request)
+        return null;
+    return {
+        cardId: String(request.cardId),
+        cardType: request.cardType,
+        status: request?.responseData?.response?.card_status || "pending",
+        last4: request.cardNumber ? request.cardNumber.slice(-4) : undefined,
+        balance: undefined,
+        currency: undefined,
+    };
 }
 async function sendMyCardSummary(chatId) {
     const card = await getPrimaryCardForUser(String(chatId));
@@ -2528,48 +2891,117 @@ async function sendCardDetail(chatId, cardId) {
                 balance: walletBalance,
                 available_balance: local.amount || undefined,
                 currency: card?.currency || "USD",
-                card_number: local.cardNumber,
-                cvc: local.cvc,
                 last4: card?.last4,
+                expiry: extractExpiry(local.responseData || local.metadata || {}),
             };
             const text = buildCardDetailMessage(detail, cardId);
+            const freezeAction = isFrozenStatus(detail.status) ? "CARD_UNFREEZE" : "CARD_FREEZE";
+            const freezeLabel = isFrozenStatus(detail.status) ? "🔥 Unfreeze" : "❄️ Freeze";
             await bot.sendMessage(chatId, text, {
                 reply_markup: {
                     inline_keyboard: [
                         [
+                            { text: "🔐 View Card Details", callback_data: `CARD_REVEAL::${cardId}` },
                             { text: "🔍 Transactions", callback_data: `CARD_TXN::${cardId}` },
-                            { text: "❄️ Freeze", callback_data: `CARD_FREEZE::${cardId}` },
-                            { text: "🔥 Unfreeze", callback_data: `CARD_UNFREEZE::${cardId}` },
                         ],
+                        [{ text: freezeLabel, callback_data: `${freezeAction}::${cardId}` }],
                         [MENU_BUTTON],
                     ],
                 },
             });
             return;
         }
-        // If not local, return a minimal synthetic card to avoid upstream 403
+        const remote = await fetchCardDetailSafe(cardId);
         const detail = {
             card_id: cardId,
-            name_on_card: "Virtual Card",
-            card_type: "virtual",
-            status: card?.status || "active",
-            balance: walletBalance,
-            available_balance: undefined,
-            currency: card?.currency || "USD",
-            last4: card?.last4,
+            name_on_card: remote?.name_on_card || "Virtual Card",
+            card_type: remote?.card_type || "virtual",
+            status: remote?.status || card?.status || "active",
+            balance: remote?.balance || remote?.available_balance || walletBalance,
+            available_balance: remote?.available_balance,
+            currency: remote?.currency || card?.currency || "USD",
+            last4: remote?.last4 || card?.last4,
+            expiry: extractExpiry(remote),
         };
         const text = buildCardDetailMessage(detail, cardId);
-        await bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+        const freezeAction = isFrozenStatus(detail.status) ? "CARD_UNFREEZE" : "CARD_FREEZE";
+        const freezeLabel = isFrozenStatus(detail.status) ? "🔥 Unfreeze" : "❄️ Freeze";
+        await bot.sendMessage(chatId, text, {
+            reply_markup: {
+                inline_keyboard: [
+                    [
+                        { text: "🔐 View Card Details", callback_data: `CARD_REVEAL::${cardId}` },
+                        { text: "🔍 Transactions", callback_data: `CARD_TXN::${cardId}` },
+                    ],
+                    [{ text: freezeLabel, callback_data: `${freezeAction}::${cardId}` }],
+                    [MENU_BUTTON],
+                ],
+            },
+        });
     }
     catch (err) {
         await sendFriendlyError(chatId, err?.requestId);
     }
+}
+async function sendCardRevealPrompt(chatId, cardId) {
+    const lines = [
+        "🔐 Confirm to view full card details.",
+        "This helps prevent accidental exposure.",
+    ];
+    await bot.sendMessage(chatId, lines.join("\n"), {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: "Show Details", callback_data: `CARD_REVEAL_CONFIRM::${cardId}` }],
+                [{ text: "Cancel", callback_data: "MENU_MY_CARDS" }],
+                [MENU_BUTTON],
+            ],
+        },
+    });
+}
+async function sendCardSensitiveDetails(chatId, cardId) {
+    if (!shouldSuppressOutgoing(chatId, `card_reveal:${cardId}`, 1500)) {
+        await bot.sendMessage(chatId, "Loading card details...", {
+            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+    }
+    const local = await CardRequest_1.default.findOne({ cardId, status: "approved" }).lean();
+    const localExpiry = extractExpiry(local?.responseData || local?.metadata || {});
+    const localBilling = local?.metadata?.billing;
+    const localAddress = local?.metadata?.address;
+    const remote = await fetchCardDetailSafe(cardId);
+    const cardNumber = local?.cardNumber || remote?.card_number;
+    const cvc = local?.cvc || remote?.cvc;
+    const expiry = localExpiry || extractExpiry(remote);
+    const billing = localBilling || remote?.billing;
+    const address = localAddress || remote?.address;
+    if (!cardNumber || !cvc) {
+        await bot.sendMessage(chatId, "Full card details are not available. Please try again later or contact support.", {
+            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+    }
+    const lines = [
+        "🔐 Card Details",
+        `Card Number: ${cardNumber}`,
+        `CVV: ${cvc}`,
+        expiry ? `Expiry: ${expiry}` : undefined,
+        billing ? `Billing: ${billing}` : undefined,
+        address ? `Address: ${address}` : undefined,
+    ].filter(Boolean);
+    await bot.sendMessage(chatId, lines.join("\n"), {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
 }
 async function sendCardTransactions(chatId, cardId) {
     try {
         const userId = String(chatId);
         const primaryCard = cardId ? await Card_1.default.findOne({ cardId }).lean() : await getPrimaryCardForUser(userId);
         const targetCardId = cardId || primaryCard?.cardId;
+        if (!shouldSuppressOutgoing(chatId, `card_txn_loading:${targetCardId}`, 1500)) {
+            await bot.sendMessage(chatId, "Loading transactions...", {
+                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
+        }
         if (!targetCardId) {
             await bot.sendMessage(chatId, "❌ No cards linked yet.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
             return;
@@ -2580,30 +3012,99 @@ async function sendCardTransactions(chatId, cardId) {
             });
             return;
         }
+        try {
+            const resp = await callStroWallet("card-transactions", "post", { card_id: targetCardId }, { silentOnStatus: [400, 403, 404] });
+            const items = extractCardTransactions(resp?.data || resp);
+            if (items.length) {
+                await cacheCardTransactions(userId, targetCardId, items);
+            }
+        }
+        catch {
+            // If upstream fails, fall back to cached transactions.
+        }
         const query = { userId, transactionType: "card" };
         query["metadata.cardId"] = targetCardId;
         const txns = await Transaction_1.default.find(query)
             .sort({ createdAt: -1 })
-            .limit(5)
+            .limit(8)
             .lean();
         if (!txns.length) {
             await bot.sendMessage(chatId, "No card transactions found yet.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
             return;
         }
-        const lines = ["📄 Recent Card Transactions", ""];
+        const lines = ["📊 Recent Transactions", ""];
+        const keyboard = [];
         for (const t of txns) {
             const meta = t.metadata || {};
             const direction = meta.direction === "debit" ? "-" : "+";
-            const amount = `${direction}${Number(t.amount || 0).toFixed(2)}`;
+            const amountValue = Number(t.amount || 0);
             const currency = t.currency || "USD";
-            const desc = meta.description || "Card transaction";
-            lines.push(`${amount} ${currency}  ${desc}`);
+            const statusIcon = formatTxnStatusIcon(t.status || meta.rawStatus);
+            const label = formatTxnLabel(meta.direction, meta.description);
+            const dateLabel = formatTxnDate(meta.date) || formatTxnDate(t.createdAt);
+            const amountLabel = `${direction} $${amountValue.toFixed(2)}`;
+            lines.push(`${statusIcon} ${label}`);
+            lines.push(`${amountLabel}`);
+            if (dateLabel)
+                lines.push(`${dateLabel}`);
+            lines.push("");
+            keyboard.push([
+                {
+                    text: `${label} ${amountLabel}`,
+                    callback_data: `TXN_DETAIL::${t._id}`,
+                },
+            ]);
         }
-        await bot.sendMessage(chatId, lines.join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+        keyboard.push([MENU_BUTTON]);
+        await bot.sendMessage(chatId, lines.join("\n"), { reply_markup: { inline_keyboard: keyboard } });
     }
     catch (err) {
         await sendFriendlyError(chatId, err?.requestId);
     }
+}
+async function sendCardTransactionDetail(chatId, txnId) {
+    if (!shouldSuppressOutgoing(chatId, `txn_detail_loading:${txnId}`, 1500)) {
+        await bot.sendMessage(chatId, "Loading transaction details...", {
+            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+    }
+    const txn = await Transaction_1.default.findById(txnId).lean();
+    if (!txn) {
+        await bot.sendMessage(chatId, "Transaction not found.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+        return;
+    }
+    const meta = txn.metadata || {};
+    const responseData = txn.responseData || {};
+    const direction = meta.direction === "debit" ? "-" : "+";
+    const amountValue = Number(txn.amount || 0);
+    const currency = txn.currency || "USD";
+    const status = txn.status || meta.rawStatus || "completed";
+    const statusIcon = formatTxnStatusIcon(status);
+    const rawDescription = meta.description || responseData.description || responseData.merchant || responseData.merchant_name || responseData.narrative;
+    const label = formatTxnLabel(meta.direction, rawDescription);
+    const dateLabel = formatTxnDate(meta.date) || formatTxnDate(txn.createdAt);
+    let reason = undefined;
+    if (status === "failed") {
+        reason = meta.reason || meta.declineReason || meta.rawStatus;
+    }
+    let cardSuffix = "";
+    if (meta.cardId) {
+        const card = await Card_1.default.findOne({ cardId: meta.cardId }).lean();
+        if (card?.last4)
+            cardSuffix = `**** ${card.last4}`;
+    }
+    const lines = [
+        `${statusIcon} ${label}`,
+        `Amount: ${direction} $${amountValue.toFixed(2)}`,
+        rawDescription ? `Description: ${rawDescription}` : undefined,
+        `Status: ${statusIcon} ${status.charAt(0).toUpperCase() + status.slice(1)}`,
+        dateLabel ? `Date: ${dateLabel}` : undefined,
+        cardSuffix ? `Card: ${cardSuffix}` : undefined,
+        reason ? `Reason: ${reason}` : undefined,
+    ].filter(Boolean);
+    await bot.sendMessage(chatId, lines.join("\n"), {
+        reply_markup: { inline_keyboard: [[{ text: "⬅️ Back to Transactions", callback_data: `CARD_TXN::${meta.cardId}` }], [MENU_BUTTON]] },
+    });
 }
 function extractCardTransactions(payload) {
     if (!payload)
@@ -2613,6 +3114,8 @@ function extractCardTransactions(payload) {
     const candidates = [
         payload?.data?.transactions,
         payload?.data?.data,
+        payload?.data?.response?.card_transactions,
+        payload?.response?.card_transactions,
         payload?.data,
         payload?.transactions,
         payload?.response?.transactions,
@@ -2645,12 +3148,13 @@ function normalizeTxnDirection(raw, amount) {
 function normalizeTxnItem(item) {
     const amountRaw = item?.amount ?? item?.transactionAmount ?? item?.total ?? item?.value;
     const amount = amountRaw != null && !Number.isNaN(Number(amountRaw)) ? Number(amountRaw) : undefined;
-    const description = item?.description || item?.merchant || item?.merchant_name || item?.narration;
+    const description = item?.description || item?.merchant || item?.merchant_name || item?.narration || item?.narrative;
     const currency = item?.currency || item?.ccy || item?.iso_currency;
     const statusRaw = item?.status || item?.state || item?.result;
     const txnId = item?.transactionId || item?.transaction_id || item?.id || item?.ref || item?.reference;
     const directionRaw = item?.direction || item?.type || item?.transaction_type || item?.drCr;
     const direction = normalizeTxnDirection(directionRaw, amount);
+    const dateRaw = item?.date || item?.created_at || item?.createdAt || item?.transactionDate || item?.time;
     return {
         transactionNumber: txnId ? String(txnId) : undefined,
         amount,
@@ -2658,6 +3162,7 @@ function normalizeTxnItem(item) {
         description,
         status: normalizeTxnStatus(statusRaw),
         direction,
+        date: dateRaw ? String(dateRaw) : undefined,
     };
 }
 async function cacheCardTransactions(userId, cardId, items) {
@@ -2684,11 +3189,39 @@ async function cacheCardTransactions(userId, cardId, items) {
                     direction: normalized.direction,
                     description: normalized.description,
                     rawStatus: normalized.status,
+                    date: normalized.date,
                 },
                 responseData: item,
             },
         }, { upsert: true, new: true });
     }
+}
+function formatTxnDate(value) {
+    if (!value)
+        return undefined;
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime()))
+        return undefined;
+    const datePart = date.toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" });
+    const timePart = date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+    return `${datePart} · ${timePart}`;
+}
+function formatTxnStatusIcon(status) {
+    const v = (status || "").toLowerCase();
+    if (v.includes("fail") || v.includes("decline") || v.includes("deny"))
+        return "🔴";
+    if (v.includes("pending") || v.includes("review"))
+        return "🟡";
+    return "🟢";
+}
+function formatTxnLabel(direction, description) {
+    const desc = (description || "").toLowerCase();
+    if (desc.includes("fee"))
+        return "Fee";
+    if (desc.includes("top up") || desc.includes("top-up") || desc.includes("topup") || desc.includes("fund")) {
+        return "Card Top-Up";
+    }
+    return direction === "credit" ? "Card Credit" : "Card Payment";
 }
 async function handleFreezeAction(chatId, cardId, action) {
     try {
@@ -2709,21 +3242,36 @@ function buildCardDetailMessage(detail, cardId) {
     const currency = detail?.currency || detail?.ccy || "";
     const name = detail?.name_on_card || detail?.name || "Card";
     const brand = detail?.brand || detail?.card_type || "";
-    const cardNumber = detail?.card_number || detail?.cardNumber;
-    const cvc = detail?.cvc;
+    const expiry = detail?.expiry || detail?.expiry_date || detail?.exp || detail?.expDate;
+    const billing = detail?.billing;
+    const address = detail?.address;
     const lines = [
         `💳 ${name}${brand ? ` (${brand})` : ""}`,
         `ID: ${cardId}${last4 ? ` (••••${last4})` : ""}`,
-        cardNumber ? `Number: ${cardNumber}` : undefined,
-        cvc ? `CVC: ${cvc}` : undefined,
+        expiry ? `Expiry: ${expiry}` : undefined,
         `Status: ${status}`,
         balance ? `Balance: ${balance}${currency ? ` ${currency}` : ""}` : undefined,
+        billing ? `Billing: ${billing}` : undefined,
+        address ? `Address: ${address}` : undefined,
     ].filter(Boolean);
     return lines.join("\n");
 }
+async function fetchCardDetailSafe(cardId) {
+    try {
+        const resp = await callStroWallet("fetch-card-detail", "post", { card_id: cardId }, { silentOnStatus: [400, 403, 404] });
+        if (!resp)
+            return null;
+        const payload = resp?.data || resp?.response || resp;
+        const raw = payload?.data || payload?.response || payload?.card || payload;
+        return normalizeCardDetail(raw) || null;
+    }
+    catch {
+        return null;
+    }
+}
 async function callStroWallet(path, method, data, options) {
-    // Short-circuit problematic endpoints with synthetic responses
-    if (path === "fetch-card-detail") {
+    // Optional: allow synthetic card detail in non-production environments
+    if (path === "fetch-card-detail" && String(process.env.STROWALLET_FAKE_FETCH || "").toLowerCase() === "true") {
         const cardId = data?.card_id || "CARD";
         return {
             ok: true,

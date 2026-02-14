@@ -2757,14 +2757,14 @@ async function sendUserInfo(chatId: number, message?: any) {
     Customer.findOne({ userId: String(chatId) }).lean(),
     getPrimaryCardForUser(String(chatId)),
   ]);
-  const balance = user?.balance ?? 0;
+  const baseBalance = user?.balance ?? 0;
   const currency = user?.currency || "USDT";
   const email = user?.customerEmail || link?.customerEmail;
   const kycStatus = resolveKycStatus(user, customer);
   const kycLabel = kycStatus === "approved" ? "Approved ✅" : kycStatus === "pending" ? "Pending ⏳" : "Not started";
   const cardId = primaryCard?.cardId;
   const remoteDetail = cardId ? await fetchCardDetailSafe(cardId) : null;
-  const balance = remoteDetail?.balance ?? user?.balance ?? 0;
+  const balance = remoteDetail?.balance ?? baseBalance;
   const last4 = remoteDetail?.last4 || primaryCard?.last4 || (primaryCard as any)?.cardNumber?.slice(-4);
   const cardStatusRaw = remoteDetail?.status || primaryCard?.status;
   const cardStatus = cardStatusRaw ? String(cardStatusRaw) : undefined;
@@ -2809,11 +2809,11 @@ async function sendWalletSummary(chatId: number, message?: any) {
     User.findOne({ userId: String(chatId) }).lean(),
     getPrimaryCardForUser(String(chatId)),
   ]);
-  const walletBalance = user?.balance ?? 0;
+  const baseWalletBalance = user?.balance ?? 0;
   const currency = user?.currency || "USD";
   const cardId = primaryCard?.cardId || link?.cardIds?.[0];
   const remoteDetail = cardId ? await fetchCardDetailSafe(cardId) : null;
-  const walletBalance = remoteDetail?.balance ?? user?.balance ?? 0;
+  const walletBalance = remoteDetail?.balance ?? baseWalletBalance;
   const last4 = remoteDetail?.last4 || primaryCard?.last4 || (primaryCard as any)?.cardNumber?.slice(-4);
 
   const lines = [

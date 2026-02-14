@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const axios_1 = __importDefault(require("axios"));
 const zod_1 = require("zod");
+const apiResponse_1 = require("../utils/apiResponse");
 const router = express_1.default.Router();
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
 const API_BASE = "https://strowallet.com/api/"; // for apicard-transactions
@@ -70,11 +71,11 @@ function normalizeError(e) {
         const status = ae.response?.status ?? 400;
         const payload = ae.response?.data;
         const msg = payload?.message || payload?.error || ae.message || "Request failed";
-        return { status, body: { ok: false, error: String(msg), data: payload } };
+        return { status, message: String(msg) };
     }
     const status = e?.status ?? 400;
     const msg = e?.message ?? "Request error";
-    return { status, body: { ok: false, error: String(msg) } };
+    return { status, message: String(msg) };
 }
 // 1) Create Customer
 const internationalPhone = zod_1.z.string().regex(/^[1-9]\d{10,14}$/); // e.g., 2348012345678 (no '+')
@@ -156,11 +157,11 @@ router.post("/create-user", async (req, res) => {
                 // ignore lookup failures
             }
         }
-        return res.status(200).json({ ok: true, data });
+        return (0, apiResponse_1.ok)(res, data, 200);
     }
     catch (e) {
-        const { status, body } = normalizeError(e);
-        return res.status(status).json(body);
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
     }
 });
 // 2) Get Customer
@@ -173,11 +174,11 @@ router.get("/getcardholder", async (req, res) => {
             customerEmail: req.query.customerEmail,
         };
         const resp = await bitvcard.get("getcardholder/", { params });
-        return res.status(200).json({ ok: true, data: resp.data });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
     catch (e) {
-        const { status, body } = normalizeError(e);
-        return res.status(status).json(body);
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
     }
 });
 // 3) Update Customer
@@ -208,11 +209,11 @@ router.put("/updateCardCustomer", async (req, res) => {
         const resp = await bitvcard.put("updateCardCustomer/", payload, {
             headers: { "Content-Type": "application/json" },
         });
-        return res.status(200).json({ ok: true, data: resp.data });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
     catch (e) {
-        const { status, body } = normalizeError(e);
-        return res.status(status).json(body);
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
     }
 });
 // PATCH variant forwards only provided fields (omits undefined)
@@ -236,11 +237,11 @@ router.patch("/updateCardCustomer", async (req, res) => {
         const resp = await bitvcard.patch("updateCardCustomer/", payload, {
             headers: { "Content-Type": "application/json" },
         });
-        return res.status(200).json({ ok: true, data: resp.data });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
     catch (e) {
-        const { status, body } = normalizeError(e);
-        return res.status(status).json(body);
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
     }
 });
 // 4) Create Card
@@ -260,11 +261,11 @@ router.post("/create-card", async (req, res) => {
         const public_key = requirePublicKey();
         const payload = { ...body, public_key };
         const resp = await bitvcard.post("create-card/", payload);
-        return res.status(200).json({ ok: true, data: resp.data });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
     catch (e) {
-        const { status, body } = normalizeError(e);
-        return res.status(status).json(body);
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
     }
 });
 // 5) Fund Card
@@ -279,11 +280,11 @@ router.post("/fund-card", async (req, res) => {
         const public_key = requirePublicKey();
         const payload = { ...body, public_key };
         const resp = await bitvcard.post("fund-card/", payload);
-        return res.status(200).json({ ok: true, data: resp.data });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
     catch (e) {
-        const { status, body } = normalizeError(e);
-        return res.status(status).json(body);
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
     }
 });
 // 6) Get Card Details
@@ -297,11 +298,11 @@ router.post("/fetch-card-detail", async (req, res) => {
         const public_key = requirePublicKey();
         const payload = { ...body, public_key };
         const resp = await bitvcard.post("fetch-card-detail/", payload);
-        return res.status(200).json({ ok: true, data: resp.data });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
     catch (e) {
-        const { status, body } = normalizeError(e);
-        return res.status(status).json(body);
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
     }
 });
 // 7) Card Transactions (recent)
@@ -315,11 +316,11 @@ router.post("/card-transactions", async (req, res) => {
         const public_key = requirePublicKey();
         const payload = { ...body, public_key };
         const resp = await bitvcard.post("card-transactions/", payload);
-        return res.status(200).json({ ok: true, data: resp.data });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
     catch (e) {
-        const { status, body } = normalizeError(e);
-        return res.status(status).json(body);
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
     }
 });
 // 8) Freeze / Unfreeze Card
@@ -333,11 +334,11 @@ router.post("/action/status", async (req, res) => {
         const public_key = requirePublicKey();
         const payload = { ...body, public_key };
         const resp = await bitvcard.post("action/status/", payload);
-        return res.status(200).json({ ok: true, data: resp.data });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
     catch (e) {
-        const { status, body } = normalizeError(e);
-        return res.status(status).json(body);
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
     }
 });
 // 9) Full Card History (paginated)
@@ -362,11 +363,11 @@ router.get("/apicard-transactions", async (req, res) => {
         if (developer_code)
             params.developer_code = developer_code;
         const resp = await api.get(`apicard-transactions/`, { params });
-        return res.status(200).json({ ok: true, data: resp.data });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
     catch (e) {
-        const { status, body } = normalizeError(e);
-        return res.status(status).json(body);
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
     }
 });
 // 9b) Full Card History (paginated) via POST body (helps when query parsing is unreliable)
@@ -393,11 +394,11 @@ router.post("/apicard-transactions", async (req, res) => {
         if (developer_code)
             params.developer_code = developer_code;
         const resp = await api.get(`apicard-transactions/`, { params });
-        return res.status(200).json({ ok: true, data: resp.data });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
     catch (e) {
-        const { status, body } = normalizeError(e);
-        return res.status(status).json(body);
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
     }
 });
 exports.default = router;

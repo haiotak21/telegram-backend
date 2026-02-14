@@ -37,9 +37,12 @@ exports.User = void 0;
 const mongoose_1 = __importStar(require("mongoose"));
 const UserSchema = new mongoose_1.Schema({
     userId: { type: String, required: true, unique: true, index: true },
+    telegramId: { type: String, unique: true, sparse: true, index: true },
+    chatId: { type: String },
+    username: { type: String },
     balance: { type: Number, required: true, default: 0 },
     currency: { type: String, default: "USDT" },
-    kycStatus: { type: String, enum: ["not_started", "pending", "approved", "declined"], default: "not_started", index: true },
+    kycStatus: { type: String, enum: ["not_started", "pending", "approved", "declined", "rejected"], default: "not_started", index: true },
     strowalletCustomerId: { type: String },
     firstName: { type: String },
     lastName: { type: String },

@@ -22,13 +22,14 @@ const db_1 = require("./db");
 const botService_1 = require("./services/botService");
 const reconciliationService_1 = require("./services/reconciliationService");
 const webhookProcessor_1 = require("./services/webhookProcessor");
+const apiResponse_1 = require("./utils/apiResponse");
 dotenv_1.default.config();
 const app = (0, express_1.default)();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 // Connect DB and init bot
 (0, db_1.connectDB)().catch((e) => console.error("DB init failed:", e));
 (0, botService_1.initBot)().catch((e) => console.error("Bot init failed:", e));
-const kycPollIntervalMs = Number(process.env.KYC_POLL_INTERVAL_MS || 600000);
+const kycPollIntervalMs = Number(process.env.KYC_POLL_INTERVAL_MS || 0);
 let kycPollRunning = false;
 if (Number.isFinite(kycPollIntervalMs) && kycPollIntervalMs > 0) {
     setInterval(async () => {
@@ -76,16 +77,16 @@ app.post("/api/webhook/strowallet", express_1.default.raw({ type: "*/*" }), (req
             const digest = hmac.update(raw).digest("hex");
             const valid = safeCompareHex(digest, signatureHeader);
             if (!valid) {
-                return res.status(400).json({ ok: false, error: "Invalid webhook signature" });
+                return (0, apiResponse_1.fail)(res, "Invalid webhook signature", 400);
             }
         }
         // Persist + notify
         (0, webhookProcessor_1.processStroWalletEvent)(payload).catch((e) => console.error("Webhook processing error:", e));
         console.log("StroWallet webhook received:", payload?.id, payload?.type);
-        return res.status(200).json({ ok: true });
+        return (0, apiResponse_1.ok)(res, {});
     }
     catch (err) {
-        return res.status(400).json({ ok: false, error: "Malformed webhook payload" });
+        return (0, apiResponse_1.fail)(res, "Malformed webhook payload", 400);
     }
 });
 // Global middlewares
@@ -94,7 +95,7 @@ app.use((0, morgan_1.default)("dev"));
 app.use(express_1.default.json({ limit: "25mb" }));
 // Health check
 app.get("/health", (_req, res) => {
-    res.json({ ok: true, service: "strowallet-proxy", version: "1.0.0" });
+    return (0, apiResponse_1.ok)(res, { service: "strowallet-proxy", version: "1.0.0" });
 });
 // Mount StroWallet proxy router
 app.use("/api/strowallet", strowallet_1.default);
@@ -120,7 +121,7 @@ app.get(/^\/admin\/.*$/, (_req, res) => {
 app.use((err, _req, res, _next) => {
     const message = err?.message || "Unexpected error";
     const status = err?.status || 500;
-    res.status(status).json({ ok: false, error: message });
+    (0, apiResponse_1.fail)(res, message, status);
 });
 app.listen(PORT, () => {
     console.log(`StroWallet proxy listening on port ${PORT}`);

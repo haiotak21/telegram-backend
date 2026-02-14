@@ -6,8 +6,11 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.processStroWalletEvent = processStroWalletEvent;
 const WebhookEvent_1 = require("../models/WebhookEvent");
 const Card_1 = __importDefault(require("../models/Card"));
+const CardRequest_1 = __importDefault(require("../models/CardRequest"));
+const TelegramLink_1 = require("../models/TelegramLink");
 const Transaction_1 = __importDefault(require("../models/Transaction"));
 const User_1 = __importDefault(require("../models/User"));
+const Customer_1 = __importDefault(require("../models/Customer"));
 const botService_1 = require("./botService");
 function extractField(obj, keys) {
     if (!obj || typeof obj !== "object")
@@ -43,11 +46,49 @@ async function processStroWalletEvent(payload) {
     }
     const cardId = extractField(payload, ["card_id", "cardId", "id", "card"]);
     const customerEmail = extractField(payload, ["customerEmail", "email"]);
+    const customerId = extractField(payload, ["customerId", "customer_id", "cardholderId", "card_holder_id"]);
+    const kycStatus = normalizeKycStatus(extractField(payload, [
+        "kycStatus",
+        "status",
+        "verificationStatus",
+        "state",
+        "kyc_state",
+    ]));
     const message = formatMessage(type, payload);
     if (cardId)
         await (0, botService_1.notifyByCardId)(cardId, message);
     if (customerEmail)
         await (0, botService_1.notifyByEmail)(customerEmail, message);
+    if (kycStatus && (customerId || customerEmail)) {
+        const existing = await Customer_1.default.findOne({
+            $or: [
+                ...(customerId ? [{ customerId }] : []),
+                ...(customerEmail ? [{ email: customerEmail }] : []),
+            ],
+        }).lean();
+        let userId = existing?.userId;
+        if (!userId && (customerId || customerEmail)) {
+            const user = await User_1.default.findOne({
+                $or: [
+                    ...(customerId ? [{ strowalletCustomerId: customerId }] : []),
+                    ...(customerEmail ? [{ customerEmail }] : []),
+                ],
+            }).lean();
+            userId = user?.userId;
+        }
+        if (userId) {
+            await Customer_1.default.findOneAndUpdate({ userId }, {
+                $set: {
+                    customerId: customerId || existing?.customerId,
+                    email: customerEmail || existing?.email,
+                    kycStatus,
+                    approvedAt: kycStatus === "approved" ? new Date() : undefined,
+                },
+            }, { upsert: true, new: true });
+            await User_1.default.findOneAndUpdate({ userId }, { $set: { kycStatus } }, { new: true });
+            await (0, botService_1.notifyKycStatus)(userId, kycStatus).catch(() => { });
+        }
+    }
     if (type === "card.created" && cardId) {
         const data = payload?.data || payload;
         const userId = await resolveUserId(customerEmail, cardId);
@@ -66,10 +107,28 @@ async function processStroWalletEvent(payload) {
                 lastSync: new Date(),
             },
         }, { upsert: true, new: true });
+        if (userId) {
+            const chatId = Number(userId);
+            if (Number.isFinite(chatId)) {
+                await TelegramLink_1.TelegramLink.findOneAndUpdate({ chatId }, { $addToSet: { cardIds: cardId }, ...(customerEmail ? { $set: { customerEmail } } : {}) }, { upsert: true, new: true });
+            }
+        }
+        if (customerEmail) {
+            await TelegramLink_1.TelegramLink.findOneAndUpdate({ customerEmail }, { $addToSet: { cardIds: cardId } }, { upsert: true, new: true });
+        }
+        if (userId || customerEmail) {
+            await CardRequest_1.default.findOneAndUpdate({
+                $or: [
+                    ...(userId ? [{ userId }] : []),
+                    ...(customerEmail ? [{ customerEmail }] : []),
+                ],
+            }, { $set: { cardId, status: "approved" } }, { new: true });
+        }
     }
     if ((type === "card.frozen" || type === "card.unfrozen" || type === "card.unfreeze") && cardId) {
         const nextStatus = type === "card.frozen" ? "frozen" : "active";
         await Card_1.default.findOneAndUpdate({ cardId }, { $set: { status: nextStatus, lastSync: new Date() } }, { upsert: true, new: true });
+        await (0, botService_1.notifyCardStatusChanged)(cardId, nextStatus).catch(() => { });
     }
     if (type === "card.funded" && cardId) {
         const data = payload?.data || payload;
@@ -86,13 +145,24 @@ async function processStroWalletEvent(payload) {
         }, { new: true });
         if (amount != null && card?.userId) {
             await User_1.default.findOneAndUpdate({ userId: card.userId }, { $inc: { balance: amount } }, { new: true });
+            const last4 = card.last4 ? `**** ${card.last4}` : undefined;
+            const balanceValue = data?.balance || data?.available_balance || data?.availableBalance;
+            const amountLabel = amount.toFixed(2);
+            const lines = [
+                "💳 Card Funded",
+                `Amount: - $${amountLabel}`,
+                "From Wallet",
+                last4 ? `Card: ${last4}` : undefined,
+                balanceValue != null ? `Wallet Balance: $${Number(balanceValue).toFixed(2)}` : undefined,
+            ].filter(Boolean);
+            await (0, botService_1.notifyByCardId)(cardId, lines.join("\n")).catch(() => { });
         }
     }
     if (type === "transaction.posted" && cardId) {
         const data = payload?.data || payload;
         const amountRaw = extractField(payload, ["amount", "transactionAmount", "total", "value"]);
         const amountValue = amountRaw ? Number(amountRaw) : undefined;
-        const description = extractField(payload, ["description", "merchant", "merchant_name", "narration"]);
+        const description = extractField(payload, ["description", "merchant", "merchant_name", "narration", "narrative"]);
         const statusRaw = extractField(payload, ["status", "result", "state"]);
         const status = normalizeTxnStatus(statusRaw);
         const txnId = extractField(payload, ["transactionId", "transaction_id", "id", "eventId", "ref"]);
@@ -119,14 +189,50 @@ async function processStroWalletEvent(payload) {
                     responseData: data,
                 },
             }, { upsert: true, new: true });
+            const last4 = card?.last4 ? `**** ${card.last4}` : undefined;
+            const amountLabel = `${direction === "debit" ? "-" : "+"} $${Math.abs(amountValue).toFixed(2)}`;
+            const title = status === "failed" ? "❌ Payment Failed" : "💳 Payment Completed";
+            const remaining = extractField(payload, ["cardBalanceAfter", "balance", "available_balance", "availableBalance"]);
+            const reason = status === "failed" ? extractField(payload, ["reason", "declineReason", "message"]) : undefined;
+            const lines = [
+                title,
+                description ? `Merchant: ${description}` : undefined,
+                `Amount: ${amountLabel}`,
+                last4 ? `Card: ${last4}` : undefined,
+                remaining != null ? `Remaining Card Balance: $${Number(remaining).toFixed(2)}` : undefined,
+                reason ? `Reason: ${reason}` : undefined,
+            ].filter(Boolean);
+            await (0, botService_1.notifyByCardId)(cardId, lines.join("\n")).catch(() => { });
         }
     }
+}
+function normalizeKycStatus(value) {
+    if (!value)
+        return undefined;
+    const v = value.toLowerCase();
+    if (["approved", "verified", "success", "active", "high kyc"].includes(v))
+        return "approved";
+    if (["pending", "processing", "review", "unreview kyc"].includes(v))
+        return "pending";
+    if (["declined", "rejected", "failed", "low kyc"].includes(v))
+        return "rejected";
+    return undefined;
 }
 async function resolveUserId(customerEmail, cardId) {
     if (cardId) {
         const card = await Card_1.default.findOne({ cardId }).lean();
         if (card?.userId)
             return card.userId;
+    }
+    if (customerEmail) {
+        const customer = await Customer_1.default.findOne({ email: customerEmail }).lean();
+        if (customer?.userId)
+            return customer.userId;
+    }
+    if (customerEmail) {
+        const link = await TelegramLink_1.TelegramLink.findOne({ customerEmail }).lean();
+        if (link?.chatId != null)
+            return String(link.chatId);
     }
     if (customerEmail) {
         const user = await User_1.default.findOne({ customerEmail }).lean();
