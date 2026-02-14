@@ -1811,14 +1811,10 @@ async function handleCreateCardMessage(msg: any, session: CreateCardSession) {
 async function promptCreateCardStep(chatId: number, session: CreateCardSession) {
   switch (session.step) {
     case "type":
-      await bot!.sendMessage(chatId, "Select card type:", {
-        reply_markup: {
-          inline_keyboard: [[
-            { text: "Visa", callback_data: "CARD_TYPE::visa" },
-            { text: "Mastercard", callback_data: "CARD_TYPE::mastercard" },
-          ], [MENU_BUTTON]],
-        },
-      });
+      session.data.cardType = "visa";
+      session.step = "amount";
+      createCardSessions.set(chatId, session);
+      await promptCreateCardStep(chatId, session);
       break;
     case "amount":
       await bot!.sendMessage(chatId, "Enter initial amount (minimum 3). You can skip to use 3:", {
@@ -2755,30 +2751,31 @@ function normalizeCardDetail(raw: any) {
 
 async function sendUserInfo(chatId: number, message?: any) {
   if (shouldSuppressOutgoing(chatId, "user_info")) return;
-  const [link, user, customer] = await Promise.all([
+  const [link, user, customer, primaryCard] = await Promise.all([
     TelegramLink.findOne({ chatId }).lean(),
     User.findOne({ userId: String(chatId) }).lean(),
     Customer.findOne({ userId: String(chatId) }).lean(),
+    getPrimaryCardForUser(String(chatId)),
   ]);
-  const cardIds = await getUserCardIds(chatId);
-
   const balance = user?.balance ?? 0;
   const currency = user?.currency || "USDT";
-  const cardsList = cardIds || [];
   const email = user?.customerEmail || link?.customerEmail;
   const kycStatus = resolveKycStatus(user, customer);
-  const kycLabel = kycStatus === "approved" ? "approved" : kycStatus === "pending" ? "pending" : "not started";
-  const cardList = cardsList.slice(0, 3).map((id, idx) => `${idx + 1}. ${id}`);
+  const kycLabel = kycStatus === "approved" ? "Approved ✅" : kycStatus === "pending" ? "Pending ⏳" : "Not started";
+  const last4 = primaryCard?.last4 || (primaryCard as any)?.cardNumber?.slice(-4);
+  const cardStatus = primaryCard?.status ? String(primaryCard.status) : undefined;
 
   const lines = [
     "👤 Your Profile",
     `User ID: ${chatId}`,
     email ? `Email: ${email}` : "Email: not linked (use /linkemail your@example.com)",
-    `KYC: ${kycLabel} (use /kyc to submit)`,
-    `Wallet: ${balance} ${currency}`,
-    `Cards: ${cardsList.length || 0}${cardsList.length ? " (see below)" : ""}`,
-    cardList.length ? cardList.join("\n") : undefined,
-    !cardsList.length ? "Tip: Request a card from admin to get started." : undefined,
+    `KYC: ${kycLabel} (use /kyc to resubmit)`,
+    "",
+    `Wallet: ${Number(balance).toFixed(2)} ${currency}`,
+    `Cards: ${primaryCard ? 1 : 0}`,
+    primaryCard ? "💳 Virtual Card" : undefined,
+    primaryCard && cardStatus ? `• Status: ${cardStatus}` : undefined,
+    primaryCard && last4 ? `• Last 4 digits: ${last4}` : undefined,
   ].filter(Boolean) as string[];
 
   await editOrSend(chatId, message, lines.join("\n"), {
@@ -2802,55 +2799,29 @@ function chunk<T>(items: T[], size: number): T[][] {
 
 async function sendWalletSummary(chatId: number, message?: any) {
   if (shouldSuppressOutgoing(chatId, "wallet_summary")) return;
-  const [link, user, cards] = await Promise.all([
+  const [link, user, primaryCard] = await Promise.all([
     TelegramLink.findOne({ chatId }).lean(),
     User.findOne({ userId: String(chatId) }).lean(),
-    Card.find({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean(),
+    getPrimaryCardForUser(String(chatId)),
   ]);
-  const cardId = cards?.[0]?.cardId || link?.cardIds?.[0];
   const walletBalance = user?.balance ?? 0;
+  const currency = user?.currency || "USD";
+  const cardId = primaryCard?.cardId || link?.cardIds?.[0];
+  const last4 = primaryCard?.last4 || (primaryCard as any)?.cardNumber?.slice(-4);
 
-  if (!cardId) {
-    const lines = ["💼 Wallet", `Balance: ${walletBalance} USD`, "No card yet. Request a card to get started."];
-    await editOrSend(chatId, message, lines.join("\n"), { inline_keyboard: [[MENU_BUTTON]] });
-    return;
-  }
+  const lines = [
+    "💼 Your Wallet",
+    `Balance: ${Number(walletBalance).toFixed(2)} ${currency}`,
+    `Currency: ${currency}`,
+    "Status: Active",
+    "",
+    cardId ? "Linked Card:" : "Linked Card: None",
+    cardId ? `💳 Virtual Card (${last4 ? `**** ${last4}` : "linked"})` : undefined,
+  ];
 
-  // Prefer local synthetic detail if available
-  const local = await CardRequest.findOne({ cardId, status: "approved" }).lean();
-  if (local) {
-    const lines = [
-      "💼 Wallet",
-      `Balance: ${walletBalance} USD`,
-      `Card: ${cardId}`,
-      `Name: ${local.nameOnCard || "Virtual Card"}`,
-      local.cardNumber ? `Number: ${local.cardNumber}` : undefined,
-      local.cvc ? `CVC: ${local.cvc}` : undefined,
-    ].filter(Boolean) as string[];
-    await editOrSend(chatId, message, lines.join("\n"), {
-      inline_keyboard: [[{ text: "🔍 My Cards", callback_data: "MENU_MY_CARDS" }], [MENU_BUTTON]],
-    });
-    return;
-  }
-
-  // Fallback: try upstream detail
-  try {
-    const resp = await callStroWallet("fetch-card-detail", "post", { card_id: cardId });
-    const detail = resp?.data ?? resp;
-    const lines = [
-      "💼 Wallet",
-      `Balance: ${walletBalance} USD`,
-      `Card: ${cardId}`,
-      detail?.name_on_card ? `Name: ${detail.name_on_card}` : undefined,
-      detail?.card_number ? `Number: ${detail.card_number}` : undefined,
-      detail?.cvc ? `CVC: ${detail.cvc}` : undefined,
-    ].filter(Boolean) as string[];
-    await editOrSend(chatId, message, lines.join("\n"), {
-      inline_keyboard: [[{ text: "🔍 My Cards", callback_data: "MENU_MY_CARDS" }], [MENU_BUTTON]],
-    });
-  } catch (err: any) {
-    await sendFriendlyError(chatId, err?.requestId);
-  }
+  await editOrSend(chatId, message, lines.join("\n"), {
+    inline_keyboard: [[{ text: "🔍 My Cards", callback_data: "MENU_MY_CARDS" }], [MENU_BUTTON]],
+  });
 }
 
 
