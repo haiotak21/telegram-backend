@@ -5,7 +5,7 @@ import { TelegramLink } from "../models/TelegramLink";
 import Transaction from "../models/Transaction";
 import User from "../models/User";
 import Customer from "../models/Customer";
-import { notifyByCardId, notifyByEmail } from "./botService";
+import { notifyByCardId, notifyByEmail, notifyCardStatusChanged, notifyKycStatus } from "./botService";
 
 function extractField(obj: any, keys: string[]): string | undefined {
   if (!obj || typeof obj !== "object") return undefined;
@@ -93,6 +93,8 @@ export async function processStroWalletEvent(payload: any) {
         { $set: { kycStatus } },
         { new: true }
       );
+
+      await notifyKycStatus(userId, kycStatus as any).catch(() => {});
     }
   }
 
@@ -159,6 +161,7 @@ export async function processStroWalletEvent(payload: any) {
       { $set: { status: nextStatus, lastSync: new Date() } },
       { upsert: true, new: true }
     );
+    await notifyCardStatusChanged(cardId, nextStatus as any).catch(() => {});
   }
 
   if (type === "card.funded" && cardId) {
@@ -184,6 +187,18 @@ export async function processStroWalletEvent(payload: any) {
         { $inc: { balance: amount } },
         { new: true }
       );
+
+      const last4 = card.last4 ? `**** ${card.last4}` : undefined;
+      const balanceValue = data?.balance || data?.available_balance || data?.availableBalance;
+      const amountLabel = amount.toFixed(2);
+      const lines = [
+        "💳 Card Funded",
+        `Amount: - $${amountLabel}`,
+        "From Wallet",
+        last4 ? `Card: ${last4}` : undefined,
+        balanceValue != null ? `Wallet Balance: $${Number(balanceValue).toFixed(2)}` : undefined,
+      ].filter(Boolean) as string[];
+      await notifyByCardId(cardId, lines.join("\n")).catch(() => {});
     }
   }
 
@@ -191,7 +206,7 @@ export async function processStroWalletEvent(payload: any) {
     const data = payload?.data || payload;
     const amountRaw = extractField(payload, ["amount", "transactionAmount", "total", "value"]);
     const amountValue = amountRaw ? Number(amountRaw) : undefined;
-    const description = extractField(payload, ["description", "merchant", "merchant_name", "narration"]);
+    const description = extractField(payload, ["description", "merchant", "merchant_name", "narration", "narrative"]);
     const statusRaw = extractField(payload, ["status", "result", "state"]);
     const status = normalizeTxnStatus(statusRaw);
     const txnId = extractField(payload, ["transactionId", "transaction_id", "id", "eventId", "ref"]);
@@ -224,6 +239,21 @@ export async function processStroWalletEvent(payload: any) {
         },
         { upsert: true, new: true }
       );
+
+      const last4 = card?.last4 ? `**** ${card.last4}` : undefined;
+      const amountLabel = `${direction === "debit" ? "-" : "+"} $${Math.abs(amountValue).toFixed(2)}`;
+      const title = status === "failed" ? "❌ Payment Failed" : "💳 Payment Completed";
+      const remaining = extractField(payload, ["cardBalanceAfter", "balance", "available_balance", "availableBalance"]);
+      const reason = status === "failed" ? extractField(payload, ["reason", "declineReason", "message"]) : undefined;
+      const lines = [
+        title,
+        description ? `Merchant: ${description}` : undefined,
+        `Amount: ${amountLabel}`,
+        last4 ? `Card: ${last4}` : undefined,
+        remaining != null ? `Remaining Card Balance: $${Number(remaining).toFixed(2)}` : undefined,
+        reason ? `Reason: ${reason}` : undefined,
+      ].filter(Boolean) as string[];
+      await notifyByCardId(cardId, lines.join("\n")).catch(() => {});
     }
   }
 }
