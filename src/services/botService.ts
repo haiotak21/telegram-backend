@@ -1657,6 +1657,16 @@ async function handleCardRequest(chatId: number, message?: any) {
   const customerRecord = await Customer.findOne({ userId: String(chatId) }).lean();
   const kycStatus = customerRecord?.kycStatus || "pending";
 
+  const userId = String(chatId);
+  const existingCard = await Card.findOne({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
+  const approvedRequest = await CardRequest.findOne({ userId, status: "approved" }).lean();
+  if (existingCard || approvedRequest) {
+    await bot!.sendMessage(chatId, "❌ You already have a card. Multiple cards are not allowed.", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+    return;
+  }
+
   if (kycStatus !== "approved") {
     if (kycStatus === "pending") {
       await bot!.sendMessage(chatId, "⏳ KYC pending verification. Please wait and try again later.", {
@@ -1674,25 +1684,9 @@ async function handleCardRequest(chatId: number, message?: any) {
     return;
   }
 
-  const userId = String(chatId);
-  const existingCard = await Card.findOne({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
-  if (existingCard) {
-    await bot!.sendMessage(chatId, "❌ You already have a card. Multiple cards are not allowed.", {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
-    return;
-  }
-
   const pendingRequest = await CardRequest.findOne({ userId, status: "pending" }).lean();
   if (pendingRequest) {
     await bot!.sendMessage(chatId, "⏳ Your card request is already pending review.", {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
-    return;
-  }
-  const approvedRequest = await CardRequest.findOne({ userId, status: "approved" }).lean();
-  if (approvedRequest) {
-    await bot!.sendMessage(chatId, "✅ Your card request was already approved. Check My Card.", {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
     return;
@@ -2861,6 +2855,11 @@ async function sendWalletSummary(chatId: number, message?: any) {
 
 
 async function sendMyCards(chatId: number, message?: any) {
+  if (!shouldSuppressOutgoing(chatId, "my_cards_loading", 1500)) {
+    await editOrSend(chatId, message, "Loading your card...", {
+      inline_keyboard: [[MENU_BUTTON]],
+    });
+  }
   const userId = String(chatId);
   const [user, customer, link, cardIds] = await Promise.all([
     User.findOne({ userId }).lean(),
@@ -3192,6 +3191,11 @@ async function sendCardRevealPrompt(chatId: number, cardId: string) {
 }
 
 async function sendCardSensitiveDetails(chatId: number, cardId: string) {
+  if (!shouldSuppressOutgoing(chatId, `card_reveal:${cardId}`, 1500)) {
+    await bot!.sendMessage(chatId, "Loading card details...", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+  }
   const local = await CardRequest.findOne({ cardId, status: "approved" }).lean();
   const localExpiry = extractExpiry(local?.responseData || local?.metadata || {});
   const localBilling = local?.metadata?.billing;
@@ -3229,6 +3233,12 @@ async function sendCardTransactions(chatId: number, cardId?: string) {
     const userId = String(chatId);
     const primaryCard = cardId ? await Card.findOne({ cardId }).lean() : await getPrimaryCardForUser(userId);
     const targetCardId = cardId || primaryCard?.cardId;
+
+    if (!shouldSuppressOutgoing(chatId, `card_txn_loading:${targetCardId}`, 1500)) {
+      await bot!.sendMessage(chatId, "Loading transactions...", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+    }
 
     if (!targetCardId) {
       await bot!.sendMessage(chatId, "❌ No cards linked yet.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
@@ -3297,6 +3307,11 @@ async function sendCardTransactions(chatId: number, cardId?: string) {
 }
 
 async function sendCardTransactionDetail(chatId: number, txnId: string) {
+  if (!shouldSuppressOutgoing(chatId, `txn_detail_loading:${txnId}`, 1500)) {
+    await bot!.sendMessage(chatId, "Loading transaction details...", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+  }
   const txn = await Transaction.findById(txnId).lean();
   if (!txn) {
     await bot!.sendMessage(chatId, "Transaction not found.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });

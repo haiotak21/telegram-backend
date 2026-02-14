@@ -136,11 +136,8 @@ router.post("/", async (req, res) => {
       return fail(res, "User not found", 404);
     }
     const customer = (await Customer.findOne({ userId }).lean()) as any;
-    if (!customer || customer.kycStatus !== "approved") {
-      return fail(res, "You must complete KYC before requesting a card", 400);
-    }
 
-    // Block new requests if user already has an active card
+    // Block new requests if user already has a card or approved request
     const activeCard = await Card.findOne({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
     if (activeCard) {
       return fail(res, "User already has an active card", 400);
@@ -149,6 +146,10 @@ router.post("/", async (req, res) => {
     const existing = await CardRequest.findOne({ userId, status: { $in: ["pending", "approved"] } }).lean();
     if (existing) {
       return fail(res, "You already have an active or approved card request", 400);
+    }
+
+    if (!customer || customer.kycStatus !== "approved") {
+      return fail(res, "You must complete KYC before requesting a card", 400);
     }
 
     // Enforce minimum amount of 3
