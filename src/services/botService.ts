@@ -2762,8 +2762,12 @@ async function sendUserInfo(chatId: number, message?: any) {
   const email = user?.customerEmail || link?.customerEmail;
   const kycStatus = resolveKycStatus(user, customer);
   const kycLabel = kycStatus === "approved" ? "Approved ✅" : kycStatus === "pending" ? "Pending ⏳" : "Not started";
-  const last4 = primaryCard?.last4 || (primaryCard as any)?.cardNumber?.slice(-4);
-  const cardStatus = primaryCard?.status ? String(primaryCard.status) : undefined;
+  const cardId = primaryCard?.cardId;
+  const remoteDetail = cardId ? await fetchCardDetailSafe(cardId) : null;
+  const last4 = remoteDetail?.last4 || primaryCard?.last4 || (primaryCard as any)?.cardNumber?.slice(-4);
+  const cardStatusRaw = remoteDetail?.status || primaryCard?.status;
+  const cardStatus = cardStatusRaw ? String(cardStatusRaw) : undefined;
+  const cardStatusLabel = cardStatus ? cardStatus.charAt(0).toUpperCase() + cardStatus.slice(1) : undefined;
 
   const lines = [
     "👤 Your Profile",
@@ -2774,7 +2778,7 @@ async function sendUserInfo(chatId: number, message?: any) {
     `Wallet: ${Number(balance).toFixed(2)} ${currency}`,
     `Cards: ${primaryCard ? 1 : 0}`,
     primaryCard ? "💳 Virtual Card" : undefined,
-    primaryCard && cardStatus ? `• Status: ${cardStatus}` : undefined,
+    primaryCard && cardStatusLabel ? `• Status: ${cardStatusLabel}` : undefined,
     primaryCard && last4 ? `• Last 4 digits: ${last4}` : undefined,
   ].filter(Boolean) as string[];
 
@@ -2807,7 +2811,8 @@ async function sendWalletSummary(chatId: number, message?: any) {
   const walletBalance = user?.balance ?? 0;
   const currency = user?.currency || "USD";
   const cardId = primaryCard?.cardId || link?.cardIds?.[0];
-  const last4 = primaryCard?.last4 || (primaryCard as any)?.cardNumber?.slice(-4);
+  const remoteDetail = cardId ? await fetchCardDetailSafe(cardId) : null;
+  const last4 = remoteDetail?.last4 || primaryCard?.last4 || (primaryCard as any)?.cardNumber?.slice(-4);
 
   const lines = [
     "💼 Your Wallet",
