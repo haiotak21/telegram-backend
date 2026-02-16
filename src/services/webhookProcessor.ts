@@ -52,8 +52,11 @@ export async function processStroWalletEvent(payload: any) {
 
   const message = formatMessage(type, payload);
 
-  if (cardId) await notifyByCardId(cardId, message);
-  if (customerEmail) await notifyByEmail(customerEmail, message);
+  // Only send generic message for non-KYC events
+  if (!type.toLowerCase().includes('kyc')) {
+    if (cardId) await notifyByCardId(cardId, message);
+    if (customerEmail) await notifyByEmail(customerEmail, message);
+  }
 
   if (kycStatus && (customerId || customerEmail)) {
     const existing = await Customer.findOne({
