@@ -1211,7 +1211,7 @@ export async function notifyKycStatus(userId: string, status: KycStatus) {
     return;
   }
   if (status === "rejected") {
-    await bot.sendMessage(chatId, "❌ Kyc verification failed upload a scan of your id or passport", {
+    await bot.sendMessage(chatId, "❌ KYC verification failed. Please try again or edit with /kyc_edit.", {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
   }
@@ -1675,7 +1675,7 @@ async function handleCardRequest(chatId: number, message?: any) {
       return;
     }
     if (kycStatus === "rejected") {
-      await bot!.sendMessage(chatId, "❌ KYC was rejected. Please resubmit with /kyc.", {
+      await bot!.sendMessage(chatId, "❌ KYC was rejected. Please resubmit with /kyc_edit.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
       return;
@@ -2631,9 +2631,9 @@ async function refreshKycStatusFromStroWallet(user: any): Promise<KycStatus | un
 function normalizeKycStatus(value: any): KycStatus | undefined {
   if (!value) return undefined;
   const v = String(value).toLowerCase();
-  if (["approved", "verified", "success", "active", "high kyc"].includes(v)) return "approved";
-  if (["pending", "processing", "review", "unreview kyc"].includes(v)) return "pending";
-  if (["declined", "rejected", "failed", "low kyc"].includes(v)) return "rejected";
+  if (["approved", "verified", "success", "active", "high kyc", "high_kyc", "high-kyc"].includes(v)) return "approved";
+  if (["pending", "processing", "review", "unreview kyc", "unreview_kyc", "unreview-kyc"].includes(v)) return "pending";
+  if (["declined", "rejected", "failed", "low kyc", "low_kyc", "low-kyc"].includes(v)) return "rejected";
   return undefined;
 }
 
@@ -2657,7 +2657,7 @@ async function sendKycStatus(chatId: number) {
     });
     return;
   }
-  const label = status === "approved" ? "Approved" : status === "pending" ? "Pending verification" : "Rejected — contact support";
+  const label = status === "approved" ? "Approved" : status === "pending" ? "Waiting for approval" : "Verification failed — use /kyc_edit";
   await bot!.sendMessage(chatId, `Your KYC status: ${label}.`, {
     reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
   });

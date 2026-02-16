@@ -77,6 +77,8 @@ async function processStroWalletEvent(payload) {
             userId = user?.userId;
         }
         if (userId) {
+            const prevUser = await User_1.default.findOne({ userId }).lean();
+            const previousStatus = normalizeKycStatus(existing?.kycStatus || prevUser?.kycStatus);
             await Customer_1.default.findOneAndUpdate({ userId }, {
                 $set: {
                     customerId: customerId || existing?.customerId,
@@ -86,7 +88,11 @@ async function processStroWalletEvent(payload) {
                 },
             }, { upsert: true, new: true });
             await User_1.default.findOneAndUpdate({ userId }, { $set: { kycStatus } }, { new: true });
-            await (0, botService_1.notifyKycStatus)(userId, kycStatus).catch(() => { });
+            const shouldNotify = (kycStatus === "approved" || kycStatus === "rejected") &&
+                kycStatus !== previousStatus;
+            if (shouldNotify) {
+                await (0, botService_1.notifyKycStatus)(userId, kycStatus).catch(() => { });
+            }
         }
     }
     if (type === "card.created" && cardId) {
@@ -210,11 +216,11 @@ function normalizeKycStatus(value) {
     if (!value)
         return undefined;
     const v = value.toLowerCase();
-    if (["approved", "verified", "success", "active", "high kyc"].includes(v))
+    if (["approved", "verified", "success", "active", "high kyc", "high_kyc", "high-kyc"].includes(v))
         return "approved";
-    if (["pending", "processing", "review", "unreview kyc"].includes(v))
+    if (["pending", "processing", "review", "unreview kyc", "unreview_kyc", "unreview-kyc"].includes(v))
         return "pending";
-    if (["declined", "rejected", "failed", "low kyc"].includes(v))
+    if (["declined", "rejected", "failed", "low kyc", "low_kyc", "low-kyc"].includes(v))
         return "rejected";
     return undefined;
 }
