@@ -59,6 +59,7 @@ export async function processStroWalletEvent(payload: any) {
   }
 
   if (kycStatus && (customerId || customerEmail)) {
+    console.log('DEBUG: kycStatus:', kycStatus, 'customerId:', customerId, 'userId:', (typeof existing !== 'undefined' ? existing?.userId : undefined));
     const existing = await Customer.findOne({
       $or: [
         ...(customerId ? [{ customerId }] : []),
