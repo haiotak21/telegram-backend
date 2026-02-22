@@ -39,6 +39,11 @@ export async function processStroWalletEvent(payload: any) {
     throw e;
   }
 
+
+  // Debug: Log full payload and type
+  console.log('DEBUG: Webhook payload received:', JSON.stringify(payload));
+  console.log('DEBUG: Webhook event type:', type);
+
   const cardId = extractField(payload, ["card_id", "cardId", "id", "card"]);
   const customerEmail = extractField(payload, ["customerEmail", "email"]);
   const customerId = extractField(payload, ["customerId", "customer_id", "cardholderId", "card_holder_id"]);
@@ -50,6 +55,12 @@ export async function processStroWalletEvent(payload: any) {
     "kyc_state",
   ]));
 
+  // Debug: Log extracted fields
+  console.log('DEBUG: Extracted cardId:', cardId);
+  console.log('DEBUG: Extracted customerEmail:', customerEmail);
+  console.log('DEBUG: Extracted customerId:', customerId);
+  console.log('DEBUG: Extracted kycStatus:', kycStatus);
+
   const message = formatMessage(type, payload);
 
   // Only send generic message for non-KYC events
@@ -59,7 +70,8 @@ export async function processStroWalletEvent(payload: any) {
   }
 
   if (kycStatus && (customerId || customerEmail)) {
-    console.log('DEBUG: kycStatus:', kycStatus, 'customerId:', customerId, 'userId:', (typeof existing !== 'undefined' ? existing?.userId : undefined));
+    // Debug: Entering KYC notification logic
+    console.log('DEBUG: Entering KYC notification logic');
     const existing = await Customer.findOne({
       $or: [
         ...(customerId ? [{ customerId }] : []),
@@ -78,9 +90,14 @@ export async function processStroWalletEvent(payload: any) {
       userId = user?.userId;
     }
 
+    // Debug: Log resolved userId
+    console.log('DEBUG: Resolved userId:', userId);
+
     if (userId) {
       const prevUser = await User.findOne({ userId }).lean();
       const previousStatus = normalizeKycStatus(existing?.kycStatus || prevUser?.kycStatus);
+      // Debug: Log previous KYC status
+      console.log('DEBUG: Previous KYC status:', previousStatus);
       await Customer.findOneAndUpdate(
         { userId },
         {
@@ -103,13 +120,20 @@ export async function processStroWalletEvent(payload: any) {
       const shouldNotify =
         (kycStatus === "approved" || kycStatus === "rejected") &&
         kycStatus !== previousStatus;
+      // Debug: Log notification decision
+      console.log('DEBUG: shouldNotify:', shouldNotify);
       if (shouldNotify) {
-        console.log(`Sending KYC notification to userId: ${userId}, status: ${kycStatus}`);
+        console.log(`DEBUG: Sending KYC notification to userId: ${userId}, status: ${kycStatus}`);
         await notifyKycStatus(userId, kycStatus as any).catch((err) => {
           console.error('Error sending KYC notification:', err);
         });
       }
+    } else {
+      console.log('DEBUG: No userId found for notification');
     }
+  } else {
+    if (!kycStatus) console.log('DEBUG: No kycStatus extracted, skipping notification logic');
+    if (!customerId && !customerEmail) console.log('DEBUG: No customerId or customerEmail extracted, skipping notification logic');
   }
 
   if (type === "card.created" && cardId) {
