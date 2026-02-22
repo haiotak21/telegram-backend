@@ -103,7 +103,10 @@ export async function processStroWalletEvent(payload: any) {
         (kycStatus === "approved" || kycStatus === "rejected") &&
         kycStatus !== previousStatus;
       if (shouldNotify) {
-        await notifyKycStatus(userId, kycStatus as any).catch(() => {});
+        console.log(`Sending KYC notification to userId: ${userId}, status: ${kycStatus}`);
+        await notifyKycStatus(userId, kycStatus as any).catch((err) => {
+          console.error('Error sending KYC notification:', err);
+        });
       }
     }
   }
