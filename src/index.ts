@@ -83,7 +83,10 @@ app.post(
       }
 
       // Persist + notify
-      processStroWalletEvent(payload).catch((e) => console.error("Webhook processing error:", e));
+      console.log("DEBUG: About to call processStroWalletEvent");
+      processStroWalletEvent(payload)
+        .then(() => console.log("DEBUG: processStroWalletEvent completed"))
+        .catch((e) => console.error("Webhook processing error:", e));
       console.log("StroWallet webhook received:", payload?.id, payload?.type);
       return ok(res, {});
     } catch (err: any) {
