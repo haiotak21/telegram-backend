@@ -129,13 +129,14 @@ const DEPOSIT_ACCOUNTS: Record<PaymentMethod, { title: string; account: string; 
   cbe: { title: "CBE Deposit", account: "1000473027449", name: "Hailemariam Takele Mekonnen", typeLabel: "CBE" },
   telebirr: { title: "Telebirr Deposit", account: "0985656670", name: "Hayilemariyam Takele Mekonen", typeLabel: "Telebirr" },
 };
+const CARD_REQUEST_MANDATORY_DEPOSIT_USD = 5;
 const CARD_REQUEST_BASE_AMOUNT_ETB = Number(process.env.CARD_REQUEST_BASE_AMOUNT_ETB || 3);
 const BOT_LOCK_KEY = "telegram-bot";
 const BOT_LOCK_TTL_MS = Number(process.env.TELEGRAM_BOT_LOCK_TTL_MS || 90000);
 
 // Tracks the last amount a user selected per payment method so we can validate against receipt
 const depositSelections = new Map<number, { method: PaymentMethod; amount: number }>();
-const cardRequestSelections = new Map<number, { amountEtb: number; feeEtb: number; totalEtb: number }>();
+const cardRequestSelections = new Map<number, { amountEtb: number; feeEtb: number; totalEtb: number; depositUsd: number; rate: number }>();
 const recentCallbackActions = new Map<number, { action: string; at: number }>();
 const recentOutgoing = new Map<number, { key: string; at: number }>();
 const recentUpdates = new Map<string, number>();
@@ -737,9 +738,9 @@ export async function initBot() {
       const meta = DEPOSIT_ACCOUNTS[method];
       const lines = [
         "💳 Card request payment",
-        `Base amount: ${selection.amountEtb} ETB`,
-        `Fee: ${selection.feeEtb} ETB`,
-        `Total to pay: ${selection.totalEtb} ETB`,
+        `Mandatory deposit: $${selection.depositUsd.toFixed(2)} × ${selection.rate.toFixed(2)} ETB = ${selection.amountEtb.toFixed(2)} ETB`,
+        `Card fee: ${selection.feeEtb.toFixed(2)} ETB`,
+        `Total to pay: ${selection.totalEtb.toFixed(2)} ETB`,
         `${meta.typeLabel} account: ${meta.account}`,
         `Name: ${meta.name}`,
         "",
@@ -1037,6 +1038,8 @@ export async function initBot() {
                 baseAmountEtb: selection.amountEtb,
                 feeEtb: selection.feeEtb,
                 totalEtb: selection.totalEtb,
+                mandatoryDepositUsd: selection.depositUsd,
+                conversionRateEtbPerUsdt: selection.rate,
               },
             });
           } catch (createErr: any) {
@@ -1613,6 +1616,10 @@ function getCardRequestBaseAmount() {
   return base >= 3 ? base : 3;
 }
 
+function roundMoney(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
 async function sendDepositAmountSelect(chatId: number, method: PaymentMethod) {
   const methodLabel = method === "cbe" ? "CBE" : "Telebirr";
   const buttons: InlineKeyboardButton[] = DEPOSIT_AMOUNTS.map((amt) => ({ text: `${amt} ETB`, callback_data: `DEPOSIT_AMOUNT::${method}::${amt}` }));
@@ -1699,27 +1706,29 @@ async function handleCardRequest(chatId: number, message?: any) {
     return;
   }
 
-  const baseAmount = getCardRequestBaseAmount();
   const config = await loadPricingConfig();
+  const rate = Number(config.usdtRate) > 0 ? Number(config.usdtRate) : 220;
+  const baseAmount = roundMoney(CARD_REQUEST_MANDATORY_DEPOSIT_USD * rate);
   const feeEtb = Math.max(0, Number(config.cardRequestFeeEtb ?? 0));
-  const totalEtb = baseAmount + feeEtb;
+  const totalEtb = roundMoney(baseAmount + feeEtb);
 
-  if (feeEtb > 0) {
-    cardRequestSelections.set(chatId, { amountEtb: baseAmount, feeEtb, totalEtb });
-    const lines = [
-      "💳 Card request fee required.",
-      `Base amount: ${baseAmount} ETB`,
-      `Fee: ${feeEtb} ETB`,
-      `Total to pay: ${totalEtb} ETB`,
-      "Choose a payment method:",
-    ];
-    await bot!.sendMessage(chatId, lines.join("\n"), {
-      reply_markup: { inline_keyboard: buildCardRequestMethodKeyboard() },
-    });
-    return;
-  }
-
-  await submitCardRequest(String(chatId), user, customerRecord, message, baseAmount);
+  cardRequestSelections.set(chatId, {
+    amountEtb: baseAmount,
+    feeEtb,
+    totalEtb,
+    depositUsd: CARD_REQUEST_MANDATORY_DEPOSIT_USD,
+    rate,
+  });
+  const lines = [
+    "💳 Card request payment required.",
+    `Mandatory deposit: $${CARD_REQUEST_MANDATORY_DEPOSIT_USD.toFixed(2)} × ${rate.toFixed(2)} ETB = ${baseAmount.toFixed(2)} ETB`,
+    `Card fee: ${feeEtb.toFixed(2)} ETB`,
+    `Total to pay: ${totalEtb.toFixed(2)} ETB`,
+    "Choose a payment method:",
+  ];
+  await bot!.sendMessage(chatId, lines.join("\n"), {
+    reply_markup: { inline_keyboard: buildCardRequestMethodKeyboard() },
+  });
 }
 
 async function submitCardRequest(userId: string, user: any, customer: any, message?: any, baseAmount?: number) {
