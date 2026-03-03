@@ -28,6 +28,8 @@ export interface ICustomer extends Document {
   idImagePdfUrl?: string;
   userPhotoUrl?: string;
   kycStatus: CustomerKycStatus;
+  lastKycNotificationStatus?: "approved" | "rejected";
+  lastKycNotifiedAt?: Date;
   submittedAt?: Date;
   approvedAt?: Date;
   rawPayload?: any;
@@ -62,6 +64,8 @@ const CustomerSchema = new Schema<ICustomer>(
     idImagePdfUrl: { type: String },
     userPhotoUrl: { type: String },
     kycStatus: { type: String, enum: ["pending", "approved", "rejected"], default: "pending", index: true },
+    lastKycNotificationStatus: { type: String, enum: ["approved", "rejected"] },
+    lastKycNotifiedAt: { type: Date },
     submittedAt: { type: Date },
     approvedAt: { type: Date },
     rawPayload: { type: Schema.Types.Mixed },

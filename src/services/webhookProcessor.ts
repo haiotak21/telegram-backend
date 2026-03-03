@@ -96,8 +96,10 @@ export async function processStroWalletEvent(payload: any) {
     if (userId) {
       const prevUser = await User.findOne({ userId }).lean();
       const previousStatus = normalizeKycStatus(existing?.kycStatus || prevUser?.kycStatus);
+      const lastNotifiedStatus = existing?.lastKycNotificationStatus as "approved" | "rejected" | undefined;
       // Debug: Log previous KYC status
       console.log('DEBUG: Previous KYC status:', previousStatus);
+      console.log('DEBUG: Last notified KYC status:', lastNotifiedStatus);
       await Customer.findOneAndUpdate(
         { userId },
         {
@@ -119,7 +121,7 @@ export async function processStroWalletEvent(payload: any) {
 
       const shouldNotify =
         (kycStatus === "approved" || kycStatus === "rejected") &&
-        kycStatus !== previousStatus;
+        kycStatus !== lastNotifiedStatus;
       // Debug: Log notification decision
       console.log('DEBUG: shouldNotify:', shouldNotify);
       if (shouldNotify) {
@@ -127,6 +129,16 @@ export async function processStroWalletEvent(payload: any) {
         await notifyKycStatus(userId, kycStatus as any).catch((err) => {
           console.error('Error sending KYC notification:', err);
         });
+        await Customer.findOneAndUpdate(
+          { userId },
+          {
+            $set: {
+              lastKycNotificationStatus: kycStatus,
+              lastKycNotifiedAt: new Date(),
+            },
+          },
+          { new: true }
+        );
       }
     } else {
       console.log('DEBUG: No userId found for notification');
