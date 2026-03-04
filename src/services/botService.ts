@@ -24,7 +24,16 @@ type PendingAction =
   | { type: "verify"; method: PaymentMethod }
   | { type: "deposit_amount"; method: PaymentMethod }
   | { type: "card_request_verify"; method: PaymentMethod };
-const pendingActions = new Map<number, PendingAction>();
+const pendingActions = new Map<string, PendingAction>();
+
+function chatKey(value: number | string | undefined): string | null {
+  return value != null ? String(value) : null;
+}
+
+function clearPendingAction(value: number | string | undefined) {
+  const key = chatKey(value);
+  if (key) pendingActions.delete(key);
+}
 
 type KycIdType = "NIN" | "PASSPORT" | "DRIVING_LICENSE";
 type KycStep =
@@ -460,7 +469,9 @@ export async function initBot() {
     if (shouldSkipCommand(msg, "linkemail")) return;
     const email = match?.[1];
     if (!email) {
-      pendingActions.set(msg.chat.id, { type: "email" });
+      const key = chatKey(msg.chat.id);
+      if (!key) return;
+      pendingActions.set(key, { type: "email" });
       return bot!.sendMessage(msg.chat.id, "Please send your email now (or /cancel):", {
         reply_markup: { force_reply: true },
       });
@@ -477,7 +488,9 @@ export async function initBot() {
     if (shouldSkipCommand(msg, "linkcard")) return;
     const cardId = match?.[1];
     if (!cardId) {
-      pendingActions.set(msg.chat.id, { type: "card" });
+      const key = chatKey(msg.chat.id);
+      if (!key) return;
+      pendingActions.set(key, { type: "card" });
       return bot!.sendMessage(msg.chat.id, "Please send the CARD_ID now (or /cancel):", {
         reply_markup: { force_reply: true },
       });
@@ -511,7 +524,7 @@ export async function initBot() {
 
   botRef.onText(/^\/cancel$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "cancel")) return;
-    pendingActions.delete(msg.chat.id);
+    clearPendingAction(msg.chat.id);
     cardRequestSelections.delete(msg.chat.id);
     kycSessions.delete(msg.chat.id);
     createCardSessions.delete(msg.chat.id);
@@ -626,7 +639,7 @@ export async function initBot() {
     }
 
     if (action === "CANCEL") {
-      pendingActions.delete(chatId);
+      clearPendingAction(chatId);
       kycSessions.delete(chatId);
       createCardSessions.delete(chatId);
       await bot!.answerCallbackQuery(query.id, { text: "Cancelled" }).catch(() => { });
@@ -708,7 +721,10 @@ export async function initBot() {
       const method = action.replace("DEPOSIT_CUSTOM::", "") as PaymentMethod;
       if (method !== "telebirr" && method !== "cbe") return;
       await bot!.answerCallbackQuery(query.id).catch(() => { });
-      pendingActions.set(chatId, { type: "deposit_amount", method });
+      {
+        const key = chatKey(chatId);
+        if (key) pendingActions.set(key, { type: "deposit_amount", method });
+      }
       await bot!.sendMessage(chatId, `Enter the amount to deposit via ${method.toUpperCase()} (ETB).`, {
         reply_markup: { force_reply: true },
       });
@@ -734,7 +750,10 @@ export async function initBot() {
         });
         return;
       }
-      pendingActions.set(chatId, { type: "card_request_verify", method });
+      {
+        const key = chatKey(chatId);
+        if (key) pendingActions.set(key, { type: "card_request_verify", method });
+      }
       const meta = DEPOSIT_ACCOUNTS[method];
       const lines = [
         "💳 Card request payment",
@@ -779,7 +798,9 @@ export async function initBot() {
     }
 
     if (!msg.text) return;
-    const pending = pendingActions.get(chatId);
+    const pendingKey = chatKey(chatId);
+    if (!pendingKey) return;
+    const pending = pendingActions.get(pendingKey);
     if (!pending) return;
     const text = String(msg.text).trim();
     if (pending.type === "email") {
@@ -793,7 +814,7 @@ export async function initBot() {
         { $set: { customerEmail: email } },
         { new: true, upsert: true }
       );
-      pendingActions.delete(msg.chat.id);
+      clearPendingAction(msg.chat.id);
       await bot!.sendMessage(msg.chat.id, `Linked email ${email}.`);
     } else if (pending.type === "card") {
       const cardId = text;
@@ -805,7 +826,7 @@ export async function initBot() {
         { $addToSet: { cardIds: cardId } },
         { new: true, upsert: true }
       );
-      pendingActions.delete(msg.chat.id);
+      clearPendingAction(msg.chat.id);
       await bot!.sendMessage(msg.chat.id, `Linked card ${cardId}.`);
     } else if (pending.type === "verify") {
       const method = pending.method;
@@ -839,7 +860,7 @@ export async function initBot() {
         }).lean();
         if (already) {
           await bot!.sendMessage(msg.chat.id, "ℹ️ You already verified this transaction.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
-          pendingActions.delete(msg.chat.id);
+          clearPendingAction(msg.chat.id);
           return;
         }
 
@@ -855,7 +876,7 @@ export async function initBot() {
               "Please check your receipt and try again.",
             ].join("\n");
             await bot!.sendMessage(msg.chat.id, notice, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
-            pendingActions.delete(msg.chat.id);
+            clearPendingAction(msg.chat.id);
             return;
           }
           const rawData = (b.raw?.data ?? b.raw ?? {}) as any;
@@ -939,11 +960,11 @@ export async function initBot() {
           } catch (createErr: any) {
             if (createErr?.code === 11000) {
               await bot!.sendMessage(msg.chat.id, "ℹ️ You already verified this transaction.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
-              pendingActions.delete(msg.chat.id);
+              clearPendingAction(msg.chat.id);
               return;
             }
             await bot!.sendMessage(msg.chat.id, `❌ Verification error: ${createErr?.message || "Unexpected error"}`, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
-            pendingActions.delete(msg.chat.id);
+            clearPendingAction(msg.chat.id);
             return;
           }
         } else {
@@ -952,7 +973,7 @@ export async function initBot() {
       } catch (e: any) {
         await bot!.sendMessage(msg.chat.id, `❌ Verification error: ${e?.message || "Unexpected error"}`, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
       } finally {
-        pendingActions.delete(msg.chat.id);
+        clearPendingAction(msg.chat.id);
       }
     } else if (pending.type === "card_request_verify") {
       const method = pending.method;
@@ -986,7 +1007,7 @@ export async function initBot() {
           await bot!.sendMessage(msg.chat.id, "ℹ️ You already verified this transaction.", {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
           });
-          pendingActions.delete(msg.chat.id);
+          clearPendingAction(msg.chat.id);
           return;
         }
 
@@ -998,7 +1019,7 @@ export async function initBot() {
             await bot!.sendMessage(msg.chat.id, "Card request payment session expired. Please request a card again.", {
               reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
             });
-            pendingActions.delete(msg.chat.id);
+            clearPendingAction(msg.chat.id);
             return;
           }
           const validationErrors = validateVerificationResult({
@@ -1013,7 +1034,7 @@ export async function initBot() {
               "Please check your receipt and try again.",
             ].join("\n");
             await bot!.sendMessage(msg.chat.id, notice, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
-            pendingActions.delete(msg.chat.id);
+            clearPendingAction(msg.chat.id);
             return;
           }
 
@@ -1047,7 +1068,7 @@ export async function initBot() {
               await bot!.sendMessage(msg.chat.id, `❌ Verification error: ${createErr?.message || "Unexpected error"}`, {
                 reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
               });
-              pendingActions.delete(msg.chat.id);
+              clearPendingAction(msg.chat.id);
               return;
             }
           }
@@ -1058,16 +1079,16 @@ export async function initBot() {
             await bot!.sendMessage(msg.chat.id, "❌ KYC is not approved. Please complete KYC before requesting a card.", {
               reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
             });
-            pendingActions.delete(msg.chat.id);
+            clearPendingAction(msg.chat.id);
             return;
           }
 
-          const activeCard = await Card.findOne({ userId: String(msg.chat.id), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
-          if (activeCard) {
+          const existingCard = await Card.findOne({ userId: String(msg.chat.id) }).lean();
+          if (existingCard) {
             await bot!.sendMessage(msg.chat.id, "❌ You already have a card. Multiple cards are not allowed.", {
               reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
             });
-            pendingActions.delete(msg.chat.id);
+            clearPendingAction(msg.chat.id);
             return;
           }
 
@@ -1076,7 +1097,7 @@ export async function initBot() {
             await bot!.sendMessage(msg.chat.id, "⏳ Your card request is already pending review.", {
               reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
             });
-            pendingActions.delete(msg.chat.id);
+            clearPendingAction(msg.chat.id);
             return;
           }
 
@@ -1095,7 +1116,7 @@ export async function initBot() {
           reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
         });
       } finally {
-        pendingActions.delete(msg.chat.id);
+        clearPendingAction(msg.chat.id);
       }
     } else if (pending.type === "deposit_amount") {
       const method = pending.method;
@@ -1103,7 +1124,7 @@ export async function initBot() {
       if (!Number.isFinite(amount) || amount <= 0) {
         return bot!.sendMessage(msg.chat.id, "Please enter a valid amount in ETB (greater than 0), or /cancel.");
       }
-      pendingActions.delete(msg.chat.id);
+      clearPendingAction(msg.chat.id);
       await sendDepositSummary(msg.chat.id, method, amount);
     }
   });
@@ -1390,7 +1411,8 @@ function buildVerificationHint(method: PaymentMethod) {
 }
 
 async function startVerificationFlow(chatId: number, method: PaymentMethod) {
-  pendingActions.set(chatId, { type: "verify", method });
+  const key = chatKey(chatId);
+  if (key) pendingActions.set(key, { type: "verify", method });
   await bot!.sendMessage(chatId, buildVerificationHint(method), {
     reply_markup: { force_reply: true },
   });
@@ -1665,7 +1687,7 @@ async function handleCardRequest(chatId: number, message?: any) {
   const kycStatus = customerRecord?.kycStatus || "pending";
 
   const userId = String(chatId);
-  const existingCard = await Card.findOne({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
+  const existingCard = await Card.findOne({ userId }).lean();
   const approvedRequest = await CardRequest.findOne({ userId, status: "approved" }).lean();
   if (existingCard || approvedRequest) {
     await bot!.sendMessage(chatId, "❌ You already have a card. Multiple cards are not allowed.", {
