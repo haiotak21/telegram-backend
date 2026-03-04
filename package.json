@@ -16,6 +16,7 @@
   "type": "commonjs",
   "dependencies": {
     "@dotenvx/dotenvx-ops": "^0.30.3",
+    "@vercel/node": "^5.6.10",
     "axios": "^1.13.2",
     "cbe-verifier-custom": "file:verifier/custom-cbe-verifier",
     "cloudinary": "^2.9.0",
