@@ -143,6 +143,10 @@ const CARD_REQUEST_MANDATORY_DEPOSIT_USD = 5;
 const CARD_REQUEST_BASE_AMOUNT_ETB = Number(process.env.CARD_REQUEST_BASE_AMOUNT_ETB || 3);
 const BOT_LOCK_KEY = "telegram-bot";
 const BOT_LOCK_TTL_MS = Number(process.env.TELEGRAM_BOT_LOCK_TTL_MS || 90000);
+const STROWALLET_LOW_BALANCE_THRESHOLD_USD = Number(process.env.STROWALLET_LOW_BALANCE_THRESHOLD_USD || 50);
+const STROWALLET_LOW_BALANCE_ALERT_CHAT_ID = (process.env.STROWALLET_LOW_BALANCE_ALERT_CHAT_ID || "504201714").trim();
+const STROWALLET_LOW_BALANCE_ALERT_COOLDOWN_MS = Number(process.env.STROWALLET_LOW_BALANCE_ALERT_COOLDOWN_MS || 900000);
+let lastLowBalanceAlertAt = 0;
 
 // Tracks the last amount a user selected per payment method so we can validate against receipt
 const depositSelections = new Map<number, { method: PaymentMethod; amount: number }>();
@@ -944,16 +948,31 @@ export async function initBot() {
             });
             await bot!.sendMessage(msg.chat.id, lines.join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
             depositSelections.delete(msg.chat.id);
+
+            // Try to show the real, current card balance after credit is posted.
+            const primaryCard = await getPrimaryCardForUser(String(msg.chat.id));
+            const liveCardDetail = primaryCard?.cardId ? await fetchCardDetailSafe(String(primaryCard.cardId)) : null;
+            const liveCardBalance = liveCardDetail?.available_balance || liveCardDetail?.balance;
+            const liveCardCurrency = (liveCardDetail?.currency || primaryCard?.currency || "USD").toUpperCase();
+
             await bot!.sendMessage(
               msg.chat.id,
               [
                 "✅ Payment Verified",
-                "Your deposit has been credited automatically.",
+                "Your deposit will be credited automatically.",
                 depositResult.creditedUsdt != null ? `Credited: ${Number(depositResult.creditedUsdt).toFixed(2)} USDT` : undefined,
-                depositResult.newBalance != null ? `Wallet balance: ${Number(depositResult.newBalance).toFixed(2)} USDT` : undefined,
+                liveCardBalance != null
+                  ? `Card balance: ${Number(liveCardBalance).toFixed(2)} ${liveCardCurrency}`
+                  : "Your card balance will update shortly once the credit is posted.",
               ].filter(Boolean).join("\n"),
               { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
             );
+
+            await notifyLowStroWalletBalanceIfNeeded({
+              userId: String(msg.chat.id),
+              paymentMethod: method,
+              creditedUsdt: Number(depositResult.creditedUsdt || 0),
+            });
           } catch (createErr: any) {
             if (createErr?.code === 11000) {
               await bot!.sendMessage(msg.chat.id, "❌ This payment reference has already been used.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
@@ -3549,6 +3568,81 @@ async function fetchCardDetailSafe(cardId: string) {
     return normalizeCardDetail(raw) || null;
   } catch {
     return null;
+  }
+}
+
+function extractNumericBalance(payload: any): number | null {
+  const candidates = [
+    payload?.balance,
+    payload?.available_balance,
+    payload?.availableBalance,
+    payload?.data?.balance,
+    payload?.data?.available_balance,
+    payload?.data?.availableBalance,
+    payload?.response?.balance,
+    payload?.response?.available_balance,
+    payload?.wallet_balance,
+    payload?.walletBalance,
+  ];
+  for (const candidate of candidates) {
+    const n = Number(candidate);
+    if (Number.isFinite(n)) return n;
+    if (typeof candidate === "string") {
+      const cleaned = candidate.replace(/[^\d.-]/g, "");
+      const parsed = Number(cleaned);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return null;
+}
+
+async function fetchStroWalletUsdBalanceSafe(): Promise<number | null> {
+  try {
+    const resp = await callStroWallet("wallet-balance/USD", "get", {}, { silentOnStatus: [400, 403, 404] });
+    if (!resp || (resp as any)?.ok === false) return null;
+    return extractNumericBalance(resp?.data || resp?.response || resp);
+  } catch {
+    return null;
+  }
+}
+
+async function notifyLowStroWalletBalanceIfNeeded(params: {
+  userId: string;
+  paymentMethod: PaymentMethod;
+  creditedUsdt: number;
+}) {
+  if (!bot) return;
+  const threshold = Number.isFinite(STROWALLET_LOW_BALANCE_THRESHOLD_USD)
+    ? STROWALLET_LOW_BALANCE_THRESHOLD_USD
+    : 50;
+  if (threshold <= 0) return;
+
+  const balance = await fetchStroWalletUsdBalanceSafe();
+  if (balance == null || balance >= threshold) return;
+
+  const now = Date.now();
+  if (now - lastLowBalanceAlertAt < STROWALLET_LOW_BALANCE_ALERT_COOLDOWN_MS) return;
+  lastLowBalanceAlertAt = now;
+
+  const alertLines = [
+    "⚠️ StroWallet Low Balance Alert",
+    `Current balance: ${balance.toFixed(2)} USD`,
+    `Threshold: ${threshold.toFixed(2)} USD`,
+    `Last verified deposit: ${params.creditedUsdt.toFixed(2)} USDT (${params.paymentMethod.toUpperCase()})`,
+    `User ID: ${params.userId}`,
+    `Time: ${new Date().toISOString()}`,
+  ];
+
+  try {
+    const targetChat: any = /^-?\d+$/.test(STROWALLET_LOW_BALANCE_ALERT_CHAT_ID)
+      ? Number(STROWALLET_LOW_BALANCE_ALERT_CHAT_ID)
+      : STROWALLET_LOW_BALANCE_ALERT_CHAT_ID;
+    await bot.sendMessage(targetChat, alertLines.join("\n"), {
+      disable_web_page_preview: true,
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+  } catch (e) {
+    console.error("[bot] Failed to send low balance alert", e);
   }
 }
 

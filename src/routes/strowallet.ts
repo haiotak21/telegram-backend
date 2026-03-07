@@ -413,4 +413,21 @@ router.post("/apicard-transactions", async (req, res) => {
   }
 });
 
+// 10) Wallet Balance by currency (e.g., USD, NGN)
+router.get("/wallet-balance/:currency", async (req, res) => {
+  try {
+    const public_key = requirePublicKey();
+    const currencyRaw = String(req.params.currency || "USD").trim().toUpperCase();
+    const currency = /^[A-Z]{3,5}$/.test(currencyRaw) ? currencyRaw : "USD";
+
+    const resp = await api.get(`wallet/balance/${currency}/`, {
+      params: { public_key },
+    });
+    return ok(res, resp.data, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
 export default router;
