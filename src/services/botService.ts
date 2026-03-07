@@ -2579,11 +2579,12 @@ async function submitKyc(chatId: number, session: KycSession) {
       }
     }
     if (!customerId && session.mode === "create") {
-      kycSessions.delete(chatId);
-      await bot!.sendMessage(chatId, "⚠️ KYC submitted but customer ID not available yet. Please try again in a few minutes or contact support.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      // Some providers return 200 for create-user but delay customerId availability.
+      // Keep KYC pending and let later status sync resolve customerId by email.
+      console.warn("[bot] KYC create-user succeeded without immediate customerId", {
+        chatId,
+        email: data.customerEmail,
       });
-      return;
     }
     const idNumberEncrypted = encryptKycIdNumber(data.idNumber);
     if (!idNumberEncrypted) {
