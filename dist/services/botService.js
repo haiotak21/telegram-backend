@@ -208,7 +208,6 @@ async function initBot() {
         { command: "kyc_status", description: "Check your KYC status" },
         { command: "kyc_edit", description: "Edit and resubmit KYC" },
         { command: "card_request", description: "Request a virtual card" },
-        { command: "create_card", description: "Request a virtual card" },
         { command: "requestcard", description: "Request a virtual card" },
         { command: "mycard", description: "View your card details" },
         { command: "cardstatus", description: "View your card status" },
@@ -228,6 +227,7 @@ async function initBot() {
             from: msg.from?.username || msg.from?.id,
             text: msg.text,
         });
+        const existingUser = await User_1.default.findOne({ userId: String(chatId) }).lean();
         await upsertTelegramIdentity(msg);
         if (shouldSuppressOutgoing(chatId, "start", 10000)) {
             console.warn("/start suppressed by rate limit", { chatId });
@@ -237,21 +237,21 @@ async function initBot() {
             console.warn("/start skipped as duplicate", { chatId });
             return;
         }
-        const [link, cardCount] = await Promise.all([
-            TelegramLink_1.TelegramLink.findOne({ chatId }),
-            Card_1.default.countDocuments({ userId: String(chatId), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }),
-        ]);
+        const isNewUser = !existingUser;
         try {
-            await bot.sendMessage(chatId, buildWelcomeMessage(), {
-                parse_mode: "HTML",
-                disable_web_page_preview: true,
-                reply_markup: { inline_keyboard: MENU_KEYBOARD },
-            });
-            await bot.sendMessage(chatId, buildProfileCard(msg, link || undefined, cardCount), {
-                parse_mode: "HTML",
-                disable_web_page_preview: true,
-                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-            });
+            if (isNewUser) {
+                await bot.sendMessage(chatId, buildWelcomeMessage(), {
+                    parse_mode: "HTML",
+                    disable_web_page_preview: true,
+                    reply_markup: { inline_keyboard: MENU_KEYBOARD },
+                });
+            }
+            else {
+                await bot.sendMessage(chatId, "Main menu", {
+                    disable_web_page_preview: true,
+                    reply_markup: { inline_keyboard: MENU_KEYBOARD },
+                });
+            }
         }
         catch (err) {
             console.error("Failed to respond to /start", { chatId, err });
@@ -265,7 +265,7 @@ async function initBot() {
     botRef.onText(/^\/help$/i, async (msg) => {
         if (shouldSkipCommand(msg, "help"))
             return;
-        await bot.sendMessage(msg.chat.id, "Commands:\n/kyc\n/kyc_status\n/kyc_edit\n/card_request\n/create_card\n/requestcard\n/mycard\n/cardstatus\n/transactions\n/freeze\n/unfreeze\n/linkemail your@example.com\n/linkcard CARD_ID\n/unlink (remove all links)\n/status\n/verify\n/deposit");
+        await bot.sendMessage(msg.chat.id, "Commands:\n/kyc\n/kyc_status\n/kyc_edit\n/card_request\n/requestcard\n/mycard\n/cardstatus\n/transactions\n/freeze\n/unfreeze\n/linkemail your@example.com\n/linkcard CARD_ID\n/unlink (remove all links)\n/status\n/verify\n/deposit");
     });
     botRef.onText(/^\/deposit$/i, async (msg) => {
         if (shouldSkipCommand(msg, "deposit"))
@@ -291,10 +291,6 @@ async function initBot() {
     botRef.onText(/^\/kyc_status$/i, async (msg) => {
         const chatId = msg.chat.id;
         await sendKycStatus(chatId);
-    });
-    botRef.onText(/^\/create_card$/i, async (msg) => {
-        const chatId = msg.chat.id;
-        await handleCardRequest(chatId, msg);
     });
     botRef.onText(/^\/requestcard$/i, async (msg) => {
         if (shouldSkipCommand(msg, "requestcard"))
@@ -576,6 +572,13 @@ async function initBot() {
             await startKycFlow(chatId, query.message);
             return;
         }
+        if (action === "CARD_TXN_NO_CARD" || action === "CARD_FREEZE_NO_CARD") {
+            await bot.answerCallbackQuery(query.id).catch(() => { });
+            await bot.sendMessage(chatId, "No card found. Use /card_request to create your virtual card.", {
+                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
+            return;
+        }
         if (action.startsWith("CARD_REVEAL::")) {
             const cardId = action.replace("CARD_REVEAL::", "");
             await bot.answerCallbackQuery(query.id).catch(() => { });
@@ -646,6 +649,13 @@ async function initBot() {
             if (method !== "telebirr" && method !== "cbe")
                 return;
             await bot.answerCallbackQuery(query.id).catch(() => { });
+            const selected = depositSelections.get(chatId);
+            if (!selected || selected.method !== method || !Number.isFinite(selected.amount) || selected.amount <= 0) {
+                await bot.sendMessage(chatId, "Please select a deposit amount first, then verify payment.", {
+                    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+                });
+                return;
+            }
             await startVerificationFlow(chatId, method);
             return;
         }
@@ -767,7 +777,11 @@ async function initBot() {
                 const result = await (0, paymentVerification_1.verifyPayment)({ paymentMethod: method, transactionNumber: normalizedTxn });
                 const b = result.body;
                 if (b?.success) {
-                    const selected = depositSelections.get(msg.chat.id);
+                    const selectedFromPending = Number.isFinite(pending.expectedAmount)
+                        ? { method, amount: Number(pending.expectedAmount) }
+                        : undefined;
+                    const selectedFromSession = depositSelections.get(msg.chat.id);
+                    const selected = selectedFromPending || selectedFromSession;
                     const validationErrors = validateVerificationResult({ method, body: b, selected });
                     if (validationErrors.length) {
                         const notice = [
@@ -1300,8 +1314,11 @@ function buildVerificationHint(method) {
 }
 async function startVerificationFlow(chatId, method) {
     const key = chatKey(chatId);
-    if (key)
-        pendingActions.set(key, { type: "verify", method });
+    if (key) {
+        const selected = depositSelections.get(chatId);
+        const expectedAmount = selected && selected.method === method ? selected.amount : undefined;
+        pendingActions.set(key, { type: "verify", method, expectedAmount });
+    }
     await bot.sendMessage(chatId, buildVerificationHint(method), {
         reply_markup: { force_reply: true },
     });
@@ -2644,7 +2661,7 @@ async function sendUserInfo(chatId, message) {
     const currency = user?.currency || "USDT";
     const email = user?.customerEmail || link?.customerEmail;
     const kycStatus = resolveKycStatus(user, customer);
-    const kycLabel = kycStatus === "approved" ? "Approved ✅" : kycStatus === "pending" ? "Pending ⏳" : "Not started";
+    const kycLabel = kycStatus === "approved" ? "Approved ✅ (use /kyc to resubmit)" : "/kyc";
     const cardId = primaryCard?.cardId;
     const remoteDetail = cardId ? await fetchCardDetailSafe(cardId) : null;
     const balance = remoteDetail?.balance ?? baseBalance;
@@ -2652,17 +2669,22 @@ async function sendUserInfo(chatId, message) {
     const cardStatusRaw = remoteDetail?.status || primaryCard?.status;
     const cardStatus = cardStatusRaw ? String(cardStatusRaw) : undefined;
     const cardStatusLabel = cardStatus ? cardStatus.charAt(0).toUpperCase() + cardStatus.slice(1) : undefined;
+    const username = user?.username ? `@${String(user.username)}` : undefined;
+    const nameSource = user?.firstName || user?.lastName
+        ? `${user?.firstName || ""} ${user?.lastName || ""}`.trim()
+        : (user?.username ? String(user.username) : "User");
+    const hasReadyProfile = Boolean(email) && kycStatus === "approved" && Boolean(primaryCard);
     const lines = [
-        "👤 Your Profile",
-        `User ID: ${chatId}`,
-        email ? `Email: ${email}` : "Email: not linked (use /linkemail your@example.com)",
-        `KYC: ${kycLabel} (use /kyc to resubmit)`,
-        "",
-        `Wallet: ${Number(balance).toFixed(2)} ${currency}`,
-        `Cards: ${primaryCard ? 1 : 0}`,
-        primaryCard ? "💳 Virtual Card" : undefined,
-        primaryCard && cardStatusLabel ? `• Status: ${cardStatusLabel}` : undefined,
-        primaryCard && last4 ? `• Last 4 digits: ${last4}` : undefined,
+        "🧑‍💻 Here's Your Profile:",
+        `👤 Name: ${nameSource}${username ? ` (${username})` : ""}`,
+        `👤 User ID: ${chatId}`,
+        `✉️ Email: ${email || "/linkemail"}`,
+        `KYC: ${kycLabel}`,
+        `Wallet: ${hasReadyProfile ? `${Number(balance).toFixed(2)} ${currency}` : "/card_request"}`,
+        `Cards: ${hasReadyProfile ? "1" : "/card_request"}`,
+        "💳 Virtual Card",
+        `• Status: ${hasReadyProfile ? (cardStatusLabel || "Active") : "No Card"}`,
+        `• Last 4 digits: ${hasReadyProfile ? (last4 || "****") : "****"}`,
     ].filter(Boolean);
     await editOrSend(chatId, message, lines.join("\n"), {
         inline_keyboard: [
@@ -2730,84 +2752,29 @@ async function sendMyCards(chatId, message) {
     const linkedCard = linkedCardId ? await Card_1.default.findOne({ cardId: linkedCardId }).lean() : null;
     const resolvedCard = linkedCard || primaryCard;
     const resolvedCardId = resolvedCard?.cardId || latestRequest?.cardId || linkedCardId;
-    const kycStatus = resolveKycStatus(user, customer);
-    if (kycStatus !== "approved" && !resolvedCardId) {
-        const label = kycStatus === "pending" ? "Pending" : kycStatus === "rejected" ? "Rejected" : "Not started";
-        const lines = [
-            "⚠️ KYC Required",
-            "You must complete KYC before requesting a card.",
-            `KYC Status: ${label}`,
-        ];
-        await editOrSend(chatId, message, lines.join("\n"), {
-            inline_keyboard: [[{ text: "✅ Complete KYC", callback_data: "KYC_START" }], [MENU_BUTTON]],
-        });
-        return;
-    }
+    const noCardLines = [
+        "💳 Your Virtual Card",
+        "Card Type: virtual",
+        "Status: ✅ None",
+        "Card Number: /card_request",
+        "CVV: None",
+        "Expiry Date: None",
+        "Balance: __",
+        "Billing: None",
+        "Address: None",
+    ];
+    const noCardKeyboard = [
+        [
+            { text: "🔍 Transactions", callback_data: "CARD_TXN_NO_CARD" },
+            { text: "❄️ Freeze Card", callback_data: "CARD_FREEZE_NO_CARD" },
+        ],
+        [MENU_BUTTON],
+    ];
     const card = resolvedCard || (latestRequest?.cardId ? await Card_1.default.findOne({ cardId: latestRequest.cardId }).lean() : null);
     const cardId = card?.cardId || latestRequest?.cardId || linkedCardId;
     if (!card && !cardId) {
-        if (!latestRequest) {
-            const lines = [
-                "💳 Virtual Card",
-                "",
-                "You don't have a card yet.",
-                "",
-                "To get a card:",
-                "• Complete KYC",
-                "• Request a virtual card",
-                "",
-                "👇 Choose an option:",
-            ];
-            await editOrSend(chatId, message, lines.join("\n"), {
-                inline_keyboard: [
-                    [{ text: "➕ Request Card", callback_data: "MENU_CREATE_CARD" }],
-                    [{ text: "📝 KYC Status", callback_data: "KYC_STATUS" }],
-                    [MENU_BUTTON],
-                ],
-            });
-            return;
-        }
-        if (latestRequest.status === "pending" || latestRequest.status === "approved") {
-            const lines = [
-                "💳 Virtual Card",
-                "",
-                "Status: ⏳ Pending Approval",
-                "",
-                "Your card request is being reviewed.",
-                "This usually takes a few minutes.",
-                "",
-                "You'll be notified once your card is ready.",
-            ];
-            await editOrSend(chatId, message, lines.join("\n"), {
-                inline_keyboard: [[{ text: "🔄 Refresh Status", callback_data: "MENU_MY_CARDS" }], [MENU_BUTTON]],
-            });
-            return;
-        }
-        if (latestRequest.status === "declined") {
-            const reason = latestRequest.decisionReason || latestRequest.adminNote;
-            const lines = [
-                "💳 Virtual Card",
-                "",
-                "❌ Card Request Failed",
-                "",
-                "Reason:",
-                reason ? `• ${reason}` : "• KYC not approved\n• Invalid details\n• Provider rejection",
-                "",
-                "Please fix the issue and try again.",
-            ];
-            await editOrSend(chatId, message, lines.join("\n"), {
-                inline_keyboard: [
-                    [{ text: "📝 Check KYC Status", callback_data: "KYC_STATUS" }],
-                    [{ text: "➕ Request Card Again", callback_data: "MENU_CREATE_CARD" }],
-                    [MENU_BUTTON],
-                ],
-            });
-            return;
-        }
-    }
-    if (!card && !cardId) {
-        await editOrSend(chatId, message, "No card yet. Request a card to get started.", {
-            inline_keyboard: [[MENU_BUTTON]],
+        await editOrSend(chatId, message, noCardLines.join("\n"), {
+            inline_keyboard: noCardKeyboard,
         });
         return;
     }
@@ -2821,26 +2788,11 @@ async function sendMyCards(chatId, message) {
     };
     const remoteDetail = !card?.last4 || !card?.balance || !card?.currency ? await fetchCardDetailSafe(activeCard.cardId) : null;
     const mergedDetail = remoteDetail || null;
-    if (isFrozenStatus(activeCard.status)) {
-        const lines = [
-            "💳 Your Virtual Card",
-            "",
-            "Status: ❄️ Frozen",
-            "Reason: Temporary freeze",
-            "",
-            "You can unfreeze your card anytime.",
-        ];
-        await editOrSend(chatId, message, lines.join("\n"), {
-            inline_keyboard: [
-                [{ text: "🔥 Unfreeze Card", callback_data: `CARD_UNFREEZE::${activeCard.cardId}` }],
-                [{ text: "🔍 Transactions", callback_data: `CARD_TXN::${activeCard.cardId}` }],
-                [MENU_BUTTON],
-            ],
-        });
-        return;
-    }
     const last4 = mergedDetail?.last4 || activeCard.last4 || latestRequest?.cardNumber?.slice(-4);
-    const cardType = mergedDetail?.card_type || activeCard.cardType || latestRequest?.cardType || "Virtual USD Card";
+    const cardType = String(mergedDetail?.card_type || activeCard.cardType || latestRequest?.cardType || "virtual").toLowerCase();
+    const cardNumber = (mergedDetail?.card_number || latestRequest?.cardNumber || "").toString().replace(/\s+/g, "");
+    const cvc = (mergedDetail?.cvc || latestRequest?.cvc || "").toString();
+    const statusText = isFrozenStatus(activeCard.status) ? "❄️ Frozen" : "✅ Active";
     const balanceLabel = formatCardMoney(mergedDetail?.balance ?? mergedDetail?.available_balance ?? activeCard.balance ?? user?.balance, mergedDetail?.currency || activeCard.currency || user?.currency || "USD");
     const expiry = extractExpiry(mergedDetail) || extractExpiry(latestRequest?.responseData || latestRequest?.metadata || {});
     const billing = mergedDetail?.billing || latestRequest?.metadata?.billing;
@@ -2848,19 +2800,21 @@ async function sendMyCards(chatId, message) {
     const lines = [
         "💳 Your Virtual Card",
         `Card Type: ${cardType}`,
-        "Status: ✅ Active",
-        `Card Number: ${formatMaskedCard(last4)}`,
+        `Status: ${statusText}`,
+        `Card Number: ${cardNumber || formatMaskedCard(last4)}`,
+        `CVV: ${cvc || "None"}`,
         expiry ? `Expiry Date: ${expiry}` : undefined,
         balanceLabel ? `Balance: ${balanceLabel}` : undefined,
-        billing ? `Billing: ${billing}` : undefined,
-        address ? `Address: ${address}` : undefined,
+        `Billing: ${billing || "None"}`,
+        `Address: ${address || "None"}`,
     ].filter(Boolean);
+    const freezeAction = isFrozenStatus(activeCard.status) ? "CARD_UNFREEZE" : "CARD_FREEZE";
+    const freezeLabel = isFrozenStatus(activeCard.status) ? "🔥 Unfreeze Card" : "❄️ Freeze Card";
     await editOrSend(chatId, message, lines.join("\n"), {
         inline_keyboard: [
-            [{ text: "🔐 View Card Details", callback_data: `CARD_REVEAL::${activeCard.cardId}` }],
             [
                 { text: "🔍 Transactions", callback_data: `CARD_TXN::${activeCard.cardId}` },
-                { text: "❄️ Freeze Card", callback_data: `CARD_FREEZE::${activeCard.cardId}` },
+                { text: freezeLabel, callback_data: `${freezeAction}::${activeCard.cardId}` },
             ],
             [MENU_BUTTON],
         ],
