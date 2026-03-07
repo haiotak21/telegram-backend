@@ -137,6 +137,8 @@ router.post("/create-user", async (req, res) => {
     const payload = { ...body, public_key };
     const resp = await bitvcard.post("create-user/", payload, {
       headers: { "Content-Type": "application/json" },
+      // Some provider deployments expect these fields in query params.
+      params: payload,
     });
     const data = resp.data;
     const customerId =
@@ -216,6 +218,7 @@ router.put("/updateCardCustomer", async (req, res) => {
     const payload = { ...body, public_key };
     const resp = await bitvcard.put("updateCardCustomer/", payload, {
       headers: { "Content-Type": "application/json" },
+      params: payload,
     });
     return ok(res, resp.data, 200);
   } catch (e) {
@@ -243,6 +246,7 @@ router.patch("/updateCardCustomer", async (req, res) => {
     const payload = { ...providedBody, public_key };
     const resp = await bitvcard.patch("updateCardCustomer/", payload, {
       headers: { "Content-Type": "application/json" },
+      params: payload,
     });
     return ok(res, resp.data, 200);
   } catch (e) {

@@ -2299,6 +2299,22 @@ function extractCustomerId(payload) {
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
+function ensureProviderAcceptedKyc(resp) {
+    const data = resp?.data ?? resp ?? {};
+    const successFlag = data?.success;
+    const okFlag = data?.ok;
+    const statusFlag = data?.status;
+    const hasError = Boolean(data?.error) || Boolean(data?.errors);
+    if (successFlag === false || okFlag === false || statusFlag === false || hasError) {
+        const providerMessage = data?.message ||
+            data?.error ||
+            data?.errors?.[0]?.message ||
+            "KYC request was rejected by provider";
+        const err = new Error(String(providerMessage));
+        err.status = 400;
+        throw err;
+    }
+}
 async function submitKyc(chatId, session) {
     const data = session.data;
     const missing = [
@@ -2387,6 +2403,7 @@ async function submitKyc(chatId, session) {
         else {
             resp = await callStroWallet("create-user", "post", createPayload);
         }
+        ensureProviderAcceptedKyc(resp);
         let customerId = extractCustomerId(resp);
         if (!customerId && session.mode === "create") {
             try {
