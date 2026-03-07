@@ -294,12 +294,24 @@ export async function verifyPayment(input: VerificationInput): Promise<Verificat
 
   // Safe mode for non-Ethiopia hosting: always route provider verification through Verifier API.
   if (shouldSkipPrimaryVerification()) {
-    return await verifyViaVerifierApiWithRetry({
+    const verifierResult = await verifyViaVerifierApiWithRetry({
       paymentMethod,
       reference: effectiveTxn,
       transactionNumber: normalizedTxn,
       cbeSuffix: paymentMethod === "cbe" ? suffixOverride || inferCbeSuffixFromEnv() : undefined,
     });
+
+    // Some verifier API CBE backends fail to render the receipt PDF via Puppeteer.
+    // Fall back to the in-process verifier to keep CBE verification usable.
+    if (paymentMethod === "cbe" && shouldFallbackToCustomCbe(verifierResult)) {
+      const fallback = await runCustomCbeVerificationStandalone(effectiveTxn, normalizedTxn);
+      if (fallback.body.success) {
+        console.log("CBE fallback verifier succeeded after verifier API failure.");
+        return fallback;
+      }
+    }
+
+    return verifierResult;
   }
 
   // Always use the in-process custom verifier for CBE
@@ -344,6 +356,20 @@ function isRetryableVerifierFailure(status: number, message: string) {
   const m = (message || "").toLowerCase();
   if (status === 408 || status === 429 || status >= 500) return true;
   return m.includes("timeout") || m.includes("etimedout") || m.includes("econnreset") || m.includes("temporar");
+}
+
+function shouldFallbackToCustomCbe(result: VerificationResult) {
+  if (result.body.success) return false;
+  const enabled = String(process.env.CBE_FALLBACK_ON_VERIFY_API_FAILURE || "true").toLowerCase() === "true";
+  if (!enabled) return false;
+
+  const message = String(result.body.message || "").toLowerCase();
+  return (
+    message.includes("no pdf") ||
+    message.includes("puppeteer") ||
+    message.includes("pdf detected") ||
+    message.includes("navigation")
+  );
 }
 
 function delay(ms: number) {

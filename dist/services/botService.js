@@ -31,8 +31,17 @@ const Transaction_1 = __importDefault(require("../models/Transaction"));
 const User_1 = __importDefault(require("../models/User"));
 const Customer_1 = __importDefault(require("../models/Customer"));
 const pricingService_1 = require("./pricingService");
+const depositService_1 = require("./depositService");
 let bot = null;
 const pendingActions = new Map();
+function chatKey(value) {
+    return value != null ? String(value) : null;
+}
+function clearPendingAction(value) {
+    const key = chatKey(value);
+    if (key)
+        pendingActions.delete(key);
+}
 const createCardSessions = new Map();
 const kycSessions = new Map();
 const KYC_ID_TYPES = [
@@ -53,7 +62,7 @@ const API_BASE = process.env.BOT_API_BASE || "http://localhost:3000/api/strowall
 const BACKEND_BASE = process.env.BOT_BACKEND_BASE || "http://localhost:3000";
 const EXPECTED_RECEIVER_NAME = (process.env.RECEIVER_NAME || process.env.CBE_RECEIVER_NAME || "Hailemariam Takele Mekonnen").trim();
 const EXPECTED_TELEBIRR_NAME = (process.env.TELEBIRR_RECEIVER_NAME || "Hayilemariyam Takele Mekonen").trim();
-const CBE_STRICT_RECEIVER = String(process.env.CBE_STRICT_RECEIVER || "false").toLowerCase() === "true";
+const CBE_STRICT_RECEIVER = String(process.env.CBE_STRICT_RECEIVER || "true").toLowerCase() === "true";
 const TELEBIRR_STRICT_RECEIVER = String(process.env.TELEBIRR_STRICT_RECEIVER || "true").toLowerCase() === "true";
 const EXPECTED_TELEBIRR_PHONE = (process.env.TELEBIRR_PHONE_NUMBER || "0985656670").trim();
 const EXPECTED_CBE_ACCOUNT = (process.env.CBE_ACCOUNT_NUMBER || "1000473027449").trim();
@@ -73,6 +82,7 @@ const DEPOSIT_ACCOUNTS = {
     cbe: { title: "CBE Deposit", account: "1000473027449", name: "Hailemariam Takele Mekonnen", typeLabel: "CBE" },
     telebirr: { title: "Telebirr Deposit", account: "0985656670", name: "Hayilemariyam Takele Mekonen", typeLabel: "Telebirr" },
 };
+const CARD_REQUEST_MANDATORY_DEPOSIT_USD = 5;
 const CARD_REQUEST_BASE_AMOUNT_ETB = Number(process.env.CARD_REQUEST_BASE_AMOUNT_ETB || 3);
 const BOT_LOCK_KEY = "telegram-bot";
 const BOT_LOCK_TTL_MS = Number(process.env.TELEGRAM_BOT_LOCK_TTL_MS || 90000);
@@ -384,7 +394,10 @@ async function initBot() {
             return;
         const email = match?.[1];
         if (!email) {
-            pendingActions.set(msg.chat.id, { type: "email" });
+            const key = chatKey(msg.chat.id);
+            if (!key)
+                return;
+            pendingActions.set(key, { type: "email" });
             return bot.sendMessage(msg.chat.id, "Please send your email now (or /cancel):", {
                 reply_markup: { force_reply: true },
             });
@@ -397,7 +410,10 @@ async function initBot() {
             return;
         const cardId = match?.[1];
         if (!cardId) {
-            pendingActions.set(msg.chat.id, { type: "card" });
+            const key = chatKey(msg.chat.id);
+            if (!key)
+                return;
+            pendingActions.set(key, { type: "card" });
             return bot.sendMessage(msg.chat.id, "Please send the CARD_ID now (or /cancel):", {
                 reply_markup: { force_reply: true },
             });
@@ -424,7 +440,7 @@ async function initBot() {
     botRef.onText(/^\/cancel$/i, async (msg) => {
         if (shouldSkipCommand(msg, "cancel"))
             return;
-        pendingActions.delete(msg.chat.id);
+        clearPendingAction(msg.chat.id);
         cardRequestSelections.delete(msg.chat.id);
         kycSessions.delete(msg.chat.id);
         createCardSessions.delete(msg.chat.id);
@@ -535,7 +551,7 @@ async function initBot() {
             return;
         }
         if (action === "CANCEL") {
-            pendingActions.delete(chatId);
+            clearPendingAction(chatId);
             kycSessions.delete(chatId);
             createCardSessions.delete(chatId);
             await bot.answerCallbackQuery(query.id, { text: "Cancelled" }).catch(() => { });
@@ -611,7 +627,11 @@ async function initBot() {
             if (method !== "telebirr" && method !== "cbe")
                 return;
             await bot.answerCallbackQuery(query.id).catch(() => { });
-            pendingActions.set(chatId, { type: "deposit_amount", method });
+            {
+                const key = chatKey(chatId);
+                if (key)
+                    pendingActions.set(key, { type: "deposit_amount", method });
+            }
             await bot.sendMessage(chatId, `Enter the amount to deposit via ${method.toUpperCase()} (ETB).`, {
                 reply_markup: { force_reply: true },
             });
@@ -637,13 +657,17 @@ async function initBot() {
                 });
                 return;
             }
-            pendingActions.set(chatId, { type: "card_request_verify", method });
+            {
+                const key = chatKey(chatId);
+                if (key)
+                    pendingActions.set(key, { type: "card_request_verify", method });
+            }
             const meta = DEPOSIT_ACCOUNTS[method];
             const lines = [
                 "💳 Card request payment",
-                `Base amount: ${selection.amountEtb} ETB`,
-                `Fee: ${selection.feeEtb} ETB`,
-                `Total to pay: ${selection.totalEtb} ETB`,
+                `Mandatory deposit: $${selection.depositUsd.toFixed(2)} × ${selection.rate.toFixed(2)} ETB = ${selection.amountEtb.toFixed(2)} ETB`,
+                `Card fee: ${selection.feeEtb.toFixed(2)} ETB`,
+                `Total to pay: ${selection.totalEtb.toFixed(2)} ETB`,
                 `${meta.typeLabel} account: ${meta.account}`,
                 `Name: ${meta.name}`,
                 "",
@@ -680,7 +704,10 @@ async function initBot() {
         }
         if (!msg.text)
             return;
-        const pending = pendingActions.get(chatId);
+        const pendingKey = chatKey(chatId);
+        if (!pendingKey)
+            return;
+        const pending = pendingActions.get(pendingKey);
         if (!pending)
             return;
         const text = String(msg.text).trim();
@@ -691,7 +718,7 @@ async function initBot() {
                 return bot.sendMessage(msg.chat.id, "Invalid email format. Try again or /cancel.");
             }
             await TelegramLink_1.TelegramLink.findOneAndUpdate({ chatId: msg.chat.id }, { $set: { customerEmail: email } }, { new: true, upsert: true });
-            pendingActions.delete(msg.chat.id);
+            clearPendingAction(msg.chat.id);
             await bot.sendMessage(msg.chat.id, `Linked email ${email}.`);
         }
         else if (pending.type === "card") {
@@ -700,7 +727,7 @@ async function initBot() {
                 return bot.sendMessage(msg.chat.id, "Card ID cannot be empty. Try again or /cancel.");
             }
             await TelegramLink_1.TelegramLink.findOneAndUpdate({ chatId: msg.chat.id }, { $addToSet: { cardIds: cardId } }, { new: true, upsert: true });
-            pendingActions.delete(msg.chat.id);
+            clearPendingAction(msg.chat.id);
             await bot.sendMessage(msg.chat.id, `Linked card ${cardId}.`);
         }
         else if (pending.type === "verify") {
@@ -727,17 +754,10 @@ async function initBot() {
             catch { }
             const normalizedTxn = normalizeTxnRef(txn, pending.method);
             try {
-                // Idempotency: only short-circuit if a successful verification already exists
-                const already = await Transaction_1.default.findOne({
-                    transactionType: "verification",
-                    userId: String(msg.chat.id),
-                    paymentMethod: method,
-                    status: "completed",
-                    $or: [{ transactionNumber: normalizedTxn }, { referenceNumber: normalizedTxn }],
-                }).lean();
+                const already = await findUsedPaymentReference(method, normalizedTxn);
                 if (already) {
-                    await bot.sendMessage(msg.chat.id, "ℹ️ You already verified this transaction.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
-                    pendingActions.delete(msg.chat.id);
+                    await bot.sendMessage(msg.chat.id, "❌ This payment reference has already been used.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+                    clearPendingAction(msg.chat.id);
                     return;
                 }
                 const result = await (0, paymentVerification_1.verifyPayment)({ paymentMethod: method, transactionNumber: normalizedTxn });
@@ -752,7 +772,7 @@ async function initBot() {
                             "Please check your receipt and try again.",
                         ].join("\n");
                         await bot.sendMessage(msg.chat.id, notice, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
-                        pendingActions.delete(msg.chat.id);
+                        clearPendingAction(msg.chat.id);
                         return;
                     }
                     const rawData = (b.raw?.data ?? b.raw ?? {});
@@ -787,31 +807,27 @@ async function initBot() {
                         const rawData = (b.raw?.data ?? b.raw ?? {});
                         const verifiedKey = normalizeTxnRef(String(b.transactionNumber || normalizedTxn), method);
                         const altKey = normalizeTxnRef(String(rawData?.reference || normalizedTxn), method);
-                        // Record a pending deposit request for admin review (idempotent on transactionNumber)
-                        const existingDeposit = await Transaction_1.default.findOne({
+                        if (typeof amountNum !== "number" || amountNum <= 0) {
+                            await bot.sendMessage(msg.chat.id, "❌ Verification succeeded but amount is missing from receipt.", {
+                                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+                            });
+                            clearPendingAction(msg.chat.id);
+                            return;
+                        }
+                        const depositResult = await (0, depositService_1.creditVerifiedDeposit)({
                             userId: String(msg.chat.id),
-                            transactionType: "deposit",
+                            paymentMethod: method,
+                            amountEtb: amountNum,
                             transactionNumber: verifiedKey,
-                        }).lean();
-                        if (!existingDeposit) {
-                            try {
-                                await Transaction_1.default.create({
-                                    userId: String(msg.chat.id),
-                                    transactionType: "deposit",
-                                    paymentMethod: method,
-                                    amount: amountNum ?? 0,
-                                    amountEtb: amountNum,
-                                    status: "pending",
-                                    transactionNumber: verifiedKey,
-                                    referenceNumber: altKey,
-                                    responseData: b.raw ?? b,
-                                });
-                            }
-                            catch (depErr) {
-                                if (depErr?.code !== 11000) {
-                                    console.warn("deposit-recording-error", depErr?.message || depErr);
-                                }
-                            }
+                            referenceNumber: altKey,
+                            responseData: b.raw ?? b,
+                        });
+                        if (!depositResult.success) {
+                            await bot.sendMessage(msg.chat.id, `❌ Deposit error: ${depositResult.message || "Deposit failed"}`, {
+                                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+                            });
+                            clearPendingAction(msg.chat.id);
+                            return;
                         }
                         await Transaction_1.default.create({
                             userId: String(msg.chat.id),
@@ -825,16 +841,21 @@ async function initBot() {
                         });
                         await bot.sendMessage(msg.chat.id, lines.join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
                         depositSelections.delete(msg.chat.id);
-                        await bot.sendMessage(msg.chat.id, "✅ Payment verified. Please wait ~10 minutes for admin to approve and credit your account.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+                        await bot.sendMessage(msg.chat.id, [
+                            "✅ Payment Verified",
+                            "Your deposit has been credited automatically.",
+                            depositResult.creditedUsdt != null ? `Credited: ${Number(depositResult.creditedUsdt).toFixed(2)} USDT` : undefined,
+                            depositResult.newBalance != null ? `Wallet balance: ${Number(depositResult.newBalance).toFixed(2)} USDT` : undefined,
+                        ].filter(Boolean).join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
                     }
                     catch (createErr) {
                         if (createErr?.code === 11000) {
-                            await bot.sendMessage(msg.chat.id, "ℹ️ You already verified this transaction.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
-                            pendingActions.delete(msg.chat.id);
+                            await bot.sendMessage(msg.chat.id, "❌ This payment reference has already been used.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+                            clearPendingAction(msg.chat.id);
                             return;
                         }
                         await bot.sendMessage(msg.chat.id, `❌ Verification error: ${createErr?.message || "Unexpected error"}`, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
-                        pendingActions.delete(msg.chat.id);
+                        clearPendingAction(msg.chat.id);
                         return;
                     }
                 }
@@ -846,7 +867,7 @@ async function initBot() {
                 await bot.sendMessage(msg.chat.id, `❌ Verification error: ${e?.message || "Unexpected error"}`, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
             }
             finally {
-                pendingActions.delete(msg.chat.id);
+                clearPendingAction(msg.chat.id);
             }
         }
         else if (pending.type === "card_request_verify") {
@@ -872,18 +893,12 @@ async function initBot() {
             catch { }
             const normalizedTxn = normalizeTxnRef(txn, pending.method);
             try {
-                const already = await Transaction_1.default.findOne({
-                    transactionType: "card",
-                    userId: String(msg.chat.id),
-                    paymentMethod: method,
-                    status: "completed",
-                    $or: [{ transactionNumber: normalizedTxn }, { referenceNumber: normalizedTxn }],
-                }).lean();
+                const already = await findUsedPaymentReference(method, normalizedTxn);
                 if (already) {
-                    await bot.sendMessage(msg.chat.id, "ℹ️ You already verified this transaction.", {
+                    await bot.sendMessage(msg.chat.id, "❌ This payment reference has already been used.", {
                         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
                     });
-                    pendingActions.delete(msg.chat.id);
+                    clearPendingAction(msg.chat.id);
                     return;
                 }
                 const result = await (0, paymentVerification_1.verifyPayment)({ paymentMethod: method, transactionNumber: normalizedTxn });
@@ -894,7 +909,7 @@ async function initBot() {
                         await bot.sendMessage(msg.chat.id, "Card request payment session expired. Please request a card again.", {
                             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
                         });
-                        pendingActions.delete(msg.chat.id);
+                        clearPendingAction(msg.chat.id);
                         return;
                     }
                     const validationErrors = validateVerificationResult({
@@ -909,7 +924,7 @@ async function initBot() {
                             "Please check your receipt and try again.",
                         ].join("\n");
                         await bot.sendMessage(msg.chat.id, notice, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
-                        pendingActions.delete(msg.chat.id);
+                        clearPendingAction(msg.chat.id);
                         return;
                     }
                     const rawData = (b.raw?.data ?? b.raw ?? {});
@@ -932,6 +947,8 @@ async function initBot() {
                                 baseAmountEtb: selection.amountEtb,
                                 feeEtb: selection.feeEtb,
                                 totalEtb: selection.totalEtb,
+                                mandatoryDepositUsd: selection.depositUsd,
+                                conversionRateEtbPerUsdt: selection.rate,
                             },
                         });
                     }
@@ -940,36 +957,31 @@ async function initBot() {
                             await bot.sendMessage(msg.chat.id, `❌ Verification error: ${createErr?.message || "Unexpected error"}`, {
                                 reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
                             });
-                            pendingActions.delete(msg.chat.id);
+                            clearPendingAction(msg.chat.id);
                             return;
                         }
                     }
                     const user = await User_1.default.findOne({ userId: String(msg.chat.id) }).lean();
                     const customer = await Customer_1.default.findOne({ userId: String(msg.chat.id) }).lean();
                     if (!customer || customer.kycStatus !== "approved") {
-                        await bot.sendMessage(msg.chat.id, "❌ KYC is not approved. Please complete KYC before requesting a card.", {
+                        await bot.sendMessage(msg.chat.id, [
+                            "✅ Payment Verified",
+                            "Please complete KYC to activate your card request.",
+                        ].join("\n"), {
                             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
                         });
-                        pendingActions.delete(msg.chat.id);
+                        clearPendingAction(msg.chat.id);
                         return;
                     }
-                    const activeCard = await Card_1.default.findOne({ userId: String(msg.chat.id), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
-                    if (activeCard) {
+                    const existingCard = await Card_1.default.findOne({ userId: String(msg.chat.id) }).lean();
+                    if (existingCard) {
                         await bot.sendMessage(msg.chat.id, "❌ You already have a card. Multiple cards are not allowed.", {
                             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
                         });
-                        pendingActions.delete(msg.chat.id);
+                        clearPendingAction(msg.chat.id);
                         return;
                     }
-                    const pendingRequest = await CardRequest_1.default.findOne({ userId: String(msg.chat.id), status: "pending" }).lean();
-                    if (pendingRequest) {
-                        await bot.sendMessage(msg.chat.id, "⏳ Your card request is already pending review.", {
-                            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-                        });
-                        pendingActions.delete(msg.chat.id);
-                        return;
-                    }
-                    await bot.sendMessage(msg.chat.id, "✅ Payment verified. Submitting your card request...", {
+                    await bot.sendMessage(msg.chat.id, "✅ Payment verified. Creating your virtual card...", {
                         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
                     });
                     cardRequestSelections.delete(msg.chat.id);
@@ -987,7 +999,7 @@ async function initBot() {
                 });
             }
             finally {
-                pendingActions.delete(msg.chat.id);
+                clearPendingAction(msg.chat.id);
             }
         }
         else if (pending.type === "deposit_amount") {
@@ -996,7 +1008,7 @@ async function initBot() {
             if (!Number.isFinite(amount) || amount <= 0) {
                 return bot.sendMessage(msg.chat.id, "Please enter a valid amount in ETB (greater than 0), or /cancel.");
             }
-            pendingActions.delete(msg.chat.id);
+            clearPendingAction(msg.chat.id);
             await sendDepositSummary(msg.chat.id, method, amount);
         }
     });
@@ -1268,7 +1280,9 @@ function buildVerificationHint(method) {
         ].join("\n");
 }
 async function startVerificationFlow(chatId, method) {
-    pendingActions.set(chatId, { type: "verify", method });
+    const key = chatKey(chatId);
+    if (key)
+        pendingActions.set(key, { type: "verify", method });
     await bot.sendMessage(chatId, buildVerificationHint(method), {
         reply_markup: { force_reply: true },
     });
@@ -1320,15 +1334,14 @@ function namesMatch(expectedRaw, actualRaw) {
     const actual = normalizeName(actualRaw).replace(/\s+/g, " ");
     if (!expected || !actual)
         return false;
-    if (actual.includes(expected))
-        return true;
-    if (expected.includes(actual))
-        return true;
-    // Try first two tokens containment
-    const expParts = expected.split(" ").filter(Boolean).slice(0, 2).join(" ");
-    if (expParts && actual.includes(expParts))
-        return true;
-    return false;
+    return expected === actual;
+}
+async function findUsedPaymentReference(paymentMethod, normalizedTxn) {
+    return await Transaction_1.default.findOne({
+        paymentMethod,
+        transactionType: { $in: ["deposit", "verification", "card"] },
+        $or: [{ transactionNumber: normalizedTxn }, { referenceNumber: normalizedTxn }],
+    }).lean();
 }
 function digitsMatch(expectedRaw, actualRaw) {
     const expected = normalizeDigits(expectedRaw);
@@ -1384,7 +1397,7 @@ function validateVerificationResult(params) {
         if (!receiverName)
             errors.push("Receiver name missing on receipt");
         else if (!namesMatch(expectedName, receiverName))
-            errors.push("Receiver name does not match expected recipient");
+            errors.push("Receiver name does not match the expected payment account.");
     }
     if (method === "telebirr" && EXPECTED_TELEBIRR_PHONE) {
         const expectedPhone = EXPECTED_TELEBIRR_PHONE;
@@ -1414,9 +1427,9 @@ function validateVerificationResult(params) {
     if (selected && selected.method === method) {
         const expectedAmt = selected.amount;
         if (typeof amount !== "number")
-            errors.push("Amount missing on provider receipt");
+            errors.push("Payment amount is missing in provider response.");
         else if (Math.abs(amount - expectedAmt) > 0.01)
-            errors.push(`Amount mismatch: expected ${expectedAmt} ETB, got ${amount} ETB`);
+            errors.push("Payment amount does not match the selected deposit amount.");
     }
     return errors;
 }
@@ -1491,6 +1504,9 @@ function getCardRequestBaseAmount() {
     const base = Number.isFinite(CARD_REQUEST_BASE_AMOUNT_ETB) ? CARD_REQUEST_BASE_AMOUNT_ETB : 3;
     return base >= 3 ? base : 3;
 }
+function roundMoney(value) {
+    return Math.round(value * 100) / 100;
+}
 async function sendDepositAmountSelect(chatId, method) {
     const methodLabel = method === "cbe" ? "CBE" : "Telebirr";
     const buttons = DEPOSIT_AMOUNTS.map((amt) => ({ text: `${amt} ETB`, callback_data: `DEPOSIT_AMOUNT::${method}::${amt}` }));
@@ -1531,7 +1547,7 @@ async function handleCardRequest(chatId, message) {
     const customerRecord = await Customer_1.default.findOne({ userId: String(chatId) }).lean();
     const kycStatus = customerRecord?.kycStatus || "pending";
     const userId = String(chatId);
-    const existingCard = await Card_1.default.findOne({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
+    const existingCard = await Card_1.default.findOne({ userId }).lean();
     const approvedRequest = await CardRequest_1.default.findOne({ userId, status: "approved" }).lean();
     if (existingCard || approvedRequest) {
         await bot.sendMessage(chatId, "❌ You already have a card. Multiple cards are not allowed.", {
@@ -1557,7 +1573,7 @@ async function handleCardRequest(chatId, message) {
     }
     const pendingRequest = await CardRequest_1.default.findOne({ userId, status: "pending" }).lean();
     if (pendingRequest) {
-        await bot.sendMessage(chatId, "⏳ Your card request is already pending review.", {
+        await bot.sendMessage(chatId, "⏳ Your card request is already being processed.", {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
         });
         return;
@@ -1568,25 +1584,28 @@ async function handleCardRequest(chatId, message) {
         });
         return;
     }
-    const baseAmount = getCardRequestBaseAmount();
     const config = await (0, pricingService_1.loadPricingConfig)();
+    const rate = Number(config.usdtRate) > 0 ? Number(config.usdtRate) : 220;
+    const baseAmount = roundMoney(CARD_REQUEST_MANDATORY_DEPOSIT_USD * rate);
     const feeEtb = Math.max(0, Number(config.cardRequestFeeEtb ?? 0));
-    const totalEtb = baseAmount + feeEtb;
-    if (feeEtb > 0) {
-        cardRequestSelections.set(chatId, { amountEtb: baseAmount, feeEtb, totalEtb });
-        const lines = [
-            "💳 Card request fee required.",
-            `Base amount: ${baseAmount} ETB`,
-            `Fee: ${feeEtb} ETB`,
-            `Total to pay: ${totalEtb} ETB`,
-            "Choose a payment method:",
-        ];
-        await bot.sendMessage(chatId, lines.join("\n"), {
-            reply_markup: { inline_keyboard: buildCardRequestMethodKeyboard() },
-        });
-        return;
-    }
-    await submitCardRequest(String(chatId), user, customerRecord, message, baseAmount);
+    const totalEtb = roundMoney(baseAmount + feeEtb);
+    cardRequestSelections.set(chatId, {
+        amountEtb: baseAmount,
+        feeEtb,
+        totalEtb,
+        depositUsd: CARD_REQUEST_MANDATORY_DEPOSIT_USD,
+        rate,
+    });
+    const lines = [
+        "💳 Card request payment required.",
+        `Mandatory deposit: $${CARD_REQUEST_MANDATORY_DEPOSIT_USD.toFixed(2)} × ${rate.toFixed(2)} ETB = ${baseAmount.toFixed(2)} ETB`,
+        `Card fee: ${feeEtb.toFixed(2)} ETB`,
+        `Total to pay: ${totalEtb.toFixed(2)} ETB`,
+        "Choose a payment method:",
+    ];
+    await bot.sendMessage(chatId, lines.join("\n"), {
+        reply_markup: { inline_keyboard: buildCardRequestMethodKeyboard() },
+    });
 }
 async function submitCardRequest(userId, user, customer, message, baseAmount) {
     const nameOnCard = [user.firstName, user.lastName].filter(Boolean).join(" ") || message?.from?.first_name || "StroWallet User";
@@ -1600,7 +1619,11 @@ async function submitCardRequest(userId, user, customer, message, baseAmount) {
             customerEmail: customer?.email || user?.customerEmail,
         });
         if (resp?.data?.ok) {
-            await bot.sendMessage(Number(userId), "✅ Your card request has been submitted to StroWallet. You'll be notified once approved.", {
+            await bot.sendMessage(Number(userId), [
+                "✅ Payment Verified",
+                "Your virtual card has been created successfully.",
+                resp?.data?.data?.cardId ? `Card ID: ${resp.data.data.cardId}` : undefined,
+            ].filter(Boolean).join("\n"), {
                 reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
             });
         }

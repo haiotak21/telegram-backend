@@ -58,7 +58,7 @@ function getPaymentSettings(method) {
 // --- Telebirr ---
 async function validateTelebirrTransaction(transactionNumber) {
     const normalizedTxn = extractTransactionId(transactionNumber);
-    const result = await (0, paymentVerification_1.runTelebirrVerificationStandalone)(normalizedTxn);
+    const result = await (0, paymentVerification_1.verifyPayment)({ paymentMethod: "telebirr", transactionNumber: normalizedTxn });
     if (result.body.success) {
         const transactionDetails = result.body.raw?.transactionDetails || result.body.raw?.data || result.body.raw || {};
         return {
@@ -87,6 +87,21 @@ async function validateCBETransaction(transactionNumber) {
     const normalizedTxn = extractTransactionId(transactionNumber);
     if (!normalizedTxn)
         return { success: false, message: "CBE transaction number is required" };
+    // Keep legacy endpoint behavior aligned with centralized verifier flow.
+    const centralized = await (0, paymentVerification_1.verifyPayment)({ paymentMethod: "cbe", transactionNumber: normalizedTxn });
+    if (centralized.body.success) {
+        const transactionDetails = centralized.body.raw?.transactionDetails || centralized.body.raw?.data || centralized.body.raw || {};
+        return {
+            success: true,
+            message: centralized.body.message,
+            transactionDetails,
+        };
+    }
+    // Fall back to historical custom CBE verifier when centralized flow fails.
+    const skipPrimary = String(process.env.SKIP_PRIMARY_VERIFICATION || "false").toLowerCase() === "true";
+    if (skipPrimary) {
+        return { success: false, message: centralized.body.message || "CBE validation failed" };
+    }
     const accountNumber = sanitizeCbeAccountNumber(process.env.CBE_ACCOUNT_NUMBER);
     const timeoutMs = parseTimeout(process.env.CBE_VERIFICATION_TIMEOUT_MS);
     const cbeVerificationUrl = process.env.CBE_VERIFICATION_URL;

@@ -216,7 +216,7 @@ function isSelfSignedCertError(error) {
 async function verifyPayment(input) {
     const { paymentMethod, transactionNumber } = input;
     const normalizedTxn = extractTransactionId(transactionNumber);
-    const { reference: cbeReference } = paymentMethod === "cbe" ? parseCbeComposite(normalizedTxn) : { reference: normalizedTxn };
+    const { reference: cbeReference, suffixOverride } = paymentMethod === "cbe" ? parseCbeComposite(normalizedTxn) : { reference: normalizedTxn };
     const effectiveTxn = paymentMethod === "cbe" ? cbeReference : normalizedTxn;
     if (!effectiveTxn.trim()) {
         return { status: 400, body: { success: false, message: "transactionNumber is required" } };
@@ -226,12 +226,181 @@ async function verifyPayment(input) {
     if (enableFakeValidation) {
         return manualValidation(paymentMethod, normalizedTxn, fakeDefaultAmount);
     }
+    // Safe mode for non-Ethiopia hosting: always route provider verification through Verifier API.
+    if (shouldSkipPrimaryVerification()) {
+        const verifierResult = await verifyViaVerifierApiWithRetry({
+            paymentMethod,
+            reference: effectiveTxn,
+            transactionNumber: normalizedTxn,
+            cbeSuffix: paymentMethod === "cbe" ? suffixOverride || inferCbeSuffixFromEnv() : undefined,
+        });
+        // Some verifier API CBE backends fail to render the receipt PDF via Puppeteer.
+        // Fall back to the in-process verifier to keep CBE verification usable.
+        if (paymentMethod === "cbe" && shouldFallbackToCustomCbe(verifierResult)) {
+            const fallback = await runCustomCbeVerificationStandalone(effectiveTxn, normalizedTxn);
+            if (fallback.body.success) {
+                console.log("CBE fallback verifier succeeded after verifier API failure.");
+                return fallback;
+            }
+        }
+        return verifierResult;
+    }
     // Always use the in-process custom verifier for CBE
     if (paymentMethod === "cbe") {
         return await runCustomCbeVerificationStandalone(effectiveTxn, normalizedTxn);
     }
     // Telebirr now uses the in-process receipt verifier
     return await runTelebirrVerificationStandalone(normalizedTxn);
+}
+function shouldSkipPrimaryVerification() {
+    return String(process.env.SKIP_PRIMARY_VERIFICATION || "false").toLowerCase() === "true";
+}
+function getVerifierApiBase() {
+    return (process.env.VERIFY_API_BASE ||
+        process.env.PAYMENT_VALIDATION_BASE_URL ||
+        "https://verifyapi.leulzenebe.pro").trim();
+}
+function getVerifierApiKey() {
+    return (process.env.VERIFY_API_KEY || process.env.PAYMENT_VALIDATION_API_KEY || "").trim();
+}
+function getVerifierTimeoutMs() {
+    const n = Number(process.env.VERIFY_API_TIMEOUT_MS || 15000);
+    return Number.isFinite(n) && n > 0 ? n : 15000;
+}
+function getVerifierRetryConfig() {
+    const attemptsRaw = Number(process.env.VERIFY_API_RETRY_ATTEMPTS || 3);
+    const delayRaw = Number(process.env.VERIFY_API_RETRY_DELAY_MS || 3000);
+    const attempts = Number.isFinite(attemptsRaw) && attemptsRaw > 0 ? attemptsRaw : 3;
+    const delayMs = Number.isFinite(delayRaw) && delayRaw >= 0 ? delayRaw : 3000;
+    return { attempts, delayMs };
+}
+function isRetryableVerifierFailure(status, message) {
+    const m = (message || "").toLowerCase();
+    if (status === 408 || status === 429 || status >= 500)
+        return true;
+    return m.includes("timeout") || m.includes("etimedout") || m.includes("econnreset") || m.includes("temporar");
+}
+function shouldFallbackToCustomCbe(result) {
+    if (result.body.success)
+        return false;
+    const enabled = String(process.env.CBE_FALLBACK_ON_VERIFY_API_FAILURE || "true").toLowerCase() === "true";
+    if (!enabled)
+        return false;
+    const message = String(result.body.message || "").toLowerCase();
+    return (message.includes("no pdf") ||
+        message.includes("puppeteer") ||
+        message.includes("pdf detected") ||
+        message.includes("navigation"));
+}
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function verifyViaVerifierApiWithRetry(params) {
+    const { attempts, delayMs } = getVerifierRetryConfig();
+    let lastFailure = null;
+    for (let i = 0; i < attempts; i++) {
+        const result = await verifyViaVerifierApi(params);
+        if (result.body.success)
+            return result;
+        lastFailure = result;
+        const msg = result.body.message || "";
+        if (!isRetryableVerifierFailure(result.status, msg)) {
+            return result;
+        }
+        if (i < attempts - 1 && delayMs > 0) {
+            await delay(delayMs);
+        }
+    }
+    return lastFailure || { status: 502, body: { success: false, message: "Verification failed after retries" } };
+}
+async function verifyViaVerifierApi(params) {
+    const { paymentMethod, reference, transactionNumber, cbeSuffix } = params;
+    const base = getVerifierApiBase();
+    const apiKey = getVerifierApiKey();
+    if (!base) {
+        return { status: 500, body: { success: false, message: "Missing VERIFY_API_BASE/PAYMENT_VALIDATION_BASE_URL" } };
+    }
+    if (!apiKey) {
+        return { status: 500, body: { success: false, message: "Missing VERIFY_API_KEY/PAYMENT_VALIDATION_API_KEY" } };
+    }
+    const endpoint = paymentMethod === "telebirr" ? "/verify-telebirr" : "/verify-cbe";
+    const payload = paymentMethod === "telebirr"
+        ? { reference }
+        : { reference, accountSuffix: cbeSuffix || "" };
+    if (paymentMethod === "cbe" && !payload.accountSuffix) {
+        return { status: 400, body: { success: false, message: "CBE account suffix is required" } };
+    }
+    console.log("Verifying payment:", reference, paymentMethod);
+    try {
+        const response = await axios_1.default.post(`${base}${endpoint}`, payload, {
+            headers: { "x-api-key": apiKey, "Content-Type": "application/json" },
+            timeout: getVerifierTimeoutMs(),
+        });
+        console.log("Verification response:", response.data);
+        return normalizeVerifierApiResponse(response.data, transactionNumber, paymentMethod);
+    }
+    catch (error) {
+        const status = Number(error?.response?.status || 502);
+        const providerMessage = error?.response?.data?.message || error?.response?.data?.error || error?.message;
+        return {
+            status,
+            body: {
+                success: false,
+                message: providerMessage || "Verification failed",
+                raw: error?.response?.data,
+            },
+        };
+    }
+}
+function normalizeVerifierApiResponse(data, transactionNumber, provider) {
+    const success = Boolean(data?.success);
+    if (!success) {
+        return {
+            status: 400,
+            body: {
+                success: false,
+                message: data?.message || data?.error || "Payment not verified",
+                raw: data,
+            },
+        };
+    }
+    const details = data?.data || data;
+    const responseRef = asStringValue(details?.reference || details?.receiptNo || details?.receipt_no);
+    if (responseRef && responseRef !== transactionNumber) {
+        return {
+            status: 400,
+            body: {
+                success: false,
+                message: "Reference mismatch from verifier",
+                raw: data,
+            },
+        };
+    }
+    const amount = asNumberValue(details?.amount) ??
+        parseAmount(asStringValue(details?.amount)?.replace(/[^\d.-]/g, "")) ??
+        asNumberValue(details?.settledAmount) ??
+        parseAmount(asStringValue(details?.settledAmount)?.replace(/[^\d.-]/g, "")) ??
+        parseAmount(asStringValue(details?.totalPaidAmount)?.replace(/[^\d.-]/g, ""));
+    return {
+        status: 200,
+        body: {
+            success: true,
+            message: "Verified",
+            provider,
+            transactionNumber,
+            amount,
+            currency: "ETB",
+            status: asStringValue(details?.status || details?.transactionStatus) || "verified",
+            raw: data,
+        },
+    };
+}
+function inferCbeSuffixFromEnv() {
+    const explicit = (process.env.CBE_ACCOUNT_SUFFIX || "").trim();
+    if (explicit)
+        return explicit;
+    const account = (process.env.CBE_ACCOUNT_NUMBER || "").replace(/\D+/g, "");
+    return account.length >= 8 ? account.slice(-8) : undefined;
 }
 async function runTelebirrVerificationStandalone(transactionNumber) {
     const allowInsecure = String(process.env.PAYMENT_VALIDATION_ALLOW_INSECURE || "false").toLowerCase() === "true";

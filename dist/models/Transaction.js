@@ -49,6 +49,7 @@ const TransactionSchema = new mongoose_1.Schema({
     transactionNumber: { type: String, required: false },
     referenceNumber: { type: String, required: false },
     status: { type: String, enum: ["pending", "completed", "failed", "cancelled"], required: true, default: "pending" },
+    verified: { type: Boolean, default: false },
     responseData: { type: mongoose_1.Schema.Types.Mixed },
     metadata: { type: mongoose_1.Schema.Types.Mixed },
 }, { timestamps: true });

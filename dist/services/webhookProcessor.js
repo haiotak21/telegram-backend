@@ -44,6 +44,9 @@ async function processStroWalletEvent(payload) {
         }
         throw e;
     }
+    // Debug: Log full payload and type
+    console.log('DEBUG: Webhook payload received:', JSON.stringify(payload));
+    console.log('DEBUG: Webhook event type:', type);
     const cardId = extractField(payload, ["card_id", "cardId", "id", "card"]);
     const customerEmail = extractField(payload, ["customerEmail", "email"]);
     const customerId = extractField(payload, ["customerId", "customer_id", "cardholderId", "card_holder_id"]);
@@ -54,12 +57,22 @@ async function processStroWalletEvent(payload) {
         "state",
         "kyc_state",
     ]));
+    // Debug: Log extracted fields
+    console.log('DEBUG: Extracted cardId:', cardId);
+    console.log('DEBUG: Extracted customerEmail:', customerEmail);
+    console.log('DEBUG: Extracted customerId:', customerId);
+    console.log('DEBUG: Extracted kycStatus:', kycStatus);
     const message = formatMessage(type, payload);
-    if (cardId)
-        await (0, botService_1.notifyByCardId)(cardId, message);
-    if (customerEmail)
-        await (0, botService_1.notifyByEmail)(customerEmail, message);
+    // Only send generic message for non-KYC events
+    if (!type.toLowerCase().includes('kyc')) {
+        if (cardId)
+            await (0, botService_1.notifyByCardId)(cardId, message);
+        if (customerEmail)
+            await (0, botService_1.notifyByEmail)(customerEmail, message);
+    }
     if (kycStatus && (customerId || customerEmail)) {
+        // Debug: Entering KYC notification logic
+        console.log('DEBUG: Entering KYC notification logic');
         const existing = await Customer_1.default.findOne({
             $or: [
                 ...(customerId ? [{ customerId }] : []),
@@ -76,9 +89,15 @@ async function processStroWalletEvent(payload) {
             }).lean();
             userId = user?.userId;
         }
+        // Debug: Log resolved userId
+        console.log('DEBUG: Resolved userId:', userId);
         if (userId) {
             const prevUser = await User_1.default.findOne({ userId }).lean();
             const previousStatus = normalizeKycStatus(existing?.kycStatus || prevUser?.kycStatus);
+            const lastNotifiedStatus = existing?.lastKycNotificationStatus;
+            // Debug: Log previous KYC status
+            console.log('DEBUG: Previous KYC status:', previousStatus);
+            console.log('DEBUG: Last notified KYC status:', lastNotifiedStatus);
             await Customer_1.default.findOneAndUpdate({ userId }, {
                 $set: {
                     customerId: customerId || existing?.customerId,
@@ -89,11 +108,31 @@ async function processStroWalletEvent(payload) {
             }, { upsert: true, new: true });
             await User_1.default.findOneAndUpdate({ userId }, { $set: { kycStatus } }, { new: true });
             const shouldNotify = (kycStatus === "approved" || kycStatus === "rejected") &&
-                kycStatus !== previousStatus;
+                kycStatus !== lastNotifiedStatus;
+            // Debug: Log notification decision
+            console.log('DEBUG: shouldNotify:', shouldNotify);
             if (shouldNotify) {
-                await (0, botService_1.notifyKycStatus)(userId, kycStatus).catch(() => { });
+                console.log(`DEBUG: Sending KYC notification to userId: ${userId}, status: ${kycStatus}`);
+                await (0, botService_1.notifyKycStatus)(userId, kycStatus).catch((err) => {
+                    console.error('Error sending KYC notification:', err);
+                });
+                await Customer_1.default.findOneAndUpdate({ userId }, {
+                    $set: {
+                        lastKycNotificationStatus: kycStatus,
+                        lastKycNotifiedAt: new Date(),
+                    },
+                }, { new: true });
             }
         }
+        else {
+            console.log('DEBUG: No userId found for notification');
+        }
+    }
+    else {
+        if (!kycStatus)
+            console.log('DEBUG: No kycStatus extracted, skipping notification logic');
+        if (!customerId && !customerEmail)
+            console.log('DEBUG: No customerId or customerEmail extracted, skipping notification logic');
     }
     if (type === "card.created" && cardId) {
         const data = payload?.data || payload;

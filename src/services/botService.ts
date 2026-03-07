@@ -16,6 +16,7 @@ import User from "../models/User";
 import Customer from "../models/Customer";
 import type { PaymentMethod } from "./paymentVerification";
 import { loadPricingConfig } from "./pricingService";
+import { creditVerifiedDeposit } from "./depositService";
 
 let bot: TelegramBot | null = null;
 type PendingAction =
@@ -117,7 +118,7 @@ const API_BASE = process.env.BOT_API_BASE || "http://localhost:3000/api/strowall
 const BACKEND_BASE = process.env.BOT_BACKEND_BASE || "http://localhost:3000";
 const EXPECTED_RECEIVER_NAME = (process.env.RECEIVER_NAME || process.env.CBE_RECEIVER_NAME || "Hailemariam Takele Mekonnen").trim();
 const EXPECTED_TELEBIRR_NAME = (process.env.TELEBIRR_RECEIVER_NAME || "Hayilemariyam Takele Mekonen").trim();
-const CBE_STRICT_RECEIVER = String(process.env.CBE_STRICT_RECEIVER || "false").toLowerCase() === "true";
+const CBE_STRICT_RECEIVER = String(process.env.CBE_STRICT_RECEIVER || "true").toLowerCase() === "true";
 const TELEBIRR_STRICT_RECEIVER = String(process.env.TELEBIRR_STRICT_RECEIVER || "true").toLowerCase() === "true";
 const EXPECTED_TELEBIRR_PHONE = (process.env.TELEBIRR_PHONE_NUMBER || "0985656670").trim();
 const EXPECTED_CBE_ACCOUNT = (process.env.CBE_ACCOUNT_NUMBER || "1000473027449").trim();
@@ -850,16 +851,9 @@ export async function initBot() {
 
       const normalizedTxn = normalizeTxnRef(txn, pending.method);
       try {
-        // Idempotency: only short-circuit if a successful verification already exists
-        const already = await Transaction.findOne({
-          transactionType: "verification",
-          userId: String(msg.chat.id),
-          paymentMethod: method,
-          status: "completed",
-          $or: [{ transactionNumber: normalizedTxn }, { referenceNumber: normalizedTxn }],
-        }).lean();
+        const already = await findUsedPaymentReference(method, normalizedTxn);
         if (already) {
-          await bot!.sendMessage(msg.chat.id, "ℹ️ You already verified this transaction.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+          await bot!.sendMessage(msg.chat.id, "❌ This payment reference has already been used.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
           clearPendingAction(msg.chat.id);
           return;
         }
@@ -914,30 +908,28 @@ export async function initBot() {
             const rawData = (b.raw?.data ?? b.raw ?? {}) as any;
             const verifiedKey = normalizeTxnRef(String(b.transactionNumber || normalizedTxn), method);
             const altKey = normalizeTxnRef(String(rawData?.reference || normalizedTxn), method);
-            // Record a pending deposit request for admin review (idempotent on transactionNumber)
-            const existingDeposit = await Transaction.findOne({
+            if (typeof amountNum !== "number" || amountNum <= 0) {
+              await bot!.sendMessage(msg.chat.id, "❌ Verification succeeded but amount is missing from receipt.", {
+                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+              });
+              clearPendingAction(msg.chat.id);
+              return;
+            }
+
+            const depositResult = await creditVerifiedDeposit({
               userId: String(msg.chat.id),
-              transactionType: "deposit",
+              paymentMethod: method,
+              amountEtb: amountNum,
               transactionNumber: verifiedKey,
-            }).lean();
-            if (!existingDeposit) {
-              try {
-                await Transaction.create({
-                  userId: String(msg.chat.id),
-                  transactionType: "deposit",
-                  paymentMethod: method,
-                  amount: amountNum ?? 0,
-                  amountEtb: amountNum,
-                  status: "pending",
-                  transactionNumber: verifiedKey,
-                  referenceNumber: altKey,
-                  responseData: b.raw ?? b,
-                });
-              } catch (depErr: any) {
-                if (depErr?.code !== 11000) {
-                  console.warn("deposit-recording-error", depErr?.message || depErr);
-                }
-              }
+              referenceNumber: altKey,
+              responseData: b.raw ?? b,
+            });
+            if (!depositResult.success) {
+              await bot!.sendMessage(msg.chat.id, `❌ Deposit error: ${depositResult.message || "Deposit failed"}`, {
+                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+              });
+              clearPendingAction(msg.chat.id);
+              return;
             }
 
             await Transaction.create({
@@ -954,12 +946,17 @@ export async function initBot() {
             depositSelections.delete(msg.chat.id);
             await bot!.sendMessage(
               msg.chat.id,
-              "✅ Payment verified. Please wait ~10 minutes for admin to approve and credit your account.",
+              [
+                "✅ Payment Verified",
+                "Your deposit has been credited automatically.",
+                depositResult.creditedUsdt != null ? `Credited: ${Number(depositResult.creditedUsdt).toFixed(2)} USDT` : undefined,
+                depositResult.newBalance != null ? `Wallet balance: ${Number(depositResult.newBalance).toFixed(2)} USDT` : undefined,
+              ].filter(Boolean).join("\n"),
               { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
             );
           } catch (createErr: any) {
             if (createErr?.code === 11000) {
-              await bot!.sendMessage(msg.chat.id, "ℹ️ You already verified this transaction.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+              await bot!.sendMessage(msg.chat.id, "❌ This payment reference has already been used.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
               clearPendingAction(msg.chat.id);
               return;
             }
@@ -996,15 +993,9 @@ export async function initBot() {
 
       const normalizedTxn = normalizeTxnRef(txn, pending.method);
       try {
-        const already = await Transaction.findOne({
-          transactionType: "card",
-          userId: String(msg.chat.id),
-          paymentMethod: method,
-          status: "completed",
-          $or: [{ transactionNumber: normalizedTxn }, { referenceNumber: normalizedTxn }],
-        }).lean();
+        const already = await findUsedPaymentReference(method, normalizedTxn);
         if (already) {
-          await bot!.sendMessage(msg.chat.id, "ℹ️ You already verified this transaction.", {
+          await bot!.sendMessage(msg.chat.id, "❌ This payment reference has already been used.", {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
           });
           clearPendingAction(msg.chat.id);
@@ -1076,7 +1067,10 @@ export async function initBot() {
           const user = await User.findOne({ userId: String(msg.chat.id) }).lean();
           const customer = await Customer.findOne({ userId: String(msg.chat.id) }).lean();
           if (!customer || customer.kycStatus !== "approved") {
-            await bot!.sendMessage(msg.chat.id, "❌ KYC is not approved. Please complete KYC before requesting a card.", {
+            await bot!.sendMessage(msg.chat.id, [
+              "✅ Payment Verified",
+              "Please complete KYC to activate your card request.",
+            ].join("\n"), {
               reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
             });
             clearPendingAction(msg.chat.id);
@@ -1092,16 +1086,7 @@ export async function initBot() {
             return;
           }
 
-          const pendingRequest = await CardRequest.findOne({ userId: String(msg.chat.id), status: "pending" }).lean();
-          if (pendingRequest) {
-            await bot!.sendMessage(msg.chat.id, "⏳ Your card request is already pending review.", {
-              reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-            });
-            clearPendingAction(msg.chat.id);
-            return;
-          }
-
-          await bot!.sendMessage(msg.chat.id, "✅ Payment verified. Submitting your card request...", {
+          await bot!.sendMessage(msg.chat.id, "✅ Payment verified. Creating your virtual card...", {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
           });
           cardRequestSelections.delete(msg.chat.id);
@@ -1459,12 +1444,15 @@ function namesMatch(expectedRaw: string, actualRaw: string) {
   const expected = normalizeName(expectedRaw).replace(/\s+/g, " ");
   const actual = normalizeName(actualRaw).replace(/\s+/g, " ");
   if (!expected || !actual) return false;
-  if (actual.includes(expected)) return true;
-  if (expected.includes(actual)) return true;
-  // Try first two tokens containment
-  const expParts = expected.split(" ").filter(Boolean).slice(0, 2).join(" ");
-  if (expParts && actual.includes(expParts)) return true;
-  return false;
+  return expected === actual;
+}
+
+async function findUsedPaymentReference(paymentMethod: PaymentMethod, normalizedTxn: string) {
+  return await Transaction.findOne({
+    paymentMethod,
+    transactionType: { $in: ["deposit", "verification", "card"] },
+    $or: [{ transactionNumber: normalizedTxn }, { referenceNumber: normalizedTxn }],
+  }).lean();
 }
 
 function digitsMatch(expectedRaw: string, actualRaw: string) {
@@ -1526,7 +1514,7 @@ function validateVerificationResult(params: {
   const strictNameCheck = method === "telebirr" ? TELEBIRR_STRICT_RECEIVER : CBE_STRICT_RECEIVER;
   if (strictNameCheck && expectedName) {
     if (!receiverName) errors.push("Receiver name missing on receipt");
-    else if (!namesMatch(expectedName, receiverName)) errors.push("Receiver name does not match expected recipient");
+    else if (!namesMatch(expectedName, receiverName)) errors.push("Receiver name does not match the expected payment account.");
   }
 
   if (method === "telebirr" && EXPECTED_TELEBIRR_PHONE) {
@@ -1556,8 +1544,8 @@ function validateVerificationResult(params: {
 
   if (selected && selected.method === method) {
     const expectedAmt = selected.amount;
-    if (typeof amount !== "number") errors.push("Amount missing on provider receipt");
-    else if (Math.abs(amount - expectedAmt) > 0.01) errors.push(`Amount mismatch: expected ${expectedAmt} ETB, got ${amount} ETB`);
+    if (typeof amount !== "number") errors.push("Payment amount is missing in provider response.");
+    else if (Math.abs(amount - expectedAmt) > 0.01) errors.push("Payment amount does not match the selected deposit amount.");
   }
 
   return errors;
@@ -1715,7 +1703,7 @@ async function handleCardRequest(chatId: number, message?: any) {
 
   const pendingRequest = await CardRequest.findOne({ userId, status: "pending" }).lean();
   if (pendingRequest) {
-    await bot!.sendMessage(chatId, "⏳ Your card request is already pending review.", {
+    await bot!.sendMessage(chatId, "⏳ Your card request is already being processed.", {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
     return;
@@ -1765,7 +1753,11 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
       customerEmail: customer?.email || user?.customerEmail,
     });
     if (resp?.data?.ok) {
-      await bot!.sendMessage(Number(userId), "✅ Your card request has been submitted to StroWallet. You'll be notified once approved.", {
+      await bot!.sendMessage(Number(userId), [
+        "✅ Payment Verified",
+        "Your virtual card has been created successfully.",
+        resp?.data?.data?.cardId ? `Card ID: ${resp.data.data.cardId}` : undefined,
+      ].filter(Boolean).join("\n"), {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
     } else {

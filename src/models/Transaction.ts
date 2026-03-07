@@ -18,6 +18,7 @@ export interface ITransaction extends Document {
   transactionNumber?: string;
   referenceNumber?: string;
   status: TransactionStatus;
+  verified?: boolean;
   responseData?: any;
   metadata?: Record<string, any>;
   createdAt: Date;
@@ -39,6 +40,7 @@ const TransactionSchema = new Schema<ITransaction>(
     transactionNumber: { type: String, required: false },
     referenceNumber: { type: String, required: false },
     status: { type: String, enum: ["pending", "completed", "failed", "cancelled"], required: true, default: "pending" },
+    verified: { type: Boolean, default: false },
     responseData: { type: Schema.Types.Mixed },
     metadata: { type: Schema.Types.Mixed },
   },

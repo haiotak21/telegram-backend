@@ -81,7 +81,10 @@ app.post("/api/webhook/strowallet", express_1.default.raw({ type: "*/*" }), (req
             }
         }
         // Persist + notify
-        (0, webhookProcessor_1.processStroWalletEvent)(payload).catch((e) => console.error("Webhook processing error:", e));
+        console.log("DEBUG: About to call processStroWalletEvent");
+        (0, webhookProcessor_1.processStroWalletEvent)(payload)
+            .then(() => console.log("DEBUG: processStroWalletEvent completed"))
+            .catch((e) => console.error("Webhook processing error:", e));
         console.log("StroWallet webhook received:", payload?.id, payload?.type);
         return (0, apiResponse_1.ok)(res, {});
     }

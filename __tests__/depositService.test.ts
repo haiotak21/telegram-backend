@@ -36,20 +36,40 @@ const asAny = (v: any) => v;
 describe('processDeposit', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    // Default mocked DB lookups return objects with a `lean()` helper
-    (Transaction.findOne as any).mockReturnValue({ lean: jest.fn().mockResolvedValue(null) });
-    (User.findOne as any).mockReturnValue({ lean: jest.fn().mockResolvedValue(null) });
+    // Default mocked DB lookups support both `.lean()` and `.session(...).lean()` forms.
+    (Transaction.findOne as any).mockImplementation(() => ({
+      lean: jest.fn().mockResolvedValue(null),
+      session: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue(null) }),
+    }));
+    (User.findOne as any).mockImplementation(() => ({
+      lean: jest.fn().mockResolvedValue({ balance: 0 }),
+      session: jest.fn().mockResolvedValue({ userId: 'u-default', balance: 0 }),
+    }));
+    (User.findOneAndUpdate as any).mockResolvedValue({ userId: 'u-default', balance: 0.45454545 });
   });
 
-  it('records pending when fake-topup is disabled and provider verifies', async () => {
+  it('credits deposit immediately when provider verifies', async () => {
     (loadPricingConfig as any).mockResolvedValue({});
     (quoteDeposit as any).mockReturnValue({ creditedUsdt: 0.45454545, rate: 220, feeEtb: 0 });
-    (verifyPayment as any).mockResolvedValue({ body: { success: true, amount: 100 } });
+    (verifyPayment as any).mockResolvedValue({
+      body: {
+        success: true,
+        amount: 100,
+        transactionNumber: 'SIM2',
+        raw: { data: { creditedPartyName: 'Hayilemariyam Takele Mekonen' } },
+      },
+    });
+    (User.findOne as any).mockImplementation(() => ({
+      lean: jest.fn().mockResolvedValue({ balance: 0 }),
+      session: jest.fn().mockResolvedValue({ userId: 'u2', balance: 0 }),
+    }));
+    (User.findOneAndUpdate as any).mockResolvedValue({ userId: 'u2', balance: 0.45454545 });
     (Transaction.create as any).mockResolvedValue([{ _id: 'txPending' }]);
 
     const res = await processDeposit({ userId: 'u2', paymentMethod: 'telebirr', amount: 100, transactionNumber: 'SIM2' });
     expect(res.success).toBe(true);
-    expect(res.message).toMatch(/Awaiting admin approval/);
+    expect(res.status).toBe('completed');
+    expect(res.message).toMatch(/credited successfully/i);
   });
 
   it('returns failure when provider verification fails', async () => {
@@ -66,12 +86,35 @@ describe('processDeposit', () => {
   it('returns failure when provider amount mismatches', async () => {
     (loadPricingConfig as any).mockResolvedValue({});
     (quoteDeposit as any).mockReturnValue({ creditedUsdt: 0.45454545, rate: 220, feeEtb: 0 });
-    (verifyPayment as any).mockResolvedValue({ body: { success: true, amount: 50, raw: {} } });
+    (verifyPayment as any).mockResolvedValue({
+      body: {
+        success: true,
+        amount: 50,
+        raw: { data: { creditedPartyName: 'Hayilemariyam Takele Mekonen' } },
+      },
+    });
     (Transaction.create as any).mockResolvedValue([{ _id: 'txFail2' }]);
 
     const res = await processDeposit({ userId: 'u4', paymentMethod: 'telebirr', amount: 100, transactionNumber: 'SIM4' });
     expect(res.success).toBe(false);
-    expect(res.message).toMatch(/Amount mismatch/);
+    expect(res.message).toMatch(/selected deposit amount/i);
+  });
+
+  it('returns failure when receiver name mismatches expected account', async () => {
+    (loadPricingConfig as any).mockResolvedValue({});
+    (quoteDeposit as any).mockReturnValue({ creditedUsdt: 0.45454545, rate: 220, feeEtb: 0 });
+    (verifyPayment as any).mockResolvedValue({
+      body: {
+        success: true,
+        amount: 100,
+        raw: { data: { creditedPartyName: 'John' } },
+      },
+    });
+    (Transaction.create as any).mockResolvedValue([{ _id: 'txFailReceiver' }]);
+
+    const res = await processDeposit({ userId: 'u6', paymentMethod: 'telebirr', amount: 100, transactionNumber: 'SIM6' });
+    expect(res.success).toBe(false);
+    expect(res.message).toBe('Receiver name does not match the expected payment account.');
   });
 
   it('short-circuits when an existing completed deposit is found', async () => {
@@ -83,6 +126,7 @@ describe('processDeposit', () => {
 
     const res = await processDeposit({ userId: 'u5', paymentMethod: 'telebirr', amount: 100, transactionNumber: 'SIM5' });
     expect(res.success).toBe(true);
+    expect(res.status).toBe('completed');
     expect(res.message).toMatch(/Deposit already processed/);
     expect(res.newBalance).toBeCloseTo(1.23);
   });

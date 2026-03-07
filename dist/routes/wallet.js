@@ -128,7 +128,7 @@ router.get("/transactions/recent", requireAdmin, async (req, res) => {
     try {
         const limitRaw = Number(req.query.limit ?? 20);
         const limit = Number.isFinite(limitRaw) && limitRaw > 0 && limitRaw <= 200 ? limitRaw : 20;
-        const items = await Transaction_1.default.find({ transactionType: "deposit", status: { $in: ["pending", "waiting"] } })
+        const items = await Transaction_1.default.find({ transactionType: "deposit" })
             .sort({ createdAt: -1 })
             .limit(limit)
             .lean();
