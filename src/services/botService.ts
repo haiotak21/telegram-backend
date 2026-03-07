@@ -1739,7 +1739,7 @@ async function handleCardRequest(chatId: number, message?: any) {
   if (shouldSuppressOutgoing(chatId, "card_request")) return;
   const user = await User.findOne({ userId: String(chatId) }).lean();
   const customerRecord = await Customer.findOne({ userId: String(chatId) }).lean();
-  const kycStatus = customerRecord?.kycStatus || "pending";
+  const kycStatus = resolveKycStatus(user, customerRecord);
 
   const userId = String(chatId);
   const existingCard = await Card.findOne({ userId }).lean();
@@ -1764,7 +1764,9 @@ async function handleCardRequest(chatId: number, message?: any) {
       });
       return;
     }
-    await startKycFlow(chatId, message);
+    await bot!.sendMessage(chatId, "❌ Please first verify /kyc", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
     return;
   }
 
@@ -1843,7 +1845,7 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
 async function startCreateCardFlow(chatId: number, message?: any) {
   const user = await User.findOne({ userId: String(chatId) }).lean();
   const customer = await Customer.findOne({ userId: String(chatId) }).lean();
-  const status = customer?.kycStatus || "pending";
+  const status = resolveKycStatus(user, customer);
   if (status !== "approved") {
     if (status === "pending") {
       await bot!.sendMessage(chatId, "⏳ KYC pending verification. Please wait before creating a card.", {
