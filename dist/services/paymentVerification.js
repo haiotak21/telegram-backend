@@ -231,13 +231,20 @@ async function verifyPayment(input) {
         const verifierResult = await verifyViaVerifierApiWithRetry({
             paymentMethod,
             reference: effectiveTxn,
-            transactionNumber: normalizedTxn,
+            transactionNumber: paymentMethod === "cbe" ? effectiveTxn : normalizedTxn,
             cbeSuffix: paymentMethod === "cbe" ? suffixOverride || inferCbeSuffixFromEnv() : undefined,
         });
+        if (paymentMethod === "telebirr" && shouldFallbackToStandaloneTelebirr(verifierResult)) {
+            const fallback = await runTelebirrVerificationStandalone(normalizedTxn);
+            if (fallback.body.success) {
+                console.log("Telebirr standalone fallback succeeded after verifier API failure.");
+                return fallback;
+            }
+        }
         // Some verifier API CBE backends fail to render the receipt PDF via Puppeteer.
         // Fall back to the in-process verifier to keep CBE verification usable.
         if (paymentMethod === "cbe" && shouldFallbackToCustomCbe(verifierResult)) {
-            const fallback = await runCustomCbeVerificationStandalone(effectiveTxn, normalizedTxn);
+            const fallback = await runCustomCbeVerificationStandalone(effectiveTxn, effectiveTxn);
             if (fallback.body.success) {
                 console.log("CBE fallback verifier succeeded after verifier API failure.");
                 return fallback;
@@ -247,7 +254,7 @@ async function verifyPayment(input) {
     }
     // Always use the in-process custom verifier for CBE
     if (paymentMethod === "cbe") {
-        return await runCustomCbeVerificationStandalone(effectiveTxn, normalizedTxn);
+        return await runCustomCbeVerificationStandalone(effectiveTxn, effectiveTxn);
     }
     // Telebirr now uses the in-process receipt verifier
     return await runTelebirrVerificationStandalone(normalizedTxn);
@@ -264,8 +271,8 @@ function getVerifierApiKey() {
     return (process.env.VERIFY_API_KEY || process.env.PAYMENT_VALIDATION_API_KEY || "").trim();
 }
 function getVerifierTimeoutMs() {
-    const n = Number(process.env.VERIFY_API_TIMEOUT_MS || 15000);
-    return Number.isFinite(n) && n > 0 ? n : 15000;
+    const n = Number(process.env.VERIFY_API_TIMEOUT_MS || 45000);
+    return Number.isFinite(n) && n > 0 ? n : 45000;
 }
 function getVerifierRetryConfig() {
     const attemptsRaw = Number(process.env.VERIFY_API_RETRY_ATTEMPTS || 3);
@@ -291,6 +298,22 @@ function shouldFallbackToCustomCbe(result) {
         message.includes("puppeteer") ||
         message.includes("pdf detected") ||
         message.includes("navigation"));
+}
+function shouldFallbackToStandaloneTelebirr(result) {
+    if (result.body.success)
+        return false;
+    const enabled = String(process.env.TELEBIRR_FALLBACK_ON_VERIFY_API_FAILURE || "true").toLowerCase() === "true";
+    if (!enabled)
+        return false;
+    const message = String(result.body.message || "").toLowerCase();
+    return (message.includes("timeout") ||
+        message.includes("etimedout") ||
+        message.includes("econnreset") ||
+        message.includes("gateway") ||
+        message.includes("temporar") ||
+        message.includes("network") ||
+        message.includes("puppeteer") ||
+        message.includes("no pdf"));
 }
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -631,10 +654,50 @@ function extractTransactionId(raw) {
 }
 // Split CBE references that come as "<ref>&<accountSuffix>" (e.g., BranchReceipt links)
 function parseCbeComposite(raw) {
-    const decoded = decodeURIComponent(raw.trim());
-    const parts = decoded.split(/[&]/).filter(Boolean);
-    if (parts.length >= 2) {
-        return { reference: parts[0], suffixOverride: parts[1] };
+    const trimmed = (raw || "").trim();
+    if (!trimmed)
+        return { reference: "" };
+    let decoded = trimmed;
+    try {
+        decoded = decodeURIComponent(trimmed);
     }
-    return { reference: decoded };
+    catch {
+        decoded = trimmed;
+    }
+    // Accept URL forms like: https://apps.cbe.com.et:100/?id=FT26066RPTJ473027449
+    let candidate = decoded;
+    try {
+        const url = new URL(decoded);
+        const id = (url.searchParams.get("id") || "").trim();
+        if (id) {
+            candidate = id;
+        }
+        else {
+            const parts = url.pathname.split("/").filter(Boolean);
+            if (parts.length)
+                candidate = parts[parts.length - 1];
+        }
+    }
+    catch {
+        // Not a URL; continue with decoded text.
+    }
+    const text = String(candidate || decoded || "").trim();
+    // Accept explicit composite: FT...&73027449
+    const amp = text.split("&").map((p) => p.trim()).filter(Boolean);
+    if (amp.length >= 2) {
+        const ref = (amp[0].match(/FT[A-Z0-9]{10}/i)?.[0] || amp[0]).toUpperCase();
+        const suffix = (amp[1].match(/\d{8}/)?.[0] || "").trim();
+        return suffix ? { reference: ref, suffixOverride: suffix } : { reference: ref };
+    }
+    // Accept concatenated value: FT26066RPTJ473027449 => FT26066RPTJ4 + 73027449
+    const concat = text.match(/(FT[A-Z0-9]{10})(\d{8})$/i);
+    if (concat) {
+        return { reference: concat[1].toUpperCase(), suffixOverride: concat[2] };
+    }
+    // Accept plain 12-char reference: FT26066RPTJ4
+    const refOnly = text.match(/FT[A-Z0-9]{10}/i);
+    if (refOnly) {
+        return { reference: refOnly[0].toUpperCase() };
+    }
+    return { reference: text.toUpperCase() };
 }

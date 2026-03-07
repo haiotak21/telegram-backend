@@ -1387,10 +1387,13 @@ function buildVerificationHint(method: PaymentMethod) {
     ].join("\n")
     : [
       "Send your CBE receipt reference.",
-      "If your link looks like https://apps.cbe.com.et:100/BranchReceipt/FT26009L330J&73027449, send either:",
+      "You can send any of these formats:",
+      "- https://apps.cbe.com.et:100/?id=FT26066RPTJ473027449",
+      "- FT26066RPTJ473027449",
+      "- FT26066RPTJ4&73027449",
       "- The full link, or",
-      "- Just: FT26009L330J&73027449",
-      "We will extract the reference for you.",
+      "- Just the reference: FT26066RPTJ4",
+      "We will extract reference/suffix automatically.",
       "Or tap /cancel to stop.",
     ].join("\n");
 }
@@ -1413,11 +1416,38 @@ function normalizeTxnRef(raw: string, method: PaymentMethod) {
     } catch {
       decoded = trimmed; // fall back to raw if malformed URI
     }
-    const ft = decoded.match(/FT[A-Z0-9]{10,18}/i);
-    if (ft) return ft[0].toUpperCase();
-    const parts = decoded.split(/&/).filter(Boolean);
-    if (parts.length >= 1) return parts[0].toUpperCase();
-    return decoded.toUpperCase();
+
+    let candidate = decoded;
+    try {
+      const url = new URL(decoded);
+      const id = (url.searchParams.get("id") || "").trim();
+      if (id) {
+        candidate = id;
+      } else {
+        const parts = url.pathname.split("/").filter(Boolean);
+        if (parts.length) candidate = parts[parts.length - 1];
+      }
+    } catch {
+      candidate = decoded;
+    }
+
+    const text = String(candidate || decoded).trim();
+    const amp = text.split("&").map((p) => p.trim()).filter(Boolean);
+    if (amp.length >= 2) {
+      const ref = (amp[0].match(/FT[A-Z0-9]{10}/i)?.[0] || amp[0]).toUpperCase();
+      const suffix = (amp[1].match(/\d{8}/)?.[0] || "").trim();
+      return suffix ? `${ref}&${suffix}` : ref;
+    }
+
+    const concat = text.match(/(FT[A-Z0-9]{10})(\d{8})$/i);
+    if (concat) {
+      return `${concat[1].toUpperCase()}&${concat[2]}`;
+    }
+
+    const refOnly = text.match(/FT[A-Z0-9]{10}/i);
+    if (refOnly) return refOnly[0].toUpperCase();
+
+    return text.toUpperCase();
   }
   // Telebirr: attempt to extract reference from SMS text or embedded link
   try {
