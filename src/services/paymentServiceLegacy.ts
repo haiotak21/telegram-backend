@@ -1,7 +1,7 @@
 import axios from "axios";
 import https from "https";
 import { verify as verifyCbeCustom, TransactionDetail as CbeTransactionDetail, VerifyFailure as CbeVerifyFailure } from "cbe-verifier-custom";
-import { runTelebirrVerificationStandalone } from "./paymentVerification";
+import { verifyPayment } from "./paymentVerification";
 
 export type LegacyPaymentMethod = "telebirr" | "cbe";
 
@@ -60,7 +60,7 @@ function getPaymentSettings(method: LegacyPaymentMethod): PaymentSettings | null
 // --- Telebirr ---
 export async function validateTelebirrTransaction(transactionNumber: string) {
   const normalizedTxn = extractTransactionId(transactionNumber);
-  const result = await runTelebirrVerificationStandalone(normalizedTxn);
+  const result = await verifyPayment({ paymentMethod: "telebirr", transactionNumber: normalizedTxn });
   if (result.body.success) {
     const transactionDetails = (result.body.raw as any)?.transactionDetails || (result.body.raw as any)?.data || result.body.raw || {};
     return {
@@ -90,6 +90,23 @@ function normalizeTelebirr(data: any) {
 export async function validateCBETransaction(transactionNumber: string) {
   const normalizedTxn = extractTransactionId(transactionNumber);
   if (!normalizedTxn) return { success: false, message: "CBE transaction number is required" };
+
+  // Keep legacy endpoint behavior aligned with centralized verifier flow.
+  const centralized = await verifyPayment({ paymentMethod: "cbe", transactionNumber: normalizedTxn });
+  if (centralized.body.success) {
+    const transactionDetails = (centralized.body.raw as any)?.transactionDetails || (centralized.body.raw as any)?.data || centralized.body.raw || {};
+    return {
+      success: true,
+      message: centralized.body.message,
+      transactionDetails,
+    };
+  }
+
+  // Fall back to historical custom CBE verifier when centralized flow fails.
+  const skipPrimary = String(process.env.SKIP_PRIMARY_VERIFICATION || "false").toLowerCase() === "true";
+  if (skipPrimary) {
+    return { success: false, message: centralized.body.message || "CBE validation failed" };
+  }
 
   const accountNumber = sanitizeCbeAccountNumber(process.env.CBE_ACCOUNT_NUMBER);
   const timeoutMs = parseTimeout(process.env.CBE_VERIFICATION_TIMEOUT_MS);
