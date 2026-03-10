@@ -5,7 +5,7 @@ import { TelegramLink } from "../models/TelegramLink";
 import Transaction from "../models/Transaction";
 import User from "../models/User";
 import Customer from "../models/Customer";
-import { notifyByCardId, notifyByEmail, notifyCardStatusChanged, notifyKycStatus } from "./botService";
+import { notifyByCardId, notifyByEmail, notifyCardRequestApproved, notifyCardStatusChanged, notifyKycStatus } from "./botService";
 
 function extractField(obj: any, keys: string[]): string | undefined {
   if (!obj || typeof obj !== "object") return undefined;
@@ -21,7 +21,7 @@ function extractField(obj: any, keys: string[]): string | undefined {
 
 export async function processStroWalletEvent(payload: any) {
   const eventId = String(payload?.id || payload?.eventId || "");
-  const type = String(payload?.type || "unknown");
+  const type = String(payload?.type || payload?.event || "unknown");
   const created = typeof payload?.created === "number" ? payload.created : undefined;
 
   if (!eventId) {
@@ -45,15 +45,18 @@ export async function processStroWalletEvent(payload: any) {
   console.log('DEBUG: Webhook event type:', type);
 
   const cardId = extractField(payload, ["card_id", "cardId", "id", "card"]);
-  const customerEmail = extractField(payload, ["customerEmail", "email"]);
+  const customerEmail = extractField(payload, ["customerEmail", "customer_email", "email"]);
   const customerId = extractField(payload, ["customerId", "customer_id", "cardholderId", "card_holder_id"]);
-  const kycStatus = normalizeKycStatus(extractField(payload, [
+  const explicitKycStatus = extractField(payload, [
     "kycStatus",
-    "status",
     "verificationStatus",
-    "state",
     "kyc_state",
-  ]));
+  ]);
+  const eventLooksLikeKyc = type.toLowerCase().includes("kyc");
+  const genericKycStatus = eventLooksLikeKyc
+    ? extractField(payload, ["status", "state"])
+    : undefined;
+  const kycStatus = normalizeKycStatus(explicitKycStatus || genericKycStatus);
 
   // Debug: Log extracted fields
   console.log('DEBUG: Extracted cardId:', cardId);
@@ -62,6 +65,7 @@ export async function processStroWalletEvent(payload: any) {
   console.log('DEBUG: Extracted kycStatus:', kycStatus);
 
   const message = formatMessage(type, payload);
+  const lowerType = type.toLowerCase();
 
   // Only send generic message for non-KYC events
   if (!type.toLowerCase().includes('kyc')) {
@@ -148,7 +152,7 @@ export async function processStroWalletEvent(payload: any) {
     if (!customerId && !customerEmail) console.log('DEBUG: No customerId or customerEmail extracted, skipping notification logic');
   }
 
-  if (type === "card.created" && cardId) {
+  if ((lowerType === "card.created" || lowerType.includes("virtualcard.created")) && cardId) {
     const data = payload?.data || payload;
     const userId = await resolveUserId(customerEmail, cardId);
     await Card.findOneAndUpdate(
@@ -201,6 +205,15 @@ export async function processStroWalletEvent(payload: any) {
         { $set: { cardId, status: "approved" } },
         { new: true }
       );
+
+      if (userId) {
+        await notifyCardRequestApproved(userId, {
+          cardId,
+          cardType: data?.card_type || data?.cardType || data?.brand,
+          nameOnCard: data?.name_on_card || data?.nameOnCard || data?.name,
+          raw: payload,
+        }).catch(() => {});
+      }
     }
   }
 
@@ -252,7 +265,12 @@ export async function processStroWalletEvent(payload: any) {
     }
   }
 
-  if (type === "transaction.posted" && cardId) {
+  const isTransactionEvent =
+    lowerType === "transaction.posted" ||
+    lowerType.startsWith("virtualcard.transaction.") ||
+    lowerType.startsWith("card.transaction.");
+
+  if (isTransactionEvent && cardId) {
     const data = payload?.data || payload;
     const amountRaw = extractField(payload, ["amount", "transactionAmount", "total", "value"]);
     const amountValue = amountRaw ? Number(amountRaw) : undefined;

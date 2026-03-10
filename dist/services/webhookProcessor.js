@@ -28,7 +28,7 @@ function extractField(obj, keys) {
 }
 async function processStroWalletEvent(payload) {
     const eventId = String(payload?.id || payload?.eventId || "");
-    const type = String(payload?.type || "unknown");
+    const type = String(payload?.type || payload?.event || "unknown");
     const created = typeof payload?.created === "number" ? payload.created : undefined;
     if (!eventId) {
         // store anyway using random to avoid collisions
@@ -48,21 +48,25 @@ async function processStroWalletEvent(payload) {
     console.log('DEBUG: Webhook payload received:', JSON.stringify(payload));
     console.log('DEBUG: Webhook event type:', type);
     const cardId = extractField(payload, ["card_id", "cardId", "id", "card"]);
-    const customerEmail = extractField(payload, ["customerEmail", "email"]);
+    const customerEmail = extractField(payload, ["customerEmail", "customer_email", "email"]);
     const customerId = extractField(payload, ["customerId", "customer_id", "cardholderId", "card_holder_id"]);
-    const kycStatus = normalizeKycStatus(extractField(payload, [
+    const explicitKycStatus = extractField(payload, [
         "kycStatus",
-        "status",
         "verificationStatus",
-        "state",
         "kyc_state",
-    ]));
+    ]);
+    const eventLooksLikeKyc = type.toLowerCase().includes("kyc");
+    const genericKycStatus = eventLooksLikeKyc
+        ? extractField(payload, ["status", "state"])
+        : undefined;
+    const kycStatus = normalizeKycStatus(explicitKycStatus || genericKycStatus);
     // Debug: Log extracted fields
     console.log('DEBUG: Extracted cardId:', cardId);
     console.log('DEBUG: Extracted customerEmail:', customerEmail);
     console.log('DEBUG: Extracted customerId:', customerId);
     console.log('DEBUG: Extracted kycStatus:', kycStatus);
     const message = formatMessage(type, payload);
+    const lowerType = type.toLowerCase();
     // Only send generic message for non-KYC events
     if (!type.toLowerCase().includes('kyc')) {
         if (cardId)
@@ -134,7 +138,7 @@ async function processStroWalletEvent(payload) {
         if (!customerId && !customerEmail)
             console.log('DEBUG: No customerId or customerEmail extracted, skipping notification logic');
     }
-    if (type === "card.created" && cardId) {
+    if ((lowerType === "card.created" || lowerType.includes("virtualcard.created")) && cardId) {
         const data = payload?.data || payload;
         const userId = await resolveUserId(customerEmail, cardId);
         await Card_1.default.findOneAndUpdate({ cardId }, {
@@ -168,6 +172,14 @@ async function processStroWalletEvent(payload) {
                     ...(customerEmail ? [{ customerEmail }] : []),
                 ],
             }, { $set: { cardId, status: "approved" } }, { new: true });
+            if (userId) {
+                await (0, botService_1.notifyCardRequestApproved)(userId, {
+                    cardId,
+                    cardType: data?.card_type || data?.cardType || data?.brand,
+                    nameOnCard: data?.name_on_card || data?.nameOnCard || data?.name,
+                    raw: payload,
+                }).catch(() => { });
+            }
         }
     }
     if ((type === "card.frozen" || type === "card.unfrozen" || type === "card.unfreeze") && cardId) {
@@ -203,7 +215,10 @@ async function processStroWalletEvent(payload) {
             await (0, botService_1.notifyByCardId)(cardId, lines.join("\n")).catch(() => { });
         }
     }
-    if (type === "transaction.posted" && cardId) {
+    const isTransactionEvent = lowerType === "transaction.posted" ||
+        lowerType.startsWith("virtualcard.transaction.") ||
+        lowerType.startsWith("card.transaction.");
+    if (isTransactionEvent && cardId) {
         const data = payload?.data || payload;
         const amountRaw = extractField(payload, ["amount", "transactionAmount", "total", "value"]);
         const amountValue = amountRaw ? Number(amountRaw) : undefined;

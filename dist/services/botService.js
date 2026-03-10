@@ -1156,7 +1156,21 @@ async function notifyKycStatus(userId, status) {
     }
 }
 async function pollPendingKycUpdates() {
-    return { checked: 0, updated: 0 };
+    const pendingCustomers = await Customer_1.default.find({ kycStatus: "pending" }).lean();
+    let checked = 0;
+    let updated = 0;
+    for (const customer of pendingCustomers) {
+        const user = await User_1.default.findOne({ userId: String(customer.userId) }).lean();
+        if (!user)
+            continue;
+        checked += 1;
+        const before = normalizeKycStatus(customer.kycStatus || user.kycStatus);
+        const after = await refreshKycStatusFromStroWallet(user);
+        if (after && after !== before) {
+            updated += 1;
+        }
+    }
+    return { checked, updated };
 }
 function buildInstanceId() {
     const replica = process.env.RAILWAY_REPLICA_ID || process.env.REPLICA_ID || "none";
@@ -2512,8 +2526,9 @@ async function submitKyc(chatId, session) {
 }
 async function refreshKycStatusFromStroWallet(user) {
     try {
-        const customerId = user?.strowalletCustomerId;
-        const customerEmail = user?.customerEmail;
+        const existingCustomer = await Customer_1.default.findOne({ userId: String(user?.userId) }).lean();
+        const customerId = user?.strowalletCustomerId || existingCustomer?.customerId;
+        const customerEmail = user?.customerEmail || existingCustomer?.email;
         if (!customerId && !customerEmail)
             return undefined;
         const resp = await callStroWallet("getcardholder", "get", {
@@ -2533,8 +2548,26 @@ async function refreshKycStatusFromStroWallet(user) {
             data?.data?.verificationStatus ||
             data?.data?.state;
         const normalized = normalizeKycStatus(statusRaw);
+        const previous = normalizeKycStatus(existingCustomer?.kycStatus || user?.kycStatus);
+        const userId = String(user.userId);
         if ((normalized && normalized !== user?.kycStatus) || (providerCustomerId && !user?.strowalletCustomerId)) {
-            await User_1.default.findOneAndUpdate({ userId: String(user.userId) }, { $set: { kycStatus: normalized || user?.kycStatus, ...(providerCustomerId ? { strowalletCustomerId: providerCustomerId } : {}) } }, { new: true });
+            await User_1.default.findOneAndUpdate({ userId }, { $set: { kycStatus: normalized || user?.kycStatus, ...(providerCustomerId ? { strowalletCustomerId: providerCustomerId } : {}) } }, { new: true });
+        }
+        if (normalized || providerCustomerId) {
+            await Customer_1.default.findOneAndUpdate({ userId }, {
+                $set: {
+                    ...(providerCustomerId ? { customerId: providerCustomerId } : {}),
+                    ...(normalized ? { kycStatus: normalized } : {}),
+                    ...(normalized === "approved" ? { approvedAt: new Date() } : {}),
+                },
+            }, { new: true, upsert: true });
+        }
+        if (normalized && normalized !== previous && (normalized === "approved" || normalized === "rejected")) {
+            const lastNotified = existingCustomer?.lastKycNotificationStatus;
+            if (lastNotified !== normalized) {
+                await notifyKycStatus(userId, normalized).catch(() => { });
+                await Customer_1.default.findOneAndUpdate({ userId }, { $set: { lastKycNotificationStatus: normalized, lastKycNotifiedAt: new Date() } }, { new: true, upsert: true });
+            }
         }
         return normalized;
     }
@@ -2568,7 +2601,12 @@ async function sendKycStatus(chatId) {
         User_1.default.findOne({ userId: String(chatId) }).lean(),
         Customer_1.default.findOne({ userId: String(chatId) }).lean(),
     ]);
-    const status = resolveKycStatus(user, customer);
+    let status = resolveKycStatus(user, customer);
+    if (user && status !== "approved" && status !== "rejected") {
+        const refreshed = await refreshKycStatusFromStroWallet(user);
+        if (refreshed)
+            status = refreshed;
+    }
     if (status === "not_started") {
         await bot.sendMessage(chatId, "No KYC record found. Use /kyc to submit.", {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },

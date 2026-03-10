@@ -29,7 +29,7 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 connectDB().catch((e) => console.error("DB init failed:", e));
 initBot().catch((e) => console.error("Bot init failed:", e));
 
-const kycPollIntervalMs = Number(process.env.KYC_POLL_INTERVAL_MS || 0);
+const kycPollIntervalMs = Number(process.env.KYC_POLL_INTERVAL_MS || 60000);
 let kycPollRunning = false;
 if (Number.isFinite(kycPollIntervalMs) && kycPollIntervalMs > 0) {
   setInterval(async () => {
