@@ -1,13 +1,16 @@
 import express from "express";
 import axios, { AxiosError } from "axios";
 import { z } from "zod";
+import { v2 as cloudinary } from "cloudinary";
 import User from "../models/User";
 import Customer from "../models/Customer";
 import Card from "../models/Card";
 import CardRequest from "../models/CardRequest";
+import BroadcastJob from "../models/BroadcastJob";
 import { TelegramLink } from "../models/TelegramLink";
 import Transaction from "../models/Transaction";
 import { notifyCardStatusChanged } from "../services/botService";
+import { createBroadcastJob, getBroadcastTargetCount } from "../services/broadcastService";
 import { auditCardTransactions, getReconciliationSummary, reconcileAllCards, reconcileCard } from "../services/reconciliationService";
 import { ok, fail } from "../utils/apiResponse";
 
@@ -148,6 +151,33 @@ const CardLinkSchema = z
     message: "customerEmail or userId is required",
   });
 
+const BroadcastFilterSchema = z.enum(["all", "kyc_approved", "balance_positive"]);
+
+const BroadcastCreateSchema = z.object({
+  messageText: z.string().min(1).max(4096),
+  imageUrl: z.string().url().optional(),
+  targetFilter: BroadcastFilterSchema,
+  createdBy: z.string().optional(),
+});
+
+const BroadcastUploadSchema = z.object({
+  imageData: z.string().min(1),
+  fileName: z.string().optional(),
+  mimeType: z.string().optional(),
+});
+
+function ensureCloudinary() {
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+  const apiKey = process.env.CLOUDINARY_API_KEY;
+  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  if (!cloudName || !apiKey || !apiSecret) {
+    const err: any = new Error("Cloudinary is not configured");
+    err.status = 500;
+    throw err;
+  }
+  cloudinary.config({ cloud_name: cloudName, api_key: apiKey, api_secret: apiSecret, secure: true });
+}
+
 router.get("/stats", requireAdmin, async (_req, res) => {
   try {
     const [usersTotal, kycApproved, cardHolders, transactionsTotal] = await Promise.all([
@@ -157,6 +187,117 @@ router.get("/stats", requireAdmin, async (_req, res) => {
       Transaction.countDocuments({}),
     ]);
     return ok(res, { usersTotal, kycApproved, cardHolders, transactionsTotal });
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.get("/broadcast/targets", requireAdmin, async (req, res) => {
+  try {
+    const filter = BroadcastFilterSchema.parse(req.query.filter || "all");
+    const targetCount = await getBroadcastTargetCount(filter);
+    return ok(res, { targetCount, filter });
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.post("/broadcast/upload-image", requireAdmin, async (req, res) => {
+  try {
+    const body = BroadcastUploadSchema.parse(req.body || {});
+    const isDataUrl = body.imageData.startsWith("data:image/");
+    if (!isDataUrl) return fail(res, "imageData must be a data URL", 400);
+    if (body.imageData.length > 11_000_000) return fail(res, "Image is too large", 400);
+
+    ensureCloudinary();
+    const uploaded = await cloudinary.uploader.upload(body.imageData, {
+      folder: process.env.CLOUDINARY_FOLDER || "strowallet-broadcasts",
+      resource_type: "image",
+      public_id: body.fileName ? body.fileName.replace(/[^a-zA-Z0-9_-]/g, "_") : undefined,
+    });
+    return ok(res, { imageUrl: uploaded.secure_url });
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.post("/broadcast", requireAdmin, async (req, res) => {
+  try {
+    const body = BroadcastCreateSchema.parse(req.body || {});
+    const job = await createBroadcastJob({
+      createdBy: body.createdBy || "admin",
+      messageText: body.messageText,
+      imageUrl: body.imageUrl,
+      targetFilter: body.targetFilter,
+    });
+    return ok(
+      res,
+      {
+        id: job._id,
+        status: job.status,
+        targetCount: job.targetCount,
+        successCount: job.successCount,
+        failureCount: job.failureCount,
+        processedCount: job.processedCount,
+      },
+      201
+    );
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.get("/broadcast", requireAdmin, async (req, res) => {
+  try {
+    const limitRaw = Number(req.query.limit || 20);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 && limitRaw <= 100 ? limitRaw : 20;
+    const items = await BroadcastJob.find({})
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+    return ok(res, {
+      items: items.map((j: any) => ({
+        id: j._id,
+        createdBy: j.createdBy,
+        status: j.status,
+        targetFilter: j.targetFilter,
+        targetCount: j.targetCount,
+        processedCount: j.processedCount,
+        successCount: j.successCount,
+        failureCount: j.failureCount,
+        createdAt: j.createdAt,
+        startedAt: j.startedAt,
+        completedAt: j.completedAt,
+      })),
+    });
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.get("/broadcast/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const job = await BroadcastJob.findById(id).lean();
+    if (!job) return fail(res, "Broadcast not found", 404);
+    return ok(res, {
+      id: job._id,
+      status: job.status,
+      targetFilter: job.targetFilter,
+      targetCount: job.targetCount,
+      processedCount: job.processedCount,
+      successCount: job.successCount,
+      failureCount: job.failureCount,
+      createdAt: job.createdAt,
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
+      lastError: job.lastError,
+    });
   } catch (e) {
     const { status, message } = normalizeError(e);
     return fail(res, message, status);

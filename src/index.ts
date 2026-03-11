@@ -16,6 +16,7 @@ import adminRouter from "./routes/admin";
 import debugRouter from "./routes/debug";
 import { connectDB, disconnectDB } from "./db";
 import { initBot, pollPendingKycUpdates } from "./services/botService";
+import { startBroadcastWorker } from "./services/broadcastService";
 import { reconcileAllCards } from "./services/reconciliationService";
 import { processStroWalletEvent } from "./services/webhookProcessor";
 import { ok, fail } from "./utils/apiResponse";
@@ -28,6 +29,7 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 // Connect DB and init bot
 connectDB().catch((e) => console.error("DB init failed:", e));
 initBot().catch((e) => console.error("Bot init failed:", e));
+startBroadcastWorker();
 
 const kycPollIntervalMs = Number(process.env.KYC_POLL_INTERVAL_MS || 60000);
 let kycPollRunning = false;

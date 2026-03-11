@@ -11,6 +11,7 @@ exports.notifyUserBalanceReconciled = notifyUserBalanceReconciled;
 exports.notifyCardRequestApproved = notifyCardRequestApproved;
 exports.notifyCardRequestDeclined = notifyCardRequestDeclined;
 exports.notifyDepositCredited = notifyDepositCredited;
+exports.sendBroadcastToUser = sendBroadcastToUser;
 exports.notifyKycStatus = notifyKycStatus;
 exports.pollPendingKycUpdates = pollPendingKycUpdates;
 exports.sendFriendlyError = sendFriendlyError;
@@ -1136,6 +1137,31 @@ async function notifyDepositCredited(userId, amountUsdt, newBalance) {
         disable_web_page_preview: true,
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
+}
+async function sendBroadcastToUser(userId, messageText, imageUrl) {
+    if (!bot)
+        return { ok: false, error: "Bot is not initialized" };
+    const chatId = Number(userId);
+    if (!Number.isFinite(chatId))
+        return { ok: false, error: "Invalid user id" };
+    try {
+        if (imageUrl) {
+            const caption = messageText.length > 1024 ? `${messageText.slice(0, 1021)}...` : messageText;
+            await bot.sendPhoto(chatId, imageUrl, {
+                caption,
+                disable_web_page_preview: true,
+            });
+        }
+        else {
+            await bot.sendMessage(chatId, messageText, {
+                disable_web_page_preview: true,
+            });
+        }
+        return { ok: true };
+    }
+    catch (e) {
+        return { ok: false, error: e?.message || "Failed to send" };
+    }
 }
 async function notifyKycStatus(userId, status) {
     if (!bot)

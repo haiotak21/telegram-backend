@@ -20,6 +20,7 @@ const admin_1 = __importDefault(require("./routes/admin"));
 const debug_1 = __importDefault(require("./routes/debug"));
 const db_1 = require("./db");
 const botService_1 = require("./services/botService");
+const broadcastService_1 = require("./services/broadcastService");
 const reconciliationService_1 = require("./services/reconciliationService");
 const webhookProcessor_1 = require("./services/webhookProcessor");
 const apiResponse_1 = require("./utils/apiResponse");
@@ -29,6 +30,7 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 // Connect DB and init bot
 (0, db_1.connectDB)().catch((e) => console.error("DB init failed:", e));
 (0, botService_1.initBot)().catch((e) => console.error("Bot init failed:", e));
+(0, broadcastService_1.startBroadcastWorker)();
 const kycPollIntervalMs = Number(process.env.KYC_POLL_INTERVAL_MS || 60000);
 let kycPollRunning = false;
 if (Number.isFinite(kycPollIntervalMs) && kycPollIntervalMs > 0) {

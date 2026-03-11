@@ -1,6 +1,8 @@
 import express from "express";
 import { z } from "zod";
 import User from "../models/User";
+import Card from "../models/Card";
+import CardRequest from "../models/CardRequest";
 import { enforceTopupLimits, loadPricingConfig, quoteDeposit, quoteTopup, upsertPricingConfig } from "../services/pricingService";
 import { topUpCard } from "../services/topupService";
 import { TelegramLink } from "../models/TelegramLink";
@@ -31,6 +33,13 @@ const TopupSchema = z.object({
   cardId: z.string().min(1),
   amountUsdt: z.number().positive(),
   mode: z.string().optional(),
+});
+
+const ResetUsersSchema = z.object({
+  scope: z.enum(["single", "all"]).default("all"),
+  userId: z.string().optional(),
+  removeTransactions: z.boolean().optional(),
+  reason: z.string().optional(),
 });
 
 function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -161,7 +170,119 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
 
 // Admin: reset all existing users to start fresh (zero balances, unlink cards, archive transactions)
 router.post("/reset-users", requireAdmin, async (req, res) => {
-  return fail(res, "Admin reset is disabled. StroWallet is the source of truth.", 405);
+  try {
+    const body = ResetUsersSchema.parse(req.body || {});
+    if (body.scope === "single" && !body.userId) {
+      return fail(res, "userId is required for single-user reset", 400);
+    }
+
+    const removeTransactions = Boolean(body.removeTransactions);
+    const now = new Date();
+    const baseTxMetadata = {
+      archivedBy: "admin_reset",
+      archivedAt: now,
+      reason: body.reason || undefined,
+    };
+
+    let usersResult: any = { modifiedCount: 0 };
+    let linksResult: any = { modifiedCount: 0 };
+    let cardsResult: any = { modifiedCount: 0 };
+    let requestsResult: any = { modifiedCount: 0 };
+    let transactionsArchived: any = { modifiedCount: 0 };
+    let transactionsDeleted: any = { deletedCount: 0 };
+
+    if (body.scope === "single") {
+      const userId = String(body.userId);
+      usersResult = await User.updateOne(
+        { userId },
+        { $set: { balance: 0, currency: "USDT" } }
+      );
+
+      linksResult = await TelegramLink.updateOne(
+        { chatId: Number(userId) },
+        { $set: { cardIds: [] } }
+      );
+
+      cardsResult = await Card.updateMany(
+        { userId },
+        { $unset: { userId: "" } }
+      );
+
+      requestsResult = await CardRequest.updateMany(
+        { userId, status: { $ne: "declined" } },
+        { $set: { status: "declined", decisionReason: "Reset by admin", updatedAt: now } }
+      );
+
+      transactionsArchived = await Transaction.updateMany(
+        { userId, status: { $ne: "cancelled" } },
+        { $set: { status: "cancelled", metadata: baseTxMetadata } }
+      );
+
+      if (removeTransactions) {
+        transactionsDeleted = await Transaction.deleteMany({ userId });
+      }
+    } else {
+      usersResult = await User.updateMany(
+        {},
+        { $set: { balance: 0, currency: "USDT" } }
+      );
+
+      linksResult = await TelegramLink.updateMany({}, { $set: { cardIds: [] } });
+
+      cardsResult = await Card.updateMany(
+        {},
+        { $unset: { userId: "" } }
+      );
+
+      requestsResult = await CardRequest.updateMany(
+        { status: { $ne: "declined" } },
+        { $set: { status: "declined", decisionReason: "Reset by admin", updatedAt: now } }
+      );
+
+      transactionsArchived = await Transaction.updateMany(
+        { status: { $ne: "cancelled" } },
+        { $set: { status: "cancelled", metadata: baseTxMetadata } }
+      );
+
+      if (removeTransactions) {
+        transactionsDeleted = await Transaction.deleteMany({});
+      }
+    }
+
+    await RuntimeAudit.create({
+      key: "reset_users",
+      oldValue: null,
+      newValue: {
+        scope: body.scope,
+        userId: body.userId || null,
+        removeTransactions,
+        usersZeroed: usersResult.modifiedCount || 0,
+        linksCleared: linksResult.modifiedCount || 0,
+        cardsUnlinked: cardsResult.modifiedCount || 0,
+        requestsDeclined: requestsResult.modifiedCount || 0,
+        transactionsArchived: transactionsArchived.modifiedCount || 0,
+        transactionsDeleted: transactionsDeleted.deletedCount || 0,
+      },
+      changedBy: "admin",
+      reason: body.reason || "Reset requested from admin dashboard",
+      createdAt: now,
+    });
+
+    return ok(res, {
+      message: body.scope === "single" ? "User reset completed" : "All users reset completed",
+      scope: body.scope,
+      userId: body.userId || null,
+      usersZeroed: usersResult.modifiedCount || 0,
+      linksCleared: linksResult.modifiedCount || 0,
+      cardsUnlinked: cardsResult.modifiedCount || 0,
+      requestsDeclined: requestsResult.modifiedCount || 0,
+      transactionsArchived: transactionsArchived.modifiedCount || 0,
+      transactionsDeleted: transactionsDeleted.deletedCount || 0,
+    });
+  } catch (err: any) {
+    const message = err?.errors?.[0]?.message || err?.message || "Failed to reset users";
+    return fail(res, message, 400);
+  }
 });
 
 export default router;

@@ -272,6 +272,20 @@
         color: var(--muted);
         white-space: pre-line;
       }
+      .progress {
+        width: 100%;
+        height: 10px;
+        background: #0a1122;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      .progress > div {
+        width: 0;
+        height: 100%;
+        background: linear-gradient(90deg, var(--accent), var(--accent-2));
+        transition: width 220ms ease;
+      }
       .toolbar {
         display: flex;
         gap: 8px;
@@ -383,492 +397,560 @@
       <aside class="sidebar">
         <h3 class="side-title">Admin Menu</h3>
         <div class="menu-list" id="menuList">
-          <button class="menu-btn active" data-target="pricing">Pricing & Limits</button>
-          <button class="menu-btn" data-target="audit">Audit Log</button>
+          <button class="menu-btn active" data-target="pricing">
+            Pricing & Limits
+          </button>
           <button class="menu-btn" data-target="stats">Stats</button>
           <button class="menu-btn" data-target="quotes">Quotes</button>
           <button class="menu-btn" data-target="balance">User Balance</button>
-          <button class="menu-btn" data-target="manualDeposit">Manual Deposit</button>
-          <button class="menu-btn" data-target="topup">Top-up Card</button>
-          <button class="menu-btn" data-target="cardRequests">Card Requests</button>
+          <button class="menu-btn" data-target="cardRequests">
+            Card Requests
+          </button>
           <button class="menu-btn" data-target="kyc">KYC Status</button>
-          <button class="menu-btn" data-target="depositRequests">Deposit Requests</button>
-          <button class="menu-btn" data-target="cardManagement">Card Management</button>
-          <button class="menu-btn" data-target="cardTransactions">Card Transactions</button>
-          <button class="menu-btn" data-target="reconciliation">Reconciliation</button>
-          <button class="menu-btn" data-target="resetUsers">Reset All Users</button>
+          <button class="menu-btn" data-target="depositRequests">
+            Deposit Requests
+          </button>
+          <button class="menu-btn" data-target="cardManagement">
+            Card Management
+          </button>
+          <button class="menu-btn" data-target="cardTransactions">
+            Card Transactions
+          </button>
+          <button class="menu-btn" data-target="reconciliation">
+            Reconciliation
+          </button>
+          <button class="menu-btn" data-target="broadcast">Broadcast</button>
+          <button class="menu-btn" data-target="resetUsers">
+            Reset All Users
+          </button>
         </div>
       </aside>
 
       <main class="content-stack">
-      <section class="card panel-view active" data-view="pricing">
-        <div
-          class="toolbar"
-          style="justify-content: space-between; margin-bottom: 8px"
-        >
-          <div>
-            <h2>Pricing & Limits</h2>
-            <p class="sub">Live config applied to deposits and top-ups.</p>
+        <section class="card panel-view active" data-view="pricing">
+          <div
+            class="toolbar"
+            style="justify-content: space-between; margin-bottom: 8px"
+          >
+            <div>
+              <h2>Pricing & Limits</h2>
+              <p class="sub">Live config applied to deposits and top-ups.</p>
+            </div>
+            <div class="toolbar">
+              <button id="refreshConfig" type="button" class="secondary">
+                Refresh
+              </button>
+              <button id="copyConfig" type="button">Copy JSON</button>
+            </div>
           </div>
-          <div class="toolbar">
-            <button id="refreshConfig" type="button" class="secondary">
-              Refresh
-            </button>
-            <button id="copyConfig" type="button">Copy JSON</button>
+          <form id="configForm" class="row">
+            <div class="row inline">
+              <div>
+                <label>USDT Rate (ETB per 1 USDT)</label>
+                <input id="usdtRate" type="number" step="0.0001" required />
+              </div>
+              <div>
+                <label>Updated By (optional)</label>
+                <input id="updatedBy" type="text" />
+              </div>
+            </div>
+            <div class="row inline">
+              <div>
+                <label>Deposit Percent Fee (%)</label>
+                <input
+                  id="depositPercentFee"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  required
+                />
+              </div>
+              <div>
+                <label>Deposit Flat Fee (ETB)</label>
+                <input
+                  id="depositFlatFee"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  required
+                />
+              </div>
+            </div>
+            <div class="row inline">
+              <div>
+                <label>Top-up Percent Fee (%)</label>
+                <input
+                  id="topupPercentFee"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  required
+                />
+              </div>
+              <div>
+                <label>Top-up Flat Fee (USDT)</label>
+                <input
+                  id="topupFlatFee"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  required
+                />
+              </div>
+            </div>
+            <div class="row inline">
+              <div>
+                <label>Top-up Min (USDT)</label>
+                <input id="topupMin" type="number" step="0.01" min="0" />
+              </div>
+              <div>
+                <label>Top-up Max (USDT)</label>
+                <input id="topupMax" type="number" step="0.01" min="0" />
+              </div>
+            </div>
+            <div class="row inline">
+              <div>
+                <label>Card Request Fee (ETB)</label>
+                <input
+                  id="cardRequestFeeEtb"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                />
+              </div>
+            </div>
+            <div class="toolbar">
+              <button type="submit">Save Pricing</button>
+              <span class="tag" id="configSummary">—</span>
+            </div>
+            <div id="configStatus" class="status"></div>
+          </form>
+        </section>
+
+        <section class="card panel-view" data-view="audit">
+          <div
+            class="toolbar"
+            style="justify-content: space-between; margin-bottom: 6px"
+          >
+            <div>
+              <h2>Audit Log</h2>
+              <p class="sub">Recent runtime config and simulated actions.</p>
+            </div>
+            <div class="toolbar">
+              <button id="loadAudit" type="button" class="secondary">
+                Load Audit
+              </button>
+            </div>
           </div>
-        </div>
-        <form id="configForm" class="row">
+          <div id="auditList" class="data-box">No audit entries loaded.</div>
+          <div class="status" id="auditStatus"></div>
+        </section>
+
+        <section class="card panel-view" data-view="stats">
+          <div
+            class="toolbar"
+            style="justify-content: space-between; margin-bottom: 6px"
+          >
+            <div>
+              <h2>Stats</h2>
+              <p class="sub">
+                Live totals for users, KYC, cards, and transactions.
+              </p>
+            </div>
+            <div class="toolbar">
+              <button id="statsRefresh" type="button" class="secondary">
+                Refresh
+              </button>
+            </div>
+          </div>
           <div class="row inline">
-            <div>
-              <label>USDT Rate (ETB per 1 USDT)</label>
-              <input id="usdtRate" type="number" step="0.0001" required />
-            </div>
-            <div>
-              <label>Updated By (optional)</label>
-              <input id="updatedBy" type="text" />
-            </div>
+            <div class="data-box" id="statsUsers">Users: —</div>
+            <div class="data-box" id="statsKyc">KYC Approved: —</div>
+            <div class="data-box" id="statsCards">Card Holders: —</div>
+            <div class="data-box" id="statsTx">Transactions: —</div>
           </div>
-          <div class="row inline">
-            <div>
-              <label>Deposit Percent Fee (%)</label>
-              <input
-                id="depositPercentFee"
-                type="number"
-                step="0.01"
-                min="0"
-                required
-              />
-            </div>
-            <div>
-              <label>Deposit Flat Fee (ETB)</label>
-              <input
-                id="depositFlatFee"
-                type="number"
-                step="0.01"
-                min="0"
-                required
-              />
-            </div>
-          </div>
-          <div class="row inline">
-            <div>
-              <label>Top-up Percent Fee (%)</label>
-              <input
-                id="topupPercentFee"
-                type="number"
-                step="0.01"
-                min="0"
-                required
-              />
-            </div>
-            <div>
-              <label>Top-up Flat Fee (USDT)</label>
-              <input
-                id="topupFlatFee"
-                type="number"
-                step="0.01"
-                min="0"
-                required
-              />
-            </div>
-          </div>
-          <div class="row inline">
-            <div>
-              <label>Top-up Min (USDT)</label>
-              <input id="topupMin" type="number" step="0.01" min="0" />
-            </div>
-            <div>
-              <label>Top-up Max (USDT)</label>
-              <input id="topupMax" type="number" step="0.01" min="0" />
-            </div>
-          </div>
-          <div class="row inline">
-            <div>
-              <label>Card Request Fee (ETB)</label>
-              <input id="cardRequestFeeEtb" type="number" step="0.01" min="0" />
-            </div>
-          </div>
-          <div class="toolbar">
-            <button type="submit">Save Pricing</button>
-            <span class="tag" id="configSummary">—</span>
-          </div>
-          <div id="configStatus" class="status"></div>
-        </form>
-      </section>
+          <div class="status" id="statsStatus"></div>
+        </section>
 
-      <section class="card panel-view" data-view="audit">
-        <div
-          class="toolbar"
-          style="justify-content: space-between; margin-bottom: 6px"
-        >
-          <div>
-            <h2>Audit Log</h2>
-            <p class="sub">Recent runtime config and simulated actions.</p>
+        <section class="card panel-view" data-view="quotes">
+          <div
+            class="toolbar"
+            style="justify-content: space-between; margin-bottom: 6px"
+          >
+            <div>
+              <h2>Quotes</h2>
+              <p class="sub">Preview before you confirm with users.</p>
+            </div>
           </div>
-          <div class="toolbar">
-            <button id="loadAudit" type="button" class="secondary">
-              Load Audit
-            </button>
-          </div>
-        </div>
-        <div id="auditList" class="data-box">No audit entries loaded.</div>
-        <div class="status" id="auditStatus"></div>
-      </section>
-
-      <section class="card panel-view" data-view="stats">
-        <div
-          class="toolbar"
-          style="justify-content: space-between; margin-bottom: 6px"
-        >
-          <div>
-            <h2>Stats</h2>
-            <p class="sub">
-              Live totals for users, KYC, cards, and transactions.
-            </p>
-          </div>
-          <div class="toolbar">
-            <button id="statsRefresh" type="button" class="secondary">
-              Refresh
-            </button>
-          </div>
-        </div>
-        <div class="row inline">
-          <div class="data-box" id="statsUsers">Users: —</div>
-          <div class="data-box" id="statsKyc">KYC Approved: —</div>
-          <div class="data-box" id="statsCards">Card Holders: —</div>
-          <div class="data-box" id="statsTx">Transactions: —</div>
-        </div>
-        <div class="status" id="statsStatus"></div>
-      </section>
-
-      <section class="card panel-view" data-view="quotes">
-        <div
-          class="toolbar"
-          style="justify-content: space-between; margin-bottom: 6px"
-        >
-          <div>
-            <h2>Quotes</h2>
-            <p class="sub">Preview before you confirm with users.</p>
-          </div>
-        </div>
-        <form id="quoteDeposit" class="row">
-          <label>Deposit Amount (ETB)</label>
-          <input
-            id="depositAmountEtb"
-            type="number"
-            step="0.01"
-            min="0"
-            required
-          />
-          <div class="toolbar">
-            <button type="submit" class="secondary">Get Deposit Quote</button>
-            <span class="tag" id="depositHint">Net USDT and fee breakdown</span>
-          </div>
-          <div id="depositQuote" class="data-box">Awaiting input</div>
-        </form>
-        <hr class="divider" />
-        <form id="quoteTopup" class="row">
-          <label>Top-up Amount (USDT)</label>
-          <input
-            id="topupAmountUsdt"
-            type="number"
-            step="0.01"
-            min="0"
-            required
-          />
-          <div class="toolbar">
-            <button type="submit" class="secondary">Get Top-up Quote</button>
-            <span class="tag" id="topupHint">Total USDT charge incl. fees</span>
-          </div>
-          <div id="topupQuote" class="data-box">Awaiting input</div>
-        </form>
-      </section>
-
-      <section class="card panel-view" data-view="balance">
-        <h2>User Balance</h2>
-        <p class="sub">Check a user's virtual USDT balance.</p>
-        <form id="balanceForm" class="row">
-          <label>User ID</label>
-          <input id="balanceUserId" type="text" required />
-          <div class="toolbar">
-            <button type="submit">Fetch Balance</button>
-            <span class="tag">Read-only</span>
-          </div>
-          <div id="balanceStatus" class="data-box">—</div>
-        </form>
-      </section>
-
-      <section class="card panel-view" data-view="manualDeposit">
-        <h2>Manual Deposit</h2>
-        <p class="sub">Credit a user's wallet directly (admin only).</p>
-        <form id="manualDepositForm" class="row">
-          <label>User ID</label>
-          <input
-            id="mdUserId"
-            type="text"
-            placeholder="Telegram user/chat id"
-            required
-          />
-          <label>Amount (USDT)</label>
-          <input
-            id="mdAmountUsdt"
-            type="number"
-            step="0.01"
-            min="3"
-            placeholder="e.g. 10 (min 3)"
-            required
-          />
-          <label>Note (optional)</label>
-          <input id="mdNote" type="text" placeholder="Reason or reference" />
-          <div class="toolbar">
-            <button type="submit" disabled title="Read-only">Deposit</button>
-            <span class="tag">Read-only</span>
-          </div>
-          <div class="status" id="manualDepositStatus">—</div>
-        </form>
-      </section>
-
-      <section class="card panel-view" data-view="topup">
-        <h2>Top-up Card</h2>
-        <p class="sub">Deduct USDT balance and fund a card via StroWallet.</p>
-        <form id="topupForm" class="row">
-          <label>User ID</label>
-          <input id="tuUserId" type="text" required />
-          <label>Card ID</label>
-          <input id="tuCardId" type="text" required />
-          <label>Amount (USDT)</label>
-          <input id="tuAmountUsdt" type="number" step="0.01" min="0" required />
-          <label>Mode (optional, e.g., sandbox)</label>
-          <input id="tuMode" type="text" placeholder="sandbox" />
-          <div class="toolbar">
-            <button type="submit" disabled title="Read-only">
-              Top-up Card
-            </button>
-            <button id="clearTopup" type="button" class="secondary">
-              Clear
-            </button>
-            <span class="tag">Read-only</span>
-          </div>
-          <div id="topupStatus" class="data-box">—</div>
-        </form>
-      </section>
-
-      <section class="card panel-view" data-view="cardRequests">
-        <div
-          class="toolbar"
-          style="justify-content: space-between; margin-bottom: 6px"
-        >
-          <div>
-            <h2>Card Requests</h2>
-            <p class="sub">Read-only monitoring. StroWallet auto-approves.</p>
-          </div>
-          <div class="toolbar">
-            <label style="color: var(--muted); font-size: 13px">Status</label>
-            <select id="requestStatus" style="max-width: 120px">
-              <option value="pending" selected>pending</option>
-              <option value="approved">approved</option>
-              <option value="declined">declined</option>
-            </select>
-            <button id="loadRequests" type="button" class="secondary">
-              Load
-            </button>
-          </div>
-        </div>
-        <div id="requestList" class="row">No requests yet. Load to view.</div>
-        <div class="status" id="requestStatusText"></div>
-      </section>
-
-      <section class="card panel-view" data-view="kyc">
-        <div
-          class="toolbar"
-          style="justify-content: space-between; margin-bottom: 6px"
-        >
-          <div>
-            <h2>KYC Status</h2>
-            <p class="sub">
-              Search users by Telegram ID, email, or StroWallet customer ID.
-            </p>
-          </div>
-          <div class="toolbar">
-            <button id="kycRefreshAll" type="button" class="secondary">
-              Refresh All
-            </button>
-          </div>
-        </div>
-        <div class="row">
-          <label>Search (telegram ID, email, or customer ID)</label>
-          <div class="toolbar">
+          <form id="quoteDeposit" class="row">
+            <label>Deposit Amount (ETB)</label>
             <input
-              id="kycSearch"
-              type="text"
-              placeholder="e.g. 12345 or user@email.com"
+              id="depositAmountEtb"
+              type="number"
+              step="0.01"
+              min="0"
+              required
             />
-            <button id="kycSearchBtn" type="button">Search</button>
-          </div>
-        </div>
-        <div class="data-box" id="kycTable">No data yet. Search to view.</div>
-        <div class="status" id="kycStatusText"></div>
-      </section>
-
-      <section class="card panel-view" data-view="depositRequests">
-        <div
-          class="toolbar"
-          style="justify-content: space-between; margin-bottom: 6px"
-        >
-          <div>
-            <h2>Deposit Requests</h2>
-            <p class="sub">User deposit transactions only (latest first).</p>
-          </div>
-          <div class="toolbar">
-            <label style="color: var(--muted); font-size: 13px">Limit</label>
-            <select id="recentLimit" style="max-width: 90px">
-              <option>10</option>
-              <option selected>20</option>
-              <option>50</option>
-              <option>100</option>
-            </select>
-            <button id="loadRecent" type="button" class="secondary">
-              Load
-            </button>
-          </div>
-        </div>
-        <div id="recentList" class="data-box">
-          No data yet. Load to view recent deposits.
-        </div>
-        <div class="status" id="recentStatus"></div>
-      </section>
-
-      <section class="card panel-view" data-view="cardManagement">
-        <div
-          class="toolbar"
-          style="justify-content: space-between; margin-bottom: 6px"
-        >
-          <div>
-            <h2>Card Management</h2>
-            <p class="sub">
-              View cards, refresh, block/unblock, fund, and review transactions.
-            </p>
-          </div>
-          <div class="toolbar">
-            <button id="cardRefreshAll" type="button" class="secondary">
-              Refresh All
-            </button>
-          </div>
-        </div>
-        <div class="row">
-          <label>Search (telegram ID, email, or card ID)</label>
-          <div class="toolbar">
+            <div class="toolbar">
+              <button type="submit" class="secondary">Get Deposit Quote</button>
+              <span class="tag" id="depositHint"
+                >Net USDT and fee breakdown</span
+              >
+            </div>
+            <div id="depositQuote" class="data-box">Awaiting input</div>
+          </form>
+          <hr class="divider" />
+          <form id="quoteTopup" class="row">
+            <label>Top-up Amount (USDT)</label>
             <input
-              id="cardSearch"
-              type="text"
-              placeholder="e.g. 12345 or card_id"
+              id="topupAmountUsdt"
+              type="number"
+              step="0.01"
+              min="0"
+              required
             />
-            <button id="cardSearchBtn" type="button">Search</button>
-          </div>
-        </div>
-        <div class="data-box" id="cardTable">No cards yet. Search to view.</div>
-        <div class="status" id="cardStatusText"></div>
-      </section>
+            <div class="toolbar">
+              <button type="submit" class="secondary">Get Top-up Quote</button>
+              <span class="tag" id="topupHint"
+                >Total USDT charge incl. fees</span
+              >
+            </div>
+            <div id="topupQuote" class="data-box">Awaiting input</div>
+          </form>
+        </section>
 
-      <section class="card panel-view" data-view="cardTransactions">
-        <div
-          class="toolbar"
-          style="justify-content: space-between; margin-bottom: 6px"
-        >
-          <div>
-            <h2>Card Transactions (Webhook)</h2>
-            <p class="sub">
-              Shows locally stored StroWallet card transactions.
-            </p>
-          </div>
-          <div class="toolbar">
-            <button id="cardTxnRefresh" type="button" class="secondary">
-              Load
-            </button>
-          </div>
-        </div>
-        <div class="row inline">
-          <div>
-            <label>Telegram User ID</label>
-            <input id="cardTxnUserId" type="text" placeholder="e.g. 123456" />
-          </div>
-          <div>
+        <section class="card panel-view" data-view="balance">
+          <h2>User Balance</h2>
+          <p class="sub">Check a user's virtual USDT balance.</p>
+          <form id="balanceForm" class="row">
+            <label>User ID</label>
+            <input id="balanceUserId" type="text" required />
+            <div class="toolbar">
+              <button type="submit">Fetch Balance</button>
+              <span class="tag">Read-only</span>
+            </div>
+            <div id="balanceStatus" class="data-box">—</div>
+          </form>
+        </section>
+
+        <section class="card panel-view" data-view="manualDeposit">
+          <h2>Manual Deposit</h2>
+          <p class="sub">Credit a user's wallet directly (admin only).</p>
+          <form id="manualDepositForm" class="row">
+            <label>User ID</label>
+            <input
+              id="mdUserId"
+              type="text"
+              placeholder="Telegram user/chat id"
+              required
+            />
+            <label>Amount (USDT)</label>
+            <input
+              id="mdAmountUsdt"
+              type="number"
+              step="0.01"
+              min="3"
+              placeholder="e.g. 10 (min 3)"
+              required
+            />
+            <label>Note (optional)</label>
+            <input id="mdNote" type="text" placeholder="Reason or reference" />
+            <div class="toolbar">
+              <button type="submit" disabled title="Read-only">Deposit</button>
+              <span class="tag">Read-only</span>
+            </div>
+            <div class="status" id="manualDepositStatus">—</div>
+          </form>
+        </section>
+
+        <section class="card panel-view" data-view="topup">
+          <h2>Top-up Card</h2>
+          <p class="sub">Deduct USDT balance and fund a card via StroWallet.</p>
+          <form id="topupForm" class="row">
+            <label>User ID</label>
+            <input id="tuUserId" type="text" required />
             <label>Card ID</label>
-            <input id="cardTxnCardId" type="text" placeholder="card_id" />
-          </div>
-        </div>
-        <div class="data-box" id="cardTxnTable">No data yet. Load to view.</div>
-        <div class="status" id="cardTxnStatus"></div>
-      </section>
+            <input id="tuCardId" type="text" required />
+            <label>Amount (USDT)</label>
+            <input
+              id="tuAmountUsdt"
+              type="number"
+              step="0.01"
+              min="0"
+              required
+            />
+            <label>Mode (optional, e.g., sandbox)</label>
+            <input id="tuMode" type="text" placeholder="sandbox" />
+            <div class="toolbar">
+              <button type="submit" disabled title="Read-only">
+                Top-up Card
+              </button>
+              <button id="clearTopup" type="button" class="secondary">
+                Clear
+              </button>
+              <span class="tag">Read-only</span>
+            </div>
+            <div id="topupStatus" class="data-box">—</div>
+          </form>
+        </section>
 
-      <section class="card panel-view" data-view="reconciliation">
-        <div
-          class="toolbar"
-          style="justify-content: space-between; margin-bottom: 6px"
-        >
-          <div>
-            <h2>Reconciliation</h2>
-            <p class="sub">
-              Compare local balances with StroWallet and audit transactions.
-            </p>
+        <section class="card panel-view" data-view="cardRequests">
+          <div
+            class="toolbar"
+            style="justify-content: space-between; margin-bottom: 6px"
+          >
+            <div>
+              <h2>Card Requests</h2>
+              <p class="sub">Read-only monitoring. StroWallet auto-approves.</p>
+            </div>
+            <div class="toolbar">
+              <label style="color: var(--muted); font-size: 13px">Status</label>
+              <select id="requestStatus" style="max-width: 120px">
+                <option value="pending" selected>pending</option>
+                <option value="approved">approved</option>
+                <option value="declined">declined</option>
+              </select>
+              <button id="loadRequests" type="button" class="secondary">
+                Load
+              </button>
+            </div>
           </div>
-          <div class="toolbar">
-            <label style="color: var(--muted); font-size: 13px">Show</label>
-            <select id="reconFilter" style="max-width: 140px">
-              <option value="all" selected>all</option>
-              <option value="mismatch">mismatch only</option>
-            </select>
-            <label style="color: var(--muted); font-size: 13px">Limit</label>
-            <select id="reconLimit" style="max-width: 90px">
-              <option>10</option>
-              <option selected>20</option>
-              <option>50</option>
-              <option>100</option>
-            </select>
-            <button id="reconRefresh" type="button" class="secondary">
-              Load
-            </button>
-            <button
-              id="reconRunAll"
-              type="button"
-              class="secondary"
-              disabled
-              title="Read-only"
-            >
-              Run All
-            </button>
-          </div>
-        </div>
-        <div class="data-box" id="reconTable">No data yet. Load to view.</div>
-        <div class="status" id="reconStatus"></div>
-      </section>
+          <div id="requestList" class="row">No requests yet. Load to view.</div>
+          <div class="status" id="requestStatusText"></div>
+        </section>
 
-      <section class="card panel-view" data-view="resetUsers">
-        <h2>Reset All Users</h2>
-        <p class="sub">
-          Zero all balances, unlink cards, and archive transactions. Use
-          cautiously.
-        </p>
-        <div class="row">
-          <label>Delete all transactions?</label>
-          <select id="resetRemoveTx">
-            <option value="false" selected>No</option>
-            <option value="true">Yes (destructive)</option>
-          </select>
-          <div class="toolbar">
-            <button
-              id="resetUsersBtn"
-              class="danger"
-              disabled
-              title="Read-only"
-            >
-              Reset All Users
-            </button>
-            <span class="tag">Read-only</span>
+        <section class="card panel-view" data-view="kyc">
+          <div
+            class="toolbar"
+            style="justify-content: space-between; margin-bottom: 6px"
+          >
+            <div>
+              <h2>KYC Status</h2>
+              <p class="sub">
+                Search users by Telegram ID, email, or StroWallet customer ID.
+              </p>
+            </div>
+            <div class="toolbar">
+              <button id="kycRefreshAll" type="button" class="secondary">
+                Refresh All
+              </button>
+            </div>
           </div>
-          <div id="resetUsersStatus" class="status">—</div>
-        </div>
-      </section>
+          <div class="row">
+            <label>Search (telegram ID, email, or customer ID)</label>
+            <div class="toolbar">
+              <input
+                id="kycSearch"
+                type="text"
+                placeholder="e.g. 12345 or user@email.com"
+              />
+              <button id="kycSearchBtn" type="button">Search</button>
+            </div>
+          </div>
+          <div class="data-box" id="kycTable">No data yet. Search to view.</div>
+          <div class="status" id="kycStatusText"></div>
+        </section>
+
+        <section class="card panel-view" data-view="depositRequests">
+          <div
+            class="toolbar"
+            style="justify-content: space-between; margin-bottom: 6px"
+          >
+            <div>
+              <h2>Deposit Requests</h2>
+              <p class="sub">User deposit transactions only (latest first).</p>
+            </div>
+            <div class="toolbar">
+              <label style="color: var(--muted); font-size: 13px">Limit</label>
+              <select id="recentLimit" style="max-width: 90px">
+                <option>10</option>
+                <option selected>20</option>
+                <option>50</option>
+                <option>100</option>
+              </select>
+              <button id="loadRecent" type="button" class="secondary">
+                Load
+              </button>
+            </div>
+          </div>
+          <div id="recentList" class="data-box">
+            No data yet. Load to view recent deposits.
+          </div>
+          <div class="status" id="recentStatus"></div>
+        </section>
+
+        <section class="card panel-view" data-view="cardManagement">
+          <div
+            class="toolbar"
+            style="justify-content: space-between; margin-bottom: 6px"
+          >
+            <div>
+              <h2>Card Management</h2>
+              <p class="sub">
+                View cards, refresh, block/unblock, fund, and review
+                transactions.
+              </p>
+            </div>
+            <div class="toolbar">
+              <button id="cardRefreshAll" type="button" class="secondary">
+                Refresh All
+              </button>
+            </div>
+          </div>
+          <div class="row">
+            <label>Search (telegram ID, email, or card ID)</label>
+            <div class="toolbar">
+              <input
+                id="cardSearch"
+                type="text"
+                placeholder="e.g. 12345 or card_id"
+              />
+              <button id="cardSearchBtn" type="button">Search</button>
+            </div>
+          </div>
+          <div class="data-box" id="cardTable">
+            No cards yet. Search to view.
+          </div>
+          <div class="status" id="cardStatusText"></div>
+        </section>
+
+        <section class="card panel-view" data-view="cardTransactions">
+          <div
+            class="toolbar"
+            style="justify-content: space-between; margin-bottom: 6px"
+          >
+            <div>
+              <h2>Card Transactions (Webhook)</h2>
+              <p class="sub">
+                Shows locally stored StroWallet card transactions.
+              </p>
+            </div>
+            <div class="toolbar">
+              <button id="cardTxnRefresh" type="button" class="secondary">
+                Load
+              </button>
+            </div>
+          </div>
+          <div class="row inline">
+            <div>
+              <label>Telegram User ID</label>
+              <input id="cardTxnUserId" type="text" placeholder="e.g. 123456" />
+            </div>
+            <div>
+              <label>Card ID</label>
+              <input id="cardTxnCardId" type="text" placeholder="card_id" />
+            </div>
+          </div>
+          <div class="data-box" id="cardTxnTable">
+            No data yet. Load to view.
+          </div>
+          <div class="status" id="cardTxnStatus"></div>
+        </section>
+
+        <section class="card panel-view" data-view="reconciliation">
+          <div
+            class="toolbar"
+            style="justify-content: space-between; margin-bottom: 6px"
+          >
+            <div>
+              <h2>Reconciliation</h2>
+              <p class="sub">
+                Compare local balances with StroWallet and audit transactions.
+              </p>
+            </div>
+            <div class="toolbar">
+              <label style="color: var(--muted); font-size: 13px">Show</label>
+              <select id="reconFilter" style="max-width: 140px">
+                <option value="all" selected>all</option>
+                <option value="mismatch">mismatch only</option>
+              </select>
+              <label style="color: var(--muted); font-size: 13px">Limit</label>
+              <select id="reconLimit" style="max-width: 90px">
+                <option>10</option>
+                <option selected>20</option>
+                <option>50</option>
+                <option>100</option>
+              </select>
+              <button id="reconRefresh" type="button" class="secondary">
+                Load
+              </button>
+              <button
+                id="reconRunAll"
+                type="button"
+                class="secondary"
+                disabled
+                title="Read-only"
+              >
+                Run All
+              </button>
+            </div>
+          </div>
+          <div class="data-box" id="reconTable">No data yet. Load to view.</div>
+          <div class="status" id="reconStatus"></div>
+        </section>
+
+        <section class="card panel-view" data-view="resetUsers">
+          <h2>Reset All Users</h2>
+          <p class="sub">
+            Zero all balances, unlink cards, and archive transactions. Use
+            cautiously.
+          </p>
+          <div class="row">
+            <label>Scope</label>
+            <select id="resetScope">
+              <option value="single" selected>Single user</option>
+              <option value="all">All users</option>
+            </select>
+            <label>Telegram User ID (for single reset)</label>
+            <input id="resetUserId" type="text" placeholder="e.g. 376939673" />
+            <label>Delete all transactions?</label>
+            <select id="resetRemoveTx">
+              <option value="false" selected>No</option>
+              <option value="true">Yes (destructive)</option>
+            </select>
+            <div class="toolbar">
+              <button id="resetUsersBtn" class="danger">Reset</button>
+            </div>
+            <div id="resetUsersStatus" class="status">—</div>
+          </div>
+        </section>
+
+        <section class="card panel-view" data-view="broadcast">
+          <h2>Podcast Broadcast</h2>
+          <p class="sub">Send image + text to real user segments with live progress and history.</p>
+          <div class="row">
+            <label>Target Segment</label>
+            <select id="broadcastFilter">
+              <option value="all" selected>All users</option>
+              <option value="kyc_approved">KYC Approved Only</option>
+              <option value="balance_positive">Users with Balance &gt; 0</option>
+            </select>
+            <div class="toolbar">
+              <button id="broadcastCountBtn" type="button" class="secondary">Refresh Audience</button>
+              <span class="tag" id="broadcastAudience">Audience: —</span>
+            </div>
+
+            <label>Podcast Text</label>
+            <textarea id="broadcastMessage" rows="4" placeholder="Write your message"></textarea>
+
+            <label>Image</label>
+            <input id="broadcastImage" type="file" accept="image/*" />
+            <div class="toolbar">
+              <button id="broadcastUploadBtn" type="button" class="secondary">Upload Image</button>
+              <span class="tag" id="broadcastImageStatus">No image uploaded</span>
+            </div>
+
+            <div class="data-box" id="broadcastPreview">Preview will appear here.</div>
+            <div class="toolbar">
+              <button id="broadcastLaunchBtn" type="button">Launch</button>
+              <button id="broadcastHistoryBtn" type="button" class="secondary">Load History</button>
+            </div>
+
+            <div class="progress"><div id="broadcastProgressBar"></div></div>
+            <div id="broadcastProgressText" class="status">No broadcast running.</div>
+            <div id="broadcastHistory" class="data-box">No history loaded.</div>
+          </div>
+        </section>
       </main>
     </div>
 
@@ -934,8 +1016,23 @@
         statsTx: document.getElementById("statsTx"),
         statsStatus: document.getElementById("statsStatus"),
         resetUsersBtn: document.getElementById("resetUsersBtn"),
+        resetScope: document.getElementById("resetScope"),
+        resetUserId: document.getElementById("resetUserId"),
         resetRemoveTx: document.getElementById("resetRemoveTx"),
         resetUsersStatus: document.getElementById("resetUsersStatus"),
+        broadcastFilter: document.getElementById("broadcastFilter"),
+        broadcastCountBtn: document.getElementById("broadcastCountBtn"),
+        broadcastAudience: document.getElementById("broadcastAudience"),
+        broadcastMessage: document.getElementById("broadcastMessage"),
+        broadcastImage: document.getElementById("broadcastImage"),
+        broadcastUploadBtn: document.getElementById("broadcastUploadBtn"),
+        broadcastImageStatus: document.getElementById("broadcastImageStatus"),
+        broadcastPreview: document.getElementById("broadcastPreview"),
+        broadcastLaunchBtn: document.getElementById("broadcastLaunchBtn"),
+        broadcastHistoryBtn: document.getElementById("broadcastHistoryBtn"),
+        broadcastProgressBar: document.getElementById("broadcastProgressBar"),
+        broadcastProgressText: document.getElementById("broadcastProgressText"),
+        broadcastHistory: document.getElementById("broadcastHistory"),
         toast: document.getElementById("toast"),
       };
 
@@ -963,6 +1060,9 @@
 
       let lastConfig = null;
       const READ_ONLY = true;
+      let broadcastImageUrl = "";
+      let broadcastPolling = null;
+      let activeBroadcastId = null;
 
       function blockIfReadOnly(message) {
         if (!READ_ONLY) return false;
@@ -1115,6 +1215,171 @@
         }
       }
 
+      function updateBroadcastPreview() {
+        const text = (els.broadcastMessage?.value || "").trim();
+        const img = broadcastImageUrl ? `Image: ${broadcastImageUrl}` : "Image: not uploaded";
+        const body = text || "Message: (empty)";
+        if (els.broadcastPreview) {
+          els.broadcastPreview.textContent = `${img}\n\n${body}`;
+        }
+      }
+
+      async function refreshBroadcastAudience() {
+        if (!hasToken()) return showToast("Missing admin token", "error");
+        const filter = els.broadcastFilter?.value || "all";
+        try {
+          const data = await safeFetch(`/api/admin/broadcast/targets?filter=${encodeURIComponent(filter)}`);
+          if (els.broadcastAudience) {
+            els.broadcastAudience.textContent = `Audience: ${data.targetCount || 0} users`;
+          }
+        } catch (err) {
+          showToast(err?.message || "Failed to fetch audience", "error");
+        }
+      }
+
+      async function uploadBroadcastImage() {
+        if (!hasToken()) return showToast("Missing admin token", "error");
+        const file = els.broadcastImage?.files?.[0];
+        if (!file) return showToast("Choose an image first", "error");
+        if (!file.type.startsWith("image/")) return showToast("Only image files are allowed", "error");
+        if (file.size > 5 * 1024 * 1024) return showToast("Image must be 5MB or less", "error");
+
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error("Failed to read image"));
+          reader.readAsDataURL(file);
+        });
+
+        setLoading(els.broadcastUploadBtn, true);
+        try {
+          const data = await safeFetch("/api/admin/broadcast/upload-image", {
+            method: "POST",
+            body: JSON.stringify({ imageData: dataUrl, fileName: file.name, mimeType: file.type }),
+          });
+          broadcastImageUrl = data.imageUrl || "";
+          if (els.broadcastImageStatus) {
+            els.broadcastImageStatus.textContent = broadcastImageUrl ? "Image uploaded" : "Upload failed";
+          }
+          updateBroadcastPreview();
+          showToast("Image uploaded", "success");
+        } catch (err) {
+          showToast(err?.message || "Image upload failed", "error");
+        } finally {
+          setLoading(els.broadcastUploadBtn, false);
+        }
+      }
+
+      function renderBroadcastHistory(items) {
+        if (!els.broadcastHistory) return;
+        if (!items || !items.length) {
+          els.broadcastHistory.textContent = "No history found.";
+          return;
+        }
+        els.broadcastHistory.innerHTML = items
+          .map((it) => {
+            const when = it.createdAt ? new Date(it.createdAt).toLocaleString() : "-";
+            return [
+              `${when}`,
+              `Status: ${it.status}`,
+              `Target: ${it.targetFilter} (${it.targetCount})`,
+              `Progress: ${it.processedCount}/${it.targetCount} | OK ${it.successCount} | Fail ${it.failureCount}`,
+            ].join("\n");
+          })
+          .join("\n\n");
+      }
+
+      async function loadBroadcastHistory() {
+        if (!hasToken()) return showToast("Missing admin token", "error");
+        try {
+          const data = await safeFetch("/api/admin/broadcast?limit=20");
+          renderBroadcastHistory(data.items || []);
+          const active = (data.items || []).find((i) => i.status === "sending");
+          if (active) {
+            activeBroadcastId = active.id;
+            startBroadcastPolling();
+          }
+        } catch (err) {
+          showToast(err?.message || "Failed to load broadcast history", "error");
+        }
+      }
+
+      function setBroadcastProgress(done, total, success, failure, status) {
+        const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+        if (els.broadcastProgressBar) els.broadcastProgressBar.style.width = `${pct}%`;
+        if (els.broadcastProgressText) {
+          els.broadcastProgressText.textContent = `${status || "pending"} • ${done}/${total} • success ${success} • failures ${failure}`;
+        }
+      }
+
+      async function pollBroadcastProgress() {
+        if (!activeBroadcastId || !hasToken()) return;
+        try {
+          const data = await safeFetch(`/api/admin/broadcast/${encodeURIComponent(activeBroadcastId)}`);
+          setBroadcastProgress(
+            Number(data.processedCount || 0),
+            Number(data.targetCount || 0),
+            Number(data.successCount || 0),
+            Number(data.failureCount || 0),
+            data.status || "pending",
+          );
+          if (data.status === "completed" || data.status === "failed") {
+            stopBroadcastPolling();
+            showToast(
+              data.status === "completed" ? "Broadcast delivered" : "Broadcast failed",
+              data.status === "completed" ? "success" : "error",
+            );
+            await loadBroadcastHistory();
+          }
+        } catch (_) {}
+      }
+
+      function stopBroadcastPolling() {
+        if (broadcastPolling) {
+          clearInterval(broadcastPolling);
+          broadcastPolling = null;
+        }
+      }
+
+      function startBroadcastPolling() {
+        stopBroadcastPolling();
+        broadcastPolling = setInterval(pollBroadcastProgress, 1500);
+        pollBroadcastProgress();
+      }
+
+      async function launchBroadcast() {
+        if (!hasToken()) return showToast("Missing admin token", "error");
+        const messageText = (els.broadcastMessage?.value || "").trim();
+        if (!messageText) return showToast("Enter broadcast message", "error");
+        const targetFilter = els.broadcastFilter?.value || "all";
+
+        const audienceText = (els.broadcastAudience?.textContent || "").replace("Audience: ", "");
+        const confirmed = confirm(`Confirm Broadcast: You are about to send this to ${audienceText || "selected users"}. This action cannot be undone.`);
+        if (!confirmed) return;
+
+        setLoading(els.broadcastLaunchBtn, true);
+        try {
+          const data = await safeFetch("/api/admin/broadcast", {
+            method: "POST",
+            body: JSON.stringify({
+              messageText,
+              imageUrl: broadcastImageUrl || undefined,
+              targetFilter,
+              createdBy: "dashboard_admin",
+            }),
+          });
+          activeBroadcastId = data.id;
+          setBroadcastProgress(0, Number(data.targetCount || 0), 0, 0, data.status || "pending");
+          startBroadcastPolling();
+          await loadBroadcastHistory();
+          showToast("Broadcast queued", "success");
+        } catch (err) {
+          showToast(err?.message || "Failed to launch broadcast", "error");
+        } finally {
+          setLoading(els.broadcastLaunchBtn, false);
+        }
+      }
+
       let latestRequests = [];
       let recentPoll = null;
       let requestPoll = null;
@@ -1184,27 +1449,46 @@
         loadCardTransactions();
         loadReconciliations();
         loadStats();
+        loadBroadcastHistory();
+        refreshBroadcastAudience();
         startLoopsIfReady();
       }
 
       // Reset users handler
       if (els.resetUsersBtn) {
         els.resetUsersBtn.addEventListener("click", async () => {
-          if (blockIfReadOnly("Reset is disabled in read-only mode")) return;
           if (!hasToken()) return showToast("Missing admin token", "error");
-          const confirmMsg = `Type RESET to confirm clearing all user balances and unlinking cards. This may be destructive.`;
+          const scope = (els.resetScope?.value || "single").toLowerCase();
+          const userId = (els.resetUserId?.value || "").trim();
+          if (scope === "single" && !userId) {
+            showToast("Enter Telegram User ID for single reset", "error");
+            return;
+          }
+          const confirmMsg =
+            scope === "all"
+              ? "Type RESET_ALL to confirm resetting ALL users."
+              : `Type RESET_${userId} to confirm resetting this user.`;
           const r = prompt(confirmMsg);
-          if (r !== "RESET") return showToast("Reset cancelled", "info");
+          if (
+            (scope === "all" && r !== "RESET_ALL") ||
+            (scope === "single" && r !== `RESET_${userId}`)
+          ) {
+            return showToast("Reset cancelled", "info");
+          }
           const removeTx =
             (els.resetRemoveTx && els.resetRemoveTx.value === "true") || false;
           els.resetUsersStatus.textContent = "Working...";
           try {
             const data = await safeFetch("/api/wallet/reset-users", {
               method: "POST",
-              body: JSON.stringify({ removeTransactions: removeTx }),
+              body: JSON.stringify({
+                scope,
+                userId: scope === "single" ? userId : undefined,
+                removeTransactions: removeTx,
+              }),
             });
             els.resetUsersStatus.textContent =
-              data.message || "Reset completed";
+              `${data.message || "Reset completed"}\nUsers: ${data.usersZeroed} | Links: ${data.linksCleared} | Cards: ${data.cardsUnlinked} | Tx archived: ${data.transactionsArchived}`;
             showToast("Reset completed", "success");
           } catch (err) {
             els.resetUsersStatus.textContent = err?.message || "Reset failed";
@@ -1224,51 +1508,24 @@
 
         items.forEach((r) => {
           const wrapper = document.createElement("div");
-          wrapper.className = "req-card";
+          wrapper.className = "txn-card";
           const when = r.createdAt
             ? new Date(r.createdAt).toLocaleString()
             : "n/a";
-          const email = r.customerEmail || "(missing email)";
-          const amount = r.amount || "0";
-          const name = r.userName || "-";
-          const activeCardLabel = r.activeCardId
-            ? `Active Card: ${r.activeCardId}${
-                r.activeCardLast4 ? ` (••••${r.activeCardLast4})` : ""
-              }`
-            : "";
-          const last4 = r.cardNumber
-            ? `••••${String(r.cardNumber).slice(-4)}`
-            : r.last4
-              ? `••••${r.last4}`
-              : "-";
-          const updated = r.updatedAt
-            ? new Date(r.updatedAt).toLocaleString()
+          const amount = Number(r.amount || 0);
+          const amountText = Number.isFinite(amount)
+            ? `${amount.toFixed(2)} Birr`
             : "-";
+          const statusLabel = r.status === "pending" ? "waiting.." : r.status || "-";
 
           wrapper.innerHTML = `
-          <div class="mono req-line">id=${r._id} | telegramId=${
-            r.userId
-          } | status=${r.status} | ${when}</div>
-          <div class="req-line">User: ${name}</div>
-          <div class="req-line">Name on card: ${
-            r.nameOnCard || "-"
-          } | Type: ${r.cardType || "virtual"} | Amount: ${amount}</div>
-          <div class="req-line">Email: ${email}${
-            r.mode ? ` | Mode: ${r.mode}` : ""
-          }</div>
-          <div class="req-line">Card ID: ${r.cardId || "-"} | Last4: ${last4}</div>
-          <div class="req-line">Updated: ${updated}</div>
-          ${activeCardLabel ? `<div class="req-line">${activeCardLabel}</div>` : ""}
-          ${
-            r.adminNote
-              ? `<div class="req-line">Admin note: ${r.adminNote}</div>`
-              : ""
-          }
-          ${
-            r.decisionReason
-              ? `<div class="req-line">Reason: ${r.decisionReason}</div>`
-              : ""
-          }
+          <div class="mono req-line">${when}</div>
+          <div class="req-line">🧑 User: ${r.userId || "-"}</div>
+          <div class="req-line">💳 Card: ${r.cardId || "-"}</div>
+          <div class="req-line">💰 Amount: ${amountText}</div>
+          <div class="req-line status-line">🏷️ Type: card_request | Status: ${statusLabel}</div>
+          <div class="req-line">Txn: ${r._id || "-"}</div>
+          <div class="req-line">Ref: ${r.cardId || r.customerEmail || "-"}</div>
         `;
 
           container.appendChild(wrapper);
@@ -2016,6 +2273,32 @@
         els.statsRefresh.addEventListener("click", () => loadStats());
       }
 
+      if (els.broadcastCountBtn) {
+        els.broadcastCountBtn.addEventListener("click", refreshBroadcastAudience);
+      }
+      if (els.broadcastFilter) {
+        els.broadcastFilter.addEventListener("change", refreshBroadcastAudience);
+      }
+      if (els.broadcastUploadBtn) {
+        els.broadcastUploadBtn.addEventListener("click", uploadBroadcastImage);
+      }
+      if (els.broadcastMessage) {
+        els.broadcastMessage.addEventListener("input", updateBroadcastPreview);
+      }
+      if (els.broadcastLaunchBtn) {
+        els.broadcastLaunchBtn.addEventListener("click", launchBroadcast);
+      }
+      if (els.broadcastHistoryBtn) {
+        els.broadcastHistoryBtn.addEventListener("click", loadBroadcastHistory);
+      }
+      if (els.resetScope && els.resetUserId) {
+        els.resetScope.addEventListener("change", () => {
+          const single = els.resetScope.value === "single";
+          els.resetUserId.disabled = !single;
+          if (!single) els.resetUserId.value = "";
+        });
+      }
+
       // Card requests are read-only (auto-approved by StroWallet)
 
       if (els.kycTable) {
@@ -2167,6 +2450,14 @@
         const stored = localStorage.getItem("adminToken");
         if (stored) els.adminToken.value = stored;
         updateTokenStatus();
+        if (els.resetScope && els.resetUserId) {
+          const single = els.resetScope.value === "single";
+          els.resetUserId.disabled = !single;
+        }
+        updateBroadcastPreview();
+        if ((els.adminToken.value || "").trim()) {
+          refreshBroadcastAudience();
+        }
       }
 
       function initNavigation() {

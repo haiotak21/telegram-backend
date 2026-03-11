@@ -1242,6 +1242,29 @@ export async function notifyDepositCredited(userId: string, amountUsdt: number, 
   });
 }
 
+export async function sendBroadcastToUser(userId: string, messageText: string, imageUrl?: string): Promise<{ ok: boolean; error?: string }> {
+  if (!bot) return { ok: false, error: "Bot is not initialized" };
+  const chatId = Number(userId);
+  if (!Number.isFinite(chatId)) return { ok: false, error: "Invalid user id" };
+
+  try {
+    if (imageUrl) {
+      const caption = messageText.length > 1024 ? `${messageText.slice(0, 1021)}...` : messageText;
+      await (bot as any).sendPhoto(chatId, imageUrl, {
+        caption,
+        disable_web_page_preview: true,
+      });
+    } else {
+      await bot.sendMessage(chatId, messageText, {
+        disable_web_page_preview: true,
+      });
+    }
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Failed to send" };
+  }
+}
+
 export async function notifyKycStatus(userId: string, status: KycStatus) {
   if (!bot) return;
   const chatId = Number(userId);
