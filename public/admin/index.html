@@ -107,6 +107,58 @@
         gap: 16px;
         grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
       }
+      .app-shell {
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 12px 24px 48px;
+        display: grid;
+        gap: 16px;
+        grid-template-columns: 260px minmax(0, 1fr);
+      }
+      .sidebar {
+        background: linear-gradient(150deg, var(--panel), var(--panel-2));
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 14px;
+        box-shadow: var(--shadow);
+        height: fit-content;
+        position: sticky;
+        top: 16px;
+      }
+      .side-title {
+        margin: 0 0 10px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .menu-list {
+        display: grid;
+        gap: 8px;
+      }
+      .menu-btn {
+        width: 100%;
+        text-align: left;
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: #0c1427;
+        color: var(--text);
+        border: 1px solid var(--border);
+        font-weight: 600;
+        box-shadow: none;
+      }
+      .menu-btn.active {
+        background: linear-gradient(135deg, var(--accent), #16b485);
+        color: #03120d;
+        border-color: rgba(28, 212, 161, 0.6);
+      }
+      .content-stack {
+        display: grid;
+      }
+      .panel-view {
+        display: none;
+      }
+      .panel-view.active {
+        display: block;
+      }
       .card {
         background: linear-gradient(150deg, var(--panel), var(--panel-2));
         border: 1px solid var(--border);
@@ -291,8 +343,15 @@
         header {
           padding: 20px 16px 8px;
         }
-        .grid {
+        .app-shell {
+          grid-template-columns: 1fr;
           padding: 8px 16px 32px;
+        }
+        .sidebar {
+          position: static;
+        }
+        .menu-list {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
       }
     </style>
@@ -320,8 +379,29 @@
       </div>
     </header>
 
-    <main class="grid">
-      <section class="card">
+    <div class="app-shell">
+      <aside class="sidebar">
+        <h3 class="side-title">Admin Menu</h3>
+        <div class="menu-list" id="menuList">
+          <button class="menu-btn active" data-target="pricing">Pricing & Limits</button>
+          <button class="menu-btn" data-target="audit">Audit Log</button>
+          <button class="menu-btn" data-target="stats">Stats</button>
+          <button class="menu-btn" data-target="quotes">Quotes</button>
+          <button class="menu-btn" data-target="balance">User Balance</button>
+          <button class="menu-btn" data-target="manualDeposit">Manual Deposit</button>
+          <button class="menu-btn" data-target="topup">Top-up Card</button>
+          <button class="menu-btn" data-target="cardRequests">Card Requests</button>
+          <button class="menu-btn" data-target="kyc">KYC Status</button>
+          <button class="menu-btn" data-target="depositRequests">Deposit Requests</button>
+          <button class="menu-btn" data-target="cardManagement">Card Management</button>
+          <button class="menu-btn" data-target="cardTransactions">Card Transactions</button>
+          <button class="menu-btn" data-target="reconciliation">Reconciliation</button>
+          <button class="menu-btn" data-target="resetUsers">Reset All Users</button>
+        </div>
+      </aside>
+
+      <main class="content-stack">
+      <section class="card panel-view active" data-view="pricing">
         <div
           class="toolbar"
           style="justify-content: space-between; margin-bottom: 8px"
@@ -416,7 +496,7 @@
         </form>
       </section>
 
-      <section class="card">
+      <section class="card panel-view" data-view="audit">
         <div
           class="toolbar"
           style="justify-content: space-between; margin-bottom: 6px"
@@ -435,7 +515,7 @@
         <div class="status" id="auditStatus"></div>
       </section>
 
-      <section class="card">
+      <section class="card panel-view" data-view="stats">
         <div
           class="toolbar"
           style="justify-content: space-between; margin-bottom: 6px"
@@ -461,7 +541,7 @@
         <div class="status" id="statsStatus"></div>
       </section>
 
-      <section class="card">
+      <section class="card panel-view" data-view="quotes">
         <div
           class="toolbar"
           style="justify-content: space-between; margin-bottom: 6px"
@@ -504,7 +584,7 @@
         </form>
       </section>
 
-      <section class="card">
+      <section class="card panel-view" data-view="balance">
         <h2>User Balance</h2>
         <p class="sub">Check a user's virtual USDT balance.</p>
         <form id="balanceForm" class="row">
@@ -518,7 +598,7 @@
         </form>
       </section>
 
-      <section class="card">
+      <section class="card panel-view" data-view="manualDeposit">
         <h2>Manual Deposit</h2>
         <p class="sub">Credit a user's wallet directly (admin only).</p>
         <form id="manualDepositForm" class="row">
@@ -548,7 +628,7 @@
         </form>
       </section>
 
-      <section class="card">
+      <section class="card panel-view" data-view="topup">
         <h2>Top-up Card</h2>
         <p class="sub">Deduct USDT balance and fund a card via StroWallet.</p>
         <form id="topupForm" class="row">
@@ -573,7 +653,7 @@
         </form>
       </section>
 
-      <section class="card">
+      <section class="card panel-view" data-view="cardRequests">
         <div
           class="toolbar"
           style="justify-content: space-between; margin-bottom: 6px"
@@ -598,7 +678,7 @@
         <div class="status" id="requestStatusText"></div>
       </section>
 
-      <section class="card">
+      <section class="card panel-view" data-view="kyc">
         <div
           class="toolbar"
           style="justify-content: space-between; margin-bottom: 6px"
@@ -630,7 +710,7 @@
         <div class="status" id="kycStatusText"></div>
       </section>
 
-      <section class="card">
+      <section class="card panel-view" data-view="depositRequests">
         <div
           class="toolbar"
           style="justify-content: space-between; margin-bottom: 6px"
@@ -658,7 +738,7 @@
         <div class="status" id="recentStatus"></div>
       </section>
 
-      <section class="card">
+      <section class="card panel-view" data-view="cardManagement">
         <div
           class="toolbar"
           style="justify-content: space-between; margin-bottom: 6px"
@@ -690,7 +770,7 @@
         <div class="status" id="cardStatusText"></div>
       </section>
 
-      <section class="card">
+      <section class="card panel-view" data-view="cardTransactions">
         <div
           class="toolbar"
           style="justify-content: space-between; margin-bottom: 6px"
@@ -721,7 +801,7 @@
         <div class="status" id="cardTxnStatus"></div>
       </section>
 
-      <section class="card">
+      <section class="card panel-view" data-view="reconciliation">
         <div
           class="toolbar"
           style="justify-content: space-between; margin-bottom: 6px"
@@ -763,7 +843,7 @@
         <div class="status" id="reconStatus"></div>
       </section>
 
-      <section class="card">
+      <section class="card panel-view" data-view="resetUsers">
         <h2>Reset All Users</h2>
         <p class="sub">
           Zero all balances, unlink cards, and archive transactions. Use
@@ -789,7 +869,8 @@
           <div id="resetUsersStatus" class="status">—</div>
         </div>
       </section>
-    </main>
+      </main>
+    </div>
 
     <div id="toast" class="toast"></div>
 
@@ -2088,6 +2169,25 @@
         updateTokenStatus();
       }
 
+      function initNavigation() {
+        const menuButtons = Array.from(document.querySelectorAll(".menu-btn"));
+        const views = Array.from(document.querySelectorAll(".panel-view"));
+
+        function setActive(target) {
+          menuButtons.forEach((btn) => {
+            btn.classList.toggle("active", btn.dataset.target === target);
+          });
+          views.forEach((view) => {
+            view.classList.toggle("active", view.dataset.view === target);
+          });
+        }
+
+        menuButtons.forEach((btn) => {
+          btn.addEventListener("click", () => setActive(btn.dataset.target));
+        });
+      }
+
+      initNavigation();
       initEnv();
       kickOffInitialLoad();
     </script>
