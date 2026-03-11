@@ -2533,7 +2533,15 @@ function ensureProviderAcceptedKyc(resp: any) {
   const successFlag = data?.success;
   const okFlag = data?.ok;
   const statusFlag = data?.status;
-  const hasError = Boolean(data?.error) || Boolean(data?.errors);
+  const errorValue = data?.error;
+  const errorsValue = data?.errors;
+  const hasErrorString = typeof errorValue === "string" ? errorValue.trim().length > 0 : Boolean(errorValue);
+  const hasErrorsArray = Array.isArray(errorsValue) ? errorsValue.length > 0 : false;
+  const hasErrorsObject =
+    errorsValue && typeof errorsValue === "object" && !Array.isArray(errorsValue)
+      ? Object.keys(errorsValue).length > 0
+      : false;
+  const hasError = hasErrorString || hasErrorsArray || hasErrorsObject;
 
   if (successFlag === false || okFlag === false || statusFlag === false || hasError) {
     const providerMessage =
