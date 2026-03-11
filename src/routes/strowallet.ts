@@ -135,12 +135,40 @@ router.post("/create-user", async (req, res) => {
     const body = CreateCustomerSchema.parse(req.body || {});
     const public_key = requirePublicKey();
     const payload = { ...body, public_key };
-    const resp = await bitvcard.post("create-user/", payload, {
-      headers: { "Content-Type": "application/json" },
-      // Some provider deployments expect these fields in query params.
-      params: payload,
-    });
-    const data = resp.data;
+    let data: any;
+    try {
+      const resp = await bitvcard.post("create-user/", payload, {
+        headers: { "Content-Type": "application/json" },
+      });
+      data = resp.data;
+    } catch (firstError: any) {
+      // Fallback for provider deployments that only parse URL query params.
+      const queryParams = {
+        public_key,
+        houseNumber: body.houseNumber,
+        firstName: body.firstName,
+        lastName: body.lastName,
+        idNumber: body.idNumber,
+        customerEmail: body.customerEmail,
+        phoneNumber: body.phoneNumber,
+        dateOfBirth: body.dateOfBirth,
+        line1: body.line1,
+        state: body.state,
+        zipCode: body.zipCode,
+        city: body.city,
+        country: body.country,
+        idType: body.idType,
+      } as Record<string, string>;
+      const fallbackResp = await bitvcard.post("create-user/", payload, {
+        headers: { "Content-Type": "application/json" },
+        params: queryParams,
+      });
+      data = fallbackResp.data;
+      console.warn("[strowallet] create-user primary attempt failed, fallback succeeded", {
+        firstStatus: firstError?.response?.status,
+        firstMessage: firstError?.response?.data?.message || firstError?.response?.data?.error || firstError?.message,
+      });
+    }
     const customerId =
       data?.response?.customerId ||
       data?.response?.customer_id ||

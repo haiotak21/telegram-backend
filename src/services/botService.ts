@@ -2641,6 +2641,16 @@ async function submitKyc(chatId: number, session: KycSession) {
       resp = await callStroWallet("create-user", "post", createPayload);
     }
 
+    console.log("[bot] KYC provider response", {
+      chatId,
+      mode: session.mode,
+      hasCustomerId: Boolean(extractCustomerId(resp)),
+      success: (resp as any)?.success,
+      status: (resp as any)?.status,
+      message: (resp as any)?.message,
+      error: (resp as any)?.error,
+    });
+
     ensureProviderAcceptedKyc(resp);
 
     let customerId = extractCustomerId(resp);
@@ -2754,7 +2764,10 @@ async function submitKyc(chatId: number, session: KycSession) {
   } catch (err: any) {
     kycSessions.delete(chatId);
     if (err?.status === 400) {
-      await bot!.sendMessage(chatId, "❌ Invalid/missing data. Please retry with /kyc.", {
+      const providerDetail = typeof err?.message === "string" && err.message.trim().length
+        ? `\nReason: ${err.message.trim()}`
+        : "";
+      await bot!.sendMessage(chatId, `❌ Invalid/missing data. Please retry with /kyc.${providerDetail}`, {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
       return;
