@@ -1515,7 +1515,15 @@ function normalizeTxnRef(raw: string, method: PaymentMethod) {
 }
 
 function normalizeName(value?: string) {
-  return (value || "").trim().toLowerCase();
+  const raw = (value || "").toLowerCase().normalize("NFKD");
+  return raw
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\bh\s*\/?\s*mariam\b/g, "hailemariam")
+    .replace(/\bhay?ilemariyam\b/g, "hailemariam")
+    .replace(/\bmekonen\b/g, "mekonnen")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function normalizeDigits(value?: string) {
@@ -1523,10 +1531,23 @@ function normalizeDigits(value?: string) {
 }
 
 function namesMatch(expectedRaw: string, actualRaw: string) {
-  const expected = normalizeName(expectedRaw).replace(/\s+/g, " ");
-  const actual = normalizeName(actualRaw).replace(/\s+/g, " ");
+  const expected = normalizeName(expectedRaw);
+  const actual = normalizeName(actualRaw);
   if (!expected || !actual) return false;
-  return expected === actual;
+  if (expected === actual) return true;
+
+  const expectedTokens = expected.split(" ").filter((t) => t.length > 1);
+  const actualTokens = actual.split(" ").filter((t) => t.length > 1);
+  if (!expectedTokens.length || !actualTokens.length) return false;
+
+  const actualSet = new Set(actualTokens);
+  let overlap = 0;
+  for (const token of expectedTokens) {
+    if (actualSet.has(token)) overlap += 1;
+  }
+
+  if (overlap >= expectedTokens.length) return true;
+  return overlap >= 2 && overlap >= Math.min(expectedTokens.length, actualTokens.length) - 1;
 }
 
 async function findUsedPaymentReference(paymentMethod: PaymentMethod, normalizedTxn: string) {

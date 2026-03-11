@@ -313,7 +313,9 @@ function shouldFallbackToStandaloneTelebirr(result) {
         message.includes("temporar") ||
         message.includes("network") ||
         message.includes("puppeteer") ||
-        message.includes("no pdf"));
+        message.includes("no pdf") ||
+        message.includes("receipt not found") ||
+        message.includes("could not be processed"));
 }
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
