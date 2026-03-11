@@ -2533,17 +2533,12 @@ function ensureProviderAcceptedKyc(resp: any) {
   const successFlag = data?.success;
   const okFlag = data?.ok;
   const statusFlag = data?.status;
-  const errorValue = data?.error;
-  const errorsValue = data?.errors;
-  const hasErrorString = typeof errorValue === "string" ? errorValue.trim().length > 0 : Boolean(errorValue);
-  const hasErrorsArray = Array.isArray(errorsValue) ? errorsValue.length > 0 : false;
-  const hasErrorsObject =
-    errorsValue && typeof errorsValue === "object" && !Array.isArray(errorsValue)
-      ? Object.keys(errorsValue).length > 0
-      : false;
-  const hasError = hasErrorString || hasErrorsArray || hasErrorsObject;
+  const statusText = typeof statusFlag === "string" ? statusFlag.toLowerCase() : "";
+  const explicitFailureStatus = ["failed", "error", "rejected", "invalid"].includes(statusText);
 
-  if (successFlag === false || okFlag === false || statusFlag === false || hasError) {
+  // Some provider deployments return 200 with noisy/legacy `error(s)` fields even on success.
+  // Treat only explicit false/failure status as rejection.
+  if (successFlag === false || okFlag === false || statusFlag === false || explicitFailureStatus) {
     const providerMessage =
       data?.message ||
       data?.error ||
