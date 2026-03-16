@@ -23,6 +23,15 @@ function normalizeMode(mode?: string) {
   return m;
 }
 
+function normalizeKycStatus(value: any): "approved" | "pending" | "rejected" | "not_started" {
+  if (!value) return "not_started";
+  const v = String(value).toLowerCase();
+  if (["approved", "verified", "success", "active", "high kyc", "high_kyc", "high-kyc"].includes(v)) return "approved";
+  if (["pending", "processing", "review", "unreview kyc", "unreview_kyc", "unreview-kyc"].includes(v)) return "pending";
+  if (["declined", "rejected", "failed", "low kyc", "low_kyc", "low-kyc"].includes(v)) return "rejected";
+  return "pending";
+}
+
 function asString(val: any): string | undefined {
   if (val === undefined || val === null) return undefined;
   return String(val);
@@ -148,7 +157,8 @@ router.post("/", async (req, res) => {
       return fail(res, "You already have an active or approved card request", 400);
     }
 
-    if (!customer || customer.kycStatus !== "approved") {
+    const kycStatus = normalizeKycStatus(customer?.kycStatus || user?.kycStatus);
+    if (kycStatus !== "approved") {
       return fail(res, "You must complete KYC before requesting a card", 400);
     }
 
@@ -189,8 +199,25 @@ router.post("/", async (req, res) => {
     };
 
     try {
-      const resp = await bitvcard.post("create-card/", payload);
-      const respData = resp.data as any;
+      let respData: any;
+      try {
+        const resp = await bitvcard.post("create-card/", payload, {
+          headers: { "Content-Type": "application/json" },
+        });
+        respData = resp.data as any;
+      } catch (firstErr: any) {
+        // Fallback for deployments that parse some fields from query params.
+        const fallbackResp = await bitvcard.post("create-card/", payload, {
+          headers: { "Content-Type": "application/json" },
+          params: payload,
+        });
+        respData = fallbackResp.data as any;
+        console.warn("[card-requests] create-card primary attempt failed, fallback succeeded", {
+          userId,
+          status: firstErr?.response?.status,
+          message: firstErr?.response?.data?.message || firstErr?.response?.data?.error || firstErr?.message,
+        });
+      }
       const { cardId, cardNumber, cvc } = extractCardInfo(respData);
 
       if (!cardId) {

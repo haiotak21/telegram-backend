@@ -1123,7 +1123,7 @@ export async function initBot() {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
           });
           cardRequestSelections.delete(msg.chat.id);
-          await submitCardRequest(String(msg.chat.id), user, customer, undefined, selection.amountEtb);
+          await submitCardRequest(String(msg.chat.id), user, customer, undefined, selection.depositUsd);
         } else {
           await bot!.sendMessage(msg.chat.id, `❌ Verification failed: ${b?.message || "Unknown error"}`, {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -1869,9 +1869,13 @@ async function handleCardRequest(chatId: number, message?: any) {
   });
 }
 
-async function submitCardRequest(userId: string, user: any, customer: any, message?: any, baseAmount?: number) {
+async function submitCardRequest(userId: string, user: any, customer: any, message?: any, cardAmountUsd?: number) {
   const nameOnCard = [user.firstName, user.lastName].filter(Boolean).join(" ") || message?.from?.first_name || "StroWallet User";
-  const amount = baseAmount != null ? String(baseAmount) : String(getCardRequestBaseAmount());
+  const parsedCardAmount = Number(cardAmountUsd);
+  const safeCardAmount = Number.isFinite(parsedCardAmount) && parsedCardAmount >= 3
+    ? parsedCardAmount
+    : getCardRequestBaseAmount();
+  const amount = String(safeCardAmount);
   try {
     const resp = await axios.post(`${BACKEND_BASE}/api/card-requests`, {
       userId,
