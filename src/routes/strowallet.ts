@@ -1,5 +1,7 @@
 import express from "express";
 import axios, { AxiosError } from "axios";
+import http from "http";
+import https from "https";
 import { z } from "zod";
 import { ok, fail } from "../utils/apiResponse";
 
@@ -7,10 +9,15 @@ const router = express.Router();
 
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
 const API_BASE = "https://strowallet.com/api/"; // for apicard-transactions
+const STROWALLET_PREFER_IPV4 = String(process.env.STROWALLET_PREFER_IPV4 || "true").toLowerCase() !== "false";
+const httpAgent = STROWALLET_PREFER_IPV4 ? new http.Agent({ keepAlive: true, family: 4 } as any) : undefined;
+const httpsAgent = STROWALLET_PREFER_IPV4 ? new https.Agent({ keepAlive: true, family: 4 } as any) : undefined;
 
 const bitvcard = axios.create({
   baseURL: BITVCARD_BASE,
   timeout: 15000,
+  httpAgent,
+  httpsAgent,
   headers: {
     // Some StroWallet endpoints require an auth header; allow overriding via env
     Authorization: process.env.STROWALLET_API_KEY ? `Bearer ${process.env.STROWALLET_API_KEY}` : undefined,
@@ -52,6 +59,8 @@ function pickCardId(req: express.Request) {
 const api = axios.create({
   baseURL: API_BASE,
   timeout: 15000,
+  httpAgent,
+  httpsAgent,
   headers: {
     Authorization: process.env.STROWALLET_API_KEY ? `Bearer ${process.env.STROWALLET_API_KEY}` : undefined,
   },

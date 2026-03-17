@@ -1,5 +1,7 @@
 import express from "express";
 import axios, { AxiosError } from "axios";
+import http from "http";
+import https from "https";
 import CardRequest from "../models/CardRequest";
 import { TelegramLink } from "../models/TelegramLink";
 import User from "../models/User";
@@ -11,6 +13,9 @@ import { ok, fail } from "../utils/apiResponse";
 const router = express.Router();
 
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
+const STROWALLET_PREFER_IPV4 = String(process.env.STROWALLET_PREFER_IPV4 || "true").toLowerCase() !== "false";
+const httpAgent = STROWALLET_PREFER_IPV4 ? new http.Agent({ keepAlive: true, family: 4 } as any) : undefined;
+const httpsAgent = STROWALLET_PREFER_IPV4 ? new https.Agent({ keepAlive: true, family: 4 } as any) : undefined;
 
 function getDefaultMode() {
   return process.env.STROWALLET_DEFAULT_MODE || (process.env.NODE_ENV !== "production" ? "sandbox" : undefined);
@@ -80,6 +85,8 @@ function buildBitvcardClient() {
   return axios.create({
     baseURL: BITVCARD_BASE,
     timeout: 15000,
+    httpAgent,
+    httpsAgent,
     headers: {
       Authorization: process.env.STROWALLET_API_KEY ? `Bearer ${process.env.STROWALLET_API_KEY}` : undefined,
     },
@@ -91,7 +98,7 @@ async function fetchCardDetail(cardId: string, mode?: string) {
   const resp = await axios.post(
     `${BITVCARD_BASE}fetch-card-detail/`,
     { card_id: cardId, public_key, mode },
-    { timeout: 15000 }
+    { timeout: 15000, httpAgent, httpsAgent }
   );
   return resp.data;
 }
