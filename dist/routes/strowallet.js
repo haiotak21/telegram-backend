@@ -5,14 +5,21 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const axios_1 = __importDefault(require("axios"));
+const http_1 = __importDefault(require("http"));
+const https_1 = __importDefault(require("https"));
 const zod_1 = require("zod");
 const apiResponse_1 = require("../utils/apiResponse");
 const router = express_1.default.Router();
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
 const API_BASE = "https://strowallet.com/api/"; // for apicard-transactions
+const STROWALLET_PREFER_IPV4 = String(process.env.STROWALLET_PREFER_IPV4 || "true").toLowerCase() !== "false";
+const httpAgent = STROWALLET_PREFER_IPV4 ? new http_1.default.Agent({ keepAlive: true, family: 4 }) : undefined;
+const httpsAgent = STROWALLET_PREFER_IPV4 ? new https_1.default.Agent({ keepAlive: true, family: 4 }) : undefined;
 const bitvcard = axios_1.default.create({
     baseURL: BITVCARD_BASE,
     timeout: 15000,
+    httpAgent,
+    httpsAgent,
     headers: {
         // Some StroWallet endpoints require an auth header; allow overriding via env
         Authorization: process.env.STROWALLET_API_KEY ? `Bearer ${process.env.STROWALLET_API_KEY}` : undefined,
@@ -51,6 +58,8 @@ function pickCardId(req) {
 const api = axios_1.default.create({
     baseURL: API_BASE,
     timeout: 15000,
+    httpAgent,
+    httpsAgent,
     headers: {
         Authorization: process.env.STROWALLET_API_KEY ? `Bearer ${process.env.STROWALLET_API_KEY}` : undefined,
     },
@@ -366,7 +375,10 @@ router.post("/action/status", async (req, res) => {
         const body = ActionStatusSchema.parse(req.body || {});
         const public_key = requirePublicKey();
         const payload = { ...body, public_key };
-        const resp = await bitvcard.post("action/status/", payload);
+        const resp = await bitvcard.post("action/status/", payload, {
+            // StroWallet docs require these fields as query params for this endpoint.
+            params: payload,
+        });
         return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
     catch (e) {

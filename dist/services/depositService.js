@@ -10,8 +10,8 @@ const paymentVerification_1 = require("./paymentVerification");
 const Transaction_1 = __importDefault(require("../models/Transaction"));
 const User_1 = __importDefault(require("../models/User"));
 const pricingService_1 = require("./pricingService");
-const EXPECTED_CBE_RECEIVER_NAME = (process.env.CBE_RECEIVER_NAME || process.env.RECEIVER_NAME || "Hailemariam Takele Mekonnen").trim();
-const EXPECTED_TELEBIRR_RECEIVER_NAME = (process.env.TELEBIRR_RECEIVER_NAME || "Hayilemariyam Takele Mekonen").trim();
+const EXPECTED_CBE_RECEIVER_NAME = (process.env.CBE_RECEIVER_NAME || process.env.RECEIVER_NAME || "Addisu melke admasu").trim();
+const EXPECTED_TELEBIRR_RECEIVER_NAME = (process.env.TELEBIRR_RECEIVER_NAME || "Addisu melke admasu").trim();
 function amountsClose(a, b, tol = 0.01) {
     return Math.abs(a - b) <= tol;
 }

@@ -116,12 +116,12 @@ const SUPPORT_URL = process.env.SUPPORT_URL || "https://t.me/hailetak12";
 const NEWS_URL = process.env.NEWS_URL || "https://t.me/paytelegram082";
 const API_BASE = process.env.BOT_API_BASE || "http://localhost:3000/api/strowallet/";
 const BACKEND_BASE = process.env.BOT_BACKEND_BASE || "http://localhost:3000";
-const EXPECTED_RECEIVER_NAME = (process.env.RECEIVER_NAME || process.env.CBE_RECEIVER_NAME || "Hailemariam Takele Mekonnen").trim();
-const EXPECTED_TELEBIRR_NAME = (process.env.TELEBIRR_RECEIVER_NAME || "Hayilemariyam Takele Mekonen").trim();
+const EXPECTED_RECEIVER_NAME = (process.env.RECEIVER_NAME || process.env.CBE_RECEIVER_NAME || "Addisu melke admasu").trim();
+const EXPECTED_TELEBIRR_NAME = (process.env.TELEBIRR_RECEIVER_NAME || "Addisu melke admasu").trim();
 const CBE_STRICT_RECEIVER = String(process.env.CBE_STRICT_RECEIVER || "true").toLowerCase() === "true";
 const TELEBIRR_STRICT_RECEIVER = String(process.env.TELEBIRR_STRICT_RECEIVER || "true").toLowerCase() === "true";
-const EXPECTED_TELEBIRR_PHONE = (process.env.TELEBIRR_PHONE_NUMBER || "0985656670").trim();
-const EXPECTED_CBE_ACCOUNT = (process.env.CBE_ACCOUNT_NUMBER || "1000473027449").trim();
+const EXPECTED_TELEBIRR_PHONE = (process.env.TELEBIRR_PHONE_NUMBER || "0910840397").trim();
+const EXPECTED_CBE_ACCOUNT = (process.env.CBE_ACCOUNT_NUMBER || "1000139256208").trim();
 
 function getDefaultMode() {
   return process.env.STROWALLET_DEFAULT_MODE || (process.env.NODE_ENV !== "production" ? "sandbox" : undefined);
@@ -136,10 +136,9 @@ function normalizeMode(mode?: string) {
 
 const DEPOSIT_AMOUNTS = [5, 10, 20, 100, 1000];
 const DEPOSIT_ACCOUNTS: Record<PaymentMethod, { title: string; account: string; name: string; typeLabel: string }> = {
-  cbe: { title: "CBE Deposit", account: "1000473027449", name: "Hailemariam Takele Mekonnen", typeLabel: "CBE" },
-  telebirr: { title: "Telebirr Deposit", account: "0985656670", name: "Hayilemariyam Takele Mekonen", typeLabel: "Telebirr" },
+  cbe: { title: "CBE Deposit", account: "1000139256208", name: "Addisu melke admasu", typeLabel: "CBE" },
+  telebirr: { title: "Telebirr Deposit", account: "0910840397", name: "Addisu melke admasu", typeLabel: "Telebirr" },
 };
-const CARD_REQUEST_MANDATORY_DEPOSIT_USD = 5;
 const CARD_REQUEST_BASE_AMOUNT_ETB = Number(process.env.CARD_REQUEST_BASE_AMOUNT_ETB || 3);
 const BOT_LOCK_KEY = "telegram-bot";
 const BOT_LOCK_TTL_MS = Number(process.env.TELEGRAM_BOT_LOCK_TTL_MS || 90000);
@@ -150,7 +149,13 @@ let lastLowBalanceAlertAt = 0;
 
 // Tracks the last amount a user selected per payment method so we can validate against receipt
 const depositSelections = new Map<number, { method: PaymentMethod; amount: number }>();
-const cardRequestSelections = new Map<number, { amountEtb: number; feeEtb: number; totalEtb: number; depositUsd: number; rate: number }>();
+const cardRequestSelections = new Map<number, {
+  cardAmountUsd: number;
+  feeUsd: number;
+  totalUsd: number;
+  totalEtb: number;
+  rate: number;
+}>();
 const recentCallbackActions = new Map<number, { action: string; at: number }>();
 const recentOutgoing = new Map<number, { key: string; at: number }>();
 const recentUpdates = new Map<string, number>();
@@ -772,9 +777,9 @@ export async function initBot() {
       const meta = DEPOSIT_ACCOUNTS[method];
       const lines = [
         "💳 Card request payment",
-        `Mandatory deposit: $${selection.depositUsd.toFixed(2)} × ${selection.rate.toFixed(2)} ETB = ${selection.amountEtb.toFixed(2)} ETB`,
-        `Card fee: ${selection.feeEtb.toFixed(2)} ETB`,
-        `Total to pay: ${selection.totalEtb.toFixed(2)} ETB`,
+        `Card amount: $${selection.cardAmountUsd.toFixed(2)}`,
+        `Service fee: $${selection.feeUsd.toFixed(2)}`,
+        `Total to pay: $${selection.totalUsd.toFixed(2)} (≈ ${selection.totalEtb.toFixed(2)} ETB at rate ${selection.rate.toFixed(2)})`,
         `${meta.typeLabel} account: ${meta.account}`,
         `Name: ${meta.name}`,
         "",
@@ -998,10 +1003,54 @@ export async function initBot() {
             return;
           }
         } else {
-          await bot!.sendMessage(msg.chat.id, `❌ Verification failed: ${b?.message || "Unknown error"}`, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+          const selected = depositSelections.get(msg.chat.id);
+          const queued = await queueDepositManualReview({
+            userId: String(msg.chat.id),
+            paymentMethod: method,
+            transactionNumber: normalizedTxn,
+            expectedAmountEtb: selected?.amount ?? pending.expectedAmount,
+            reason: b?.message || "Automatic verifier returned failure",
+            responseData: b,
+          });
+          depositSelections.delete(msg.chat.id);
+          if (queued.queued) {
+            await bot!.sendMessage(
+              msg.chat.id,
+              [
+                "⏳ Automatic verification failed.",
+                "Your payment has been sent to admin for manual review.",
+                "You will be notified once it is approved or declined.",
+              ].join("\n"),
+              { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+            );
+          } else {
+            await bot!.sendMessage(msg.chat.id, `❌ Verification failed: ${b?.message || "Unknown error"}`, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+          }
         }
       } catch (e: any) {
-        await bot!.sendMessage(msg.chat.id, `❌ Verification error: ${e?.message || "Unexpected error"}`, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+        const selected = depositSelections.get(msg.chat.id);
+        const queued = await queueDepositManualReview({
+          userId: String(msg.chat.id),
+          paymentMethod: method,
+          transactionNumber: normalizedTxn,
+          expectedAmountEtb: selected?.amount ?? pending.expectedAmount,
+          reason: e?.message || "Automatic verifier threw an error",
+          responseData: { error: e?.message || String(e) },
+        });
+        depositSelections.delete(msg.chat.id);
+        if (queued.queued) {
+          await bot!.sendMessage(
+            msg.chat.id,
+            [
+              "⏳ Automatic verification failed.",
+              "Your payment has been sent to admin for manual review.",
+              "You will be notified once it is approved or declined.",
+            ].join("\n"),
+            { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+          );
+        } else {
+          await bot!.sendMessage(msg.chat.id, `❌ Verification error: ${e?.message || "Unexpected error"}`, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+        }
       } finally {
         clearPendingAction(msg.chat.id);
       }
@@ -1073,17 +1122,17 @@ export async function initBot() {
               paymentMethod: method,
               amount: selection.totalEtb,
               amountEtb: selection.totalEtb,
-              feeEtb: selection.feeEtb,
+              feeEtb: roundMoney(selection.feeUsd * selection.rate),
               status: "completed",
               transactionNumber: verifiedKey,
               referenceNumber: altKey,
               responseData: b.raw ?? b,
               metadata: {
                 kind: "card_request",
-                baseAmountEtb: selection.amountEtb,
-                feeEtb: selection.feeEtb,
+                cardAmountUsd: selection.cardAmountUsd,
+                feeUsd: selection.feeUsd,
+                totalUsd: selection.totalUsd,
                 totalEtb: selection.totalEtb,
-                mandatoryDepositUsd: selection.depositUsd,
                 conversionRateEtbPerUsdt: selection.rate,
               },
             });
@@ -1123,7 +1172,7 @@ export async function initBot() {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
           });
           cardRequestSelections.delete(msg.chat.id);
-          await submitCardRequest(String(msg.chat.id), user, customer, undefined, selection.depositUsd);
+          await submitCardRequest(String(msg.chat.id), user, customer, undefined, selection.cardAmountUsd);
         } else {
           await bot!.sendMessage(msg.chat.id, `❌ Verification failed: ${b?.message || "Unknown error"}`, {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -1235,6 +1284,19 @@ export async function notifyDepositCredited(userId: string, amountUsdt: number, 
     "✅ Deposit received",
     `Amount: ${amountUsdt} USDT`,
     newBalance != null ? `Wallet balance: ${newBalance} USDT` : undefined,
+  ].filter(Boolean) as string[];
+  await bot.sendMessage(Number(userId), lines.join("\n"), {
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+  });
+}
+
+export async function notifyDepositReviewDeclined(userId: string, reason?: string) {
+  if (!bot) return;
+  const lines = [
+    "❌ Deposit review declined",
+    reason ? `Reason: ${reason}` : undefined,
+    "Please submit a new payment and try verification again.",
   ].filter(Boolean) as string[];
   await bot.sendMessage(Number(userId), lines.join("\n"), {
     disable_web_page_preview: true,
@@ -1459,9 +1521,9 @@ function buildVerificationHint(method: PaymentMethod) {
     : [
       "Send your CBE receipt reference.",
       "You can send any of these formats:",
-      "- https://apps.cbe.com.et:100/?id=FT26066RPTJ473027449",
-      "- FT26066RPTJ473027449",
-      "- FT26066RPTJ4&73027449",
+      "- https://apps.cbe.com.et:100/?id=FT26066RPTJ439256208",
+      "- FT26066RPTJ439256208",
+      "- FT26066RPTJ4&39256208",
       "- The full link, or",
       "- Just the reference: FT26066RPTJ4",
       "We will extract reference/suffix automatically.",
@@ -1677,6 +1739,61 @@ function validateVerificationResult(params: {
   return errors;
 }
 
+async function queueDepositManualReview(params: {
+  userId: string;
+  paymentMethod: PaymentMethod;
+  transactionNumber: string;
+  expectedAmountEtb?: number;
+  reason: string;
+  responseData?: any;
+}) {
+  const { userId, paymentMethod, transactionNumber, expectedAmountEtb, reason, responseData } = params;
+  const txn = normalizeTxnRef(transactionNumber, paymentMethod);
+  if (!txn) return { queued: false as const, transactionId: null as string | null };
+
+  const existing = await Transaction.findOne({
+    userId,
+    transactionType: "deposit",
+    transactionNumber: txn,
+  }).lean();
+
+  if (existing?.status === "completed") {
+    return { queued: false as const, transactionId: String(existing._id) };
+  }
+
+  const amountEtb = Number.isFinite(expectedAmountEtb) ? Number(expectedAmountEtb) : undefined;
+  const doc = await Transaction.findOneAndUpdate(
+    {
+      userId,
+      transactionType: "deposit",
+      transactionNumber: txn,
+    },
+    {
+      $set: {
+        paymentMethod,
+        amount: amountEtb ?? 0,
+        amountEtb,
+        status: "pending",
+        verified: false,
+        responseData,
+        metadata: {
+          manualReviewRequired: true,
+          expectedAmountEtb: amountEtb,
+          verificationMode: "manual_fallback",
+          verificationFailureReason: reason,
+          queuedAt: new Date(),
+        },
+      },
+      $setOnInsert: {
+        currency: "ETB",
+      },
+    },
+    { upsert: true, new: true }
+  );
+
+  return { queued: true as const, transactionId: String(doc._id) };
+}
+
 async function handleMenuSelection(action: string, chatId: number, message?: any) {
   if (shouldSuppressOutgoing(chatId, `menu_action:${action}`, 1200)) return;
   if (action.startsWith("CARD_DETAIL::")) {
@@ -1846,22 +1963,23 @@ async function handleCardRequest(chatId: number, message?: any) {
 
   const config = await loadPricingConfig();
   const rate = Number(config.usdtRate) > 0 ? Number(config.usdtRate) : 220;
-  const baseAmount = roundMoney(CARD_REQUEST_MANDATORY_DEPOSIT_USD * rate);
-  const feeEtb = Math.max(0, Number(config.cardRequestFeeEtb ?? 0));
-  const totalEtb = roundMoney(baseAmount + feeEtb);
+  const cardAmountUsd = Math.max(0, Number(config.firstCardAmountUsd ?? 5));
+  const feeUsd = Math.max(0, Number(config.firstCardFeeUsd ?? 0));
+  const totalUsd = roundMoney(cardAmountUsd + feeUsd);
+  const totalEtb = roundMoney(totalUsd * rate);
 
   cardRequestSelections.set(chatId, {
-    amountEtb: baseAmount,
-    feeEtb,
+    cardAmountUsd,
+    feeUsd,
+    totalUsd,
     totalEtb,
-    depositUsd: CARD_REQUEST_MANDATORY_DEPOSIT_USD,
     rate,
   });
   const lines = [
     "💳 Card request payment required.",
-    `Mandatory deposit: $${CARD_REQUEST_MANDATORY_DEPOSIT_USD.toFixed(2)} × ${rate.toFixed(2)} ETB = ${baseAmount.toFixed(2)} ETB`,
-    `Card fee: ${feeEtb.toFixed(2)} ETB`,
-    `Total to pay: ${totalEtb.toFixed(2)} ETB`,
+    `Card amount: $${cardAmountUsd.toFixed(2)}`,
+    `Service fee: $${feeUsd.toFixed(2)}`,
+    `Total to pay: $${totalUsd.toFixed(2)} (≈ ${totalEtb.toFixed(2)} ETB at rate ${rate.toFixed(2)})`,
     "Choose a payment method:",
   ];
   await bot!.sendMessage(chatId, lines.join("\n"), {

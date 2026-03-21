@@ -84,10 +84,15 @@ async function fetchCardDetail(cardId: string, mode?: string) {
 
 async function actionCard(cardId: string, action: "freeze" | "unfreeze") {
   const public_key = requirePublicKey();
+  const payload = { card_id: cardId, action, public_key };
   const resp = await axios.post(
     `${BITVCARD_BASE}action/status/`,
-    { card_id: cardId, action, public_key },
-    { timeout: 15000 }
+    payload,
+    {
+      // StroWallet docs require action/card_id/public_key in query params.
+      params: payload,
+      timeout: 15000,
+    }
   );
   return resp.data;
 }

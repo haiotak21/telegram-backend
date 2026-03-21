@@ -4,8 +4,8 @@ import Transaction from "../models/Transaction";
 import User from "../models/User";
 import { loadPricingConfig, quoteDeposit } from "./pricingService";
 
-const EXPECTED_CBE_RECEIVER_NAME = (process.env.CBE_RECEIVER_NAME || process.env.RECEIVER_NAME || "Hailemariam Takele Mekonnen").trim();
-const EXPECTED_TELEBIRR_RECEIVER_NAME = (process.env.TELEBIRR_RECEIVER_NAME || "Hayilemariyam Takele Mekonen").trim();
+const EXPECTED_CBE_RECEIVER_NAME = (process.env.CBE_RECEIVER_NAME || process.env.RECEIVER_NAME || "Addisu melke admasu").trim();
+const EXPECTED_TELEBIRR_RECEIVER_NAME = (process.env.TELEBIRR_RECEIVER_NAME || "Addisu melke admasu").trim();
 
 function amountsClose(a: number, b: number, tol = 0.01) {
   return Math.abs(a - b) <= tol;

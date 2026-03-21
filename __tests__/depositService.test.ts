@@ -56,7 +56,7 @@ describe('processDeposit', () => {
         success: true,
         amount: 100,
         transactionNumber: 'SIM2',
-        raw: { data: { creditedPartyName: 'Hayilemariyam Takele Mekonen' } },
+        raw: { data: { creditedPartyName: 'Addisu melke admasu' } },
       },
     });
     (User.findOne as any).mockImplementation(() => ({
@@ -90,7 +90,7 @@ describe('processDeposit', () => {
       body: {
         success: true,
         amount: 50,
-        raw: { data: { creditedPartyName: 'Hayilemariyam Takele Mekonen' } },
+        raw: { data: { creditedPartyName: 'Addisu melke admasu' } },
       },
     });
     (Transaction.create as any).mockResolvedValue([{ _id: 'txFail2' }]);

@@ -10,7 +10,7 @@ Payer FT SUSPNESE ACCOUNT
 
 Account E****0010
 
-Receiver H/MARIAM TAKELE MEKONNEN
+Receiver ADDISU MELKE ADMASU
 
 Account 1****7449
 
@@ -33,7 +33,7 @@ describe('process-text', () => {
     });
     it('should extract receiver, reference, date, accounts from receipt text', () => {
         const t = (0, process_text_1.processResultText)(tx_receipt);
-        expect(t.receiver).toBe('H/MARIAM TAKELE MEKONNEN');
+        expect(t.receiver).toBe('ADDISU MELKE ADMASU');
         expect(t.payer).toBe('FT SUSPNESE ACCOUNT');
         expect(t.payerAccount).toBe('E****0010');
         expect(t.receiverAccount).toBe('1****7449');

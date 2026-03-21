@@ -9,9 +9,9 @@ Payer FT SUSPNESE ACCOUNT
 
 Account E****0010
 
-Receiver H/MARIAM TAKELE MEKONNEN
+Receiver ADDISU MELKE ADMASU
 
-Account 1****7449
+Account 1****6208
 
 Payment Date & Time 1/15/2026, 5:23:00 PM
 
@@ -35,10 +35,10 @@ describe('process-text', () => {
 
   it('should extract receiver, reference, date, accounts from receipt text', () => {
     const t = processResultText(tx_receipt);
-    expect(t.receiver).toBe('H/MARIAM TAKELE MEKONNEN');
+    expect(t.receiver).toBe('ADDISU MELKE ADMASU');
     expect(t.payer).toBe('FT SUSPNESE ACCOUNT');
     expect(t.payerAccount).toBe('E****0010');
-    expect(t.receiverAccount).toBe('1****7449');
+    expect(t.receiverAccount).toBe('1****6208');
     expect(t.reference).toBe('FT260157S10C');
     expect(t.date).toBe('1/15/2026, 5:23:00 PM');
     expect(t.reason).toBe('BKM56700002 1:H0o');

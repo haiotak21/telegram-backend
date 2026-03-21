@@ -15,11 +15,11 @@ describe('transaction-id helpers', () => {
         expect((0, transaction_id_1.extractTransactionIdFromLink)(link)).toBe(sampleId);
     });
     it('handles transaction id with trailing symbols', () => {
-        const messyId = `${sampleId}&73027449`;
+        const messyId = `${sampleId}&39256208`;
         expect((0, transaction_id_1.validateTransactionId)(messyId)).toBe(sampleId);
     });
     it('extracts transaction id when link has extra characters', () => {
-        const link = `https://apps.cbe.com.et:100/BranchReceipt/${sampleId}&73027449`;
+        const link = `https://apps.cbe.com.et:100/BranchReceipt/${sampleId}&39256208`;
         expect((0, transaction_id_1.extractTransactionIdFromLink)(link)).toBe(sampleId);
     });
 });

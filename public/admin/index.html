@@ -510,9 +510,27 @@
             </div>
             <div class="row inline">
               <div>
-                <label>Card Request Fee (ETB)</label>
+                <label>Card Request Fee (ETB, legacy)</label>
                 <input
                   id="cardRequestFeeEtb"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                />
+              </div>
+              <div>
+                <label>First Card Amount (USD)</label>
+                <input
+                  id="firstCardAmountUsd"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                />
+              </div>
+              <div>
+                <label>First Card Fee (USD)</label>
+                <input
+                  id="firstCardFeeUsd"
                   type="number"
                   step="0.01"
                   min="0"
@@ -917,37 +935,58 @@
 
         <section class="card panel-view" data-view="broadcast">
           <h2>Podcast Broadcast</h2>
-          <p class="sub">Send image + text to real user segments with live progress and history.</p>
+          <p class="sub">
+            Send image + text to real user segments with live progress and
+            history.
+          </p>
           <div class="row">
             <label>Target Segment</label>
             <select id="broadcastFilter">
               <option value="all" selected>All users</option>
               <option value="kyc_approved">KYC Approved Only</option>
-              <option value="balance_positive">Users with Balance &gt; 0</option>
+              <option value="balance_positive">
+                Users with Balance &gt; 0
+              </option>
             </select>
             <div class="toolbar">
-              <button id="broadcastCountBtn" type="button" class="secondary">Refresh Audience</button>
+              <button id="broadcastCountBtn" type="button" class="secondary">
+                Refresh Audience
+              </button>
               <span class="tag" id="broadcastAudience">Audience: —</span>
             </div>
 
             <label>Podcast Text</label>
-            <textarea id="broadcastMessage" rows="4" placeholder="Write your message"></textarea>
+            <textarea
+              id="broadcastMessage"
+              rows="4"
+              placeholder="Write your message"
+            ></textarea>
 
             <label>Image</label>
             <input id="broadcastImage" type="file" accept="image/*" />
             <div class="toolbar">
-              <button id="broadcastUploadBtn" type="button" class="secondary">Upload Image</button>
-              <span class="tag" id="broadcastImageStatus">No image uploaded</span>
+              <button id="broadcastUploadBtn" type="button" class="secondary">
+                Upload Image
+              </button>
+              <span class="tag" id="broadcastImageStatus"
+                >No image uploaded</span
+              >
             </div>
 
-            <div class="data-box" id="broadcastPreview">Preview will appear here.</div>
+            <div class="data-box" id="broadcastPreview">
+              Preview will appear here.
+            </div>
             <div class="toolbar">
               <button id="broadcastLaunchBtn" type="button">Launch</button>
-              <button id="broadcastHistoryBtn" type="button" class="secondary">Load History</button>
+              <button id="broadcastHistoryBtn" type="button" class="secondary">
+                Load History
+              </button>
             </div>
 
             <div class="progress"><div id="broadcastProgressBar"></div></div>
-            <div id="broadcastProgressText" class="status">No broadcast running.</div>
+            <div id="broadcastProgressText" class="status">
+              No broadcast running.
+            </div>
             <div id="broadcastHistory" class="data-box">No history loaded.</div>
           </div>
         </section>
@@ -1046,6 +1085,8 @@
         topupMin: document.getElementById("topupMin"),
         topupMax: document.getElementById("topupMax"),
         cardRequestFeeEtb: document.getElementById("cardRequestFeeEtb"),
+        firstCardAmountUsd: document.getElementById("firstCardAmountUsd"),
+        firstCardFeeUsd: document.getElementById("firstCardFeeUsd"),
         depositAmountEtb: document.getElementById("depositAmountEtb"),
         topupAmountUsdt: document.getElementById("topupAmountUsdt"),
         balanceUserId: document.getElementById("balanceUserId"),
@@ -1165,6 +1206,12 @@
             t.status === "pending" || t.status === "waiting"
               ? "waiting.."
               : t.status || "-";
+          const canReview =
+            t.status === "pending" &&
+            Boolean(
+              t.metadata?.manualReviewRequired ||
+                t.metadata?.verificationMode === "manual_fallback",
+            );
           card.innerHTML = `
             <div class="mono req-line">${when}</div>
             <div class="req-line">🧑 User: ${t.userId}</div>
@@ -1180,10 +1227,10 @@
               <div style="flex:1"></div>
               <button class="secondary" data-action="decline" data-id="${
                 card.dataset.id
-              }" disabled title="Read-only">Decline</button>
+              }" ${canReview ? "" : "disabled"}>Decline</button>
               <button data-action="approve" data-id="${
                 card.dataset.id
-              }" disabled title="Read-only">Approve</button>
+              }" ${canReview ? "" : "disabled"}>Approve</button>
             </div>
           `;
           container.appendChild(card);
@@ -1217,7 +1264,9 @@
 
       function updateBroadcastPreview() {
         const text = (els.broadcastMessage?.value || "").trim();
-        const img = broadcastImageUrl ? `Image: ${broadcastImageUrl}` : "Image: not uploaded";
+        const img = broadcastImageUrl
+          ? `Image: ${broadcastImageUrl}`
+          : "Image: not uploaded";
         const body = text || "Message: (empty)";
         if (els.broadcastPreview) {
           els.broadcastPreview.textContent = `${img}\n\n${body}`;
@@ -1228,7 +1277,9 @@
         if (!hasToken()) return showToast("Missing admin token", "error");
         const filter = els.broadcastFilter?.value || "all";
         try {
-          const data = await safeFetch(`/api/admin/broadcast/targets?filter=${encodeURIComponent(filter)}`);
+          const data = await safeFetch(
+            `/api/admin/broadcast/targets?filter=${encodeURIComponent(filter)}`,
+          );
           if (els.broadcastAudience) {
             els.broadcastAudience.textContent = `Audience: ${data.targetCount || 0} users`;
           }
@@ -1241,8 +1292,10 @@
         if (!hasToken()) return showToast("Missing admin token", "error");
         const file = els.broadcastImage?.files?.[0];
         if (!file) return showToast("Choose an image first", "error");
-        if (!file.type.startsWith("image/")) return showToast("Only image files are allowed", "error");
-        if (file.size > 5 * 1024 * 1024) return showToast("Image must be 5MB or less", "error");
+        if (!file.type.startsWith("image/"))
+          return showToast("Only image files are allowed", "error");
+        if (file.size > 5 * 1024 * 1024)
+          return showToast("Image must be 5MB or less", "error");
 
         const dataUrl = await new Promise((resolve, reject) => {
           const reader = new FileReader();
@@ -1255,11 +1308,17 @@
         try {
           const data = await safeFetch("/api/admin/broadcast/upload-image", {
             method: "POST",
-            body: JSON.stringify({ imageData: dataUrl, fileName: file.name, mimeType: file.type }),
+            body: JSON.stringify({
+              imageData: dataUrl,
+              fileName: file.name,
+              mimeType: file.type,
+            }),
           });
           broadcastImageUrl = data.imageUrl || "";
           if (els.broadcastImageStatus) {
-            els.broadcastImageStatus.textContent = broadcastImageUrl ? "Image uploaded" : "Upload failed";
+            els.broadcastImageStatus.textContent = broadcastImageUrl
+              ? "Image uploaded"
+              : "Upload failed";
           }
           updateBroadcastPreview();
           showToast("Image uploaded", "success");
@@ -1278,7 +1337,9 @@
         }
         els.broadcastHistory.innerHTML = items
           .map((it) => {
-            const when = it.createdAt ? new Date(it.createdAt).toLocaleString() : "-";
+            const when = it.createdAt
+              ? new Date(it.createdAt).toLocaleString()
+              : "-";
             return [
               `${when}`,
               `Status: ${it.status}`,
@@ -1300,13 +1361,18 @@
             startBroadcastPolling();
           }
         } catch (err) {
-          showToast(err?.message || "Failed to load broadcast history", "error");
+          showToast(
+            err?.message || "Failed to load broadcast history",
+            "error",
+          );
         }
       }
 
       function setBroadcastProgress(done, total, success, failure, status) {
-        const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
-        if (els.broadcastProgressBar) els.broadcastProgressBar.style.width = `${pct}%`;
+        const pct =
+          total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+        if (els.broadcastProgressBar)
+          els.broadcastProgressBar.style.width = `${pct}%`;
         if (els.broadcastProgressText) {
           els.broadcastProgressText.textContent = `${status || "pending"} • ${done}/${total} • success ${success} • failures ${failure}`;
         }
@@ -1315,7 +1381,9 @@
       async function pollBroadcastProgress() {
         if (!activeBroadcastId || !hasToken()) return;
         try {
-          const data = await safeFetch(`/api/admin/broadcast/${encodeURIComponent(activeBroadcastId)}`);
+          const data = await safeFetch(
+            `/api/admin/broadcast/${encodeURIComponent(activeBroadcastId)}`,
+          );
           setBroadcastProgress(
             Number(data.processedCount || 0),
             Number(data.targetCount || 0),
@@ -1326,7 +1394,9 @@
           if (data.status === "completed" || data.status === "failed") {
             stopBroadcastPolling();
             showToast(
-              data.status === "completed" ? "Broadcast delivered" : "Broadcast failed",
+              data.status === "completed"
+                ? "Broadcast delivered"
+                : "Broadcast failed",
               data.status === "completed" ? "success" : "error",
             );
             await loadBroadcastHistory();
@@ -1353,8 +1423,13 @@
         if (!messageText) return showToast("Enter broadcast message", "error");
         const targetFilter = els.broadcastFilter?.value || "all";
 
-        const audienceText = (els.broadcastAudience?.textContent || "").replace("Audience: ", "");
-        const confirmed = confirm(`Confirm Broadcast: You are about to send this to ${audienceText || "selected users"}. This action cannot be undone.`);
+        const audienceText = (els.broadcastAudience?.textContent || "").replace(
+          "Audience: ",
+          "",
+        );
+        const confirmed = confirm(
+          `Confirm Broadcast: You are about to send this to ${audienceText || "selected users"}. This action cannot be undone.`,
+        );
         if (!confirmed) return;
 
         setLoading(els.broadcastLaunchBtn, true);
@@ -1369,7 +1444,13 @@
             }),
           });
           activeBroadcastId = data.id;
-          setBroadcastProgress(0, Number(data.targetCount || 0), 0, 0, data.status || "pending");
+          setBroadcastProgress(
+            0,
+            Number(data.targetCount || 0),
+            0,
+            0,
+            data.status || "pending",
+          );
           startBroadcastPolling();
           await loadBroadcastHistory();
           showToast("Broadcast queued", "success");
@@ -1487,8 +1568,7 @@
                 removeTransactions: removeTx,
               }),
             });
-            els.resetUsersStatus.textContent =
-              `${data.message || "Reset completed"}\nUsers: ${data.usersZeroed} | Links: ${data.linksCleared} | Cards: ${data.cardsUnlinked} | Tx archived: ${data.transactionsArchived}`;
+            els.resetUsersStatus.textContent = `${data.message || "Reset completed"}\nUsers: ${data.usersZeroed} | Links: ${data.linksCleared} | Cards: ${data.cardsUnlinked} | Tx archived: ${data.transactionsArchived}`;
             showToast("Reset completed", "success");
           } catch (err) {
             els.resetUsersStatus.textContent = err?.message || "Reset failed";
@@ -1516,7 +1596,8 @@
           const amountText = Number.isFinite(amount)
             ? `${amount.toFixed(2)} Birr`
             : "-";
-          const statusLabel = r.status === "pending" ? "waiting.." : r.status || "-";
+          const statusLabel =
+            r.status === "pending" ? "waiting.." : r.status || "-";
 
           wrapper.innerHTML = `
           <div class="mono req-line">${when}</div>
@@ -1808,8 +1889,10 @@
           inputs.topupMin.value = c.topupMin ?? "";
           inputs.topupMax.value = c.topupMax ?? "";
           inputs.cardRequestFeeEtb.value = c.cardRequestFeeEtb ?? 0;
+          inputs.firstCardAmountUsd.value = c.firstCardAmountUsd ?? 5;
+          inputs.firstCardFeeUsd.value = c.firstCardFeeUsd ?? 0;
           els.configStatus.textContent = "Config loaded";
-          els.configSummary.textContent = `Rate ${c.usdtRate} ETB | Deposit fee ${c.depositPercentFee}% + ${c.depositFlatFee} ETB | Top-up fee ${c.topupPercentFee}% + ${c.topupFlatFee} USDT | Card fee ${c.cardRequestFeeEtb ?? 0} ETB`;
+          els.configSummary.textContent = `Rate ${c.usdtRate} ETB | Deposit fee ${c.depositPercentFee}% + ${c.depositFlatFee} ETB | Top-up fee ${c.topupPercentFee}% + ${c.topupFlatFee} USDT | First card ${c.firstCardAmountUsd ?? 5} USD + fee ${c.firstCardFeeUsd ?? 0} USD`;
           const updatedAt = c.updatedAt
             ? new Date(c.updatedAt).toLocaleString()
             : "n/a";
@@ -1887,6 +1970,12 @@
           cardRequestFeeEtb: inputs.cardRequestFeeEtb.value
             ? Number(inputs.cardRequestFeeEtb.value)
             : undefined,
+          firstCardAmountUsd: inputs.firstCardAmountUsd.value
+            ? Number(inputs.firstCardAmountUsd.value)
+            : undefined,
+          firstCardFeeUsd: inputs.firstCardFeeUsd.value
+            ? Number(inputs.firstCardFeeUsd.value)
+            : undefined,
           updatedBy: inputs.updatedBy.value || undefined,
         };
         try {
@@ -1896,7 +1985,7 @@
           });
           els.configStatus.textContent = "Saved";
           lastConfig = data.config;
-          els.configSummary.textContent = `Rate ${data.config.usdtRate} ETB | Deposit fee ${data.config.depositPercentFee}% + ${data.config.depositFlatFee} ETB | Top-up fee ${data.config.topupPercentFee}% + ${data.config.topupFlatFee} USDT | Card fee ${data.config.cardRequestFeeEtb ?? 0} ETB`;
+          els.configSummary.textContent = `Rate ${data.config.usdtRate} ETB | Deposit fee ${data.config.depositPercentFee}% + ${data.config.depositFlatFee} ETB | Top-up fee ${data.config.topupPercentFee}% + ${data.config.topupFlatFee} USDT | First card ${data.config.firstCardAmountUsd ?? 5} USD + fee ${data.config.firstCardFeeUsd ?? 0} USD`;
           showToast("Config saved", "success");
         } catch (err) {
           els.configStatus.textContent = err.message;
@@ -2087,13 +2176,6 @@
         const action = target?.dataset?.action;
         const id = target?.dataset?.id;
         if (!action || !id) return;
-        if (
-          blockIfReadOnly(
-            "Transaction decisions are disabled in read-only mode",
-          )
-        ) {
-          return;
-        }
         const card = target.closest(".txn-card");
         const statusLine = card?.querySelector(".req-line.status-line");
         const approveBtn = card?.querySelector("button[data-action='approve']");
@@ -2274,10 +2356,16 @@
       }
 
       if (els.broadcastCountBtn) {
-        els.broadcastCountBtn.addEventListener("click", refreshBroadcastAudience);
+        els.broadcastCountBtn.addEventListener(
+          "click",
+          refreshBroadcastAudience,
+        );
       }
       if (els.broadcastFilter) {
-        els.broadcastFilter.addEventListener("change", refreshBroadcastAudience);
+        els.broadcastFilter.addEventListener(
+          "change",
+          refreshBroadcastAudience,
+        );
       }
       if (els.broadcastUploadBtn) {
         els.broadcastUploadBtn.addEventListener("click", uploadBroadcastImage);

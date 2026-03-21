@@ -5,6 +5,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const axios_1 = __importDefault(require("axios"));
+const http_1 = __importDefault(require("http"));
+const https_1 = __importDefault(require("https"));
 const CardRequest_1 = __importDefault(require("../models/CardRequest"));
 const TelegramLink_1 = require("../models/TelegramLink");
 const User_1 = __importDefault(require("../models/User"));
@@ -14,6 +16,9 @@ const botService_1 = require("../services/botService");
 const apiResponse_1 = require("../utils/apiResponse");
 const router = express_1.default.Router();
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
+const STROWALLET_PREFER_IPV4 = String(process.env.STROWALLET_PREFER_IPV4 || "true").toLowerCase() !== "false";
+const httpAgent = STROWALLET_PREFER_IPV4 ? new http_1.default.Agent({ keepAlive: true, family: 4 }) : undefined;
+const httpsAgent = STROWALLET_PREFER_IPV4 ? new https_1.default.Agent({ keepAlive: true, family: 4 }) : undefined;
 function getDefaultMode() {
     return process.env.STROWALLET_DEFAULT_MODE || (process.env.NODE_ENV !== "production" ? "sandbox" : undefined);
 }
@@ -24,6 +29,18 @@ function normalizeMode(mode) {
     if (m === "live")
         return undefined;
     return m;
+}
+function normalizeKycStatus(value) {
+    if (!value)
+        return "not_started";
+    const v = String(value).toLowerCase();
+    if (["approved", "verified", "success", "active", "high kyc", "high_kyc", "high-kyc"].includes(v))
+        return "approved";
+    if (["pending", "processing", "review", "unreview kyc", "unreview_kyc", "unreview-kyc"].includes(v))
+        return "pending";
+    if (["declined", "rejected", "failed", "low kyc", "low_kyc", "low-kyc"].includes(v))
+        return "rejected";
+    return "pending";
 }
 function asString(val) {
     if (val === undefined || val === null)
@@ -72,6 +89,8 @@ function buildBitvcardClient() {
     return axios_1.default.create({
         baseURL: BITVCARD_BASE,
         timeout: 15000,
+        httpAgent,
+        httpsAgent,
         headers: {
             Authorization: process.env.STROWALLET_API_KEY ? `Bearer ${process.env.STROWALLET_API_KEY}` : undefined,
         },
@@ -79,7 +98,7 @@ function buildBitvcardClient() {
 }
 async function fetchCardDetail(cardId, mode) {
     const public_key = requirePublicKey();
-    const resp = await axios_1.default.post(`${BITVCARD_BASE}fetch-card-detail/`, { card_id: cardId, public_key, mode }, { timeout: 15000 });
+    const resp = await axios_1.default.post(`${BITVCARD_BASE}fetch-card-detail/`, { card_id: cardId, public_key, mode }, { timeout: 15000, httpAgent, httpsAgent });
     return resp.data;
 }
 function extractCardInfo(respData) {
@@ -133,7 +152,8 @@ router.post("/", async (req, res) => {
         if (existing) {
             return (0, apiResponse_1.fail)(res, "You already have an active or approved card request", 400);
         }
-        if (!customer || customer.kycStatus !== "approved") {
+        const kycStatus = normalizeKycStatus(customer?.kycStatus || user?.kycStatus);
+        if (kycStatus !== "approved") {
             return (0, apiResponse_1.fail)(res, "You must complete KYC before requesting a card", 400);
         }
         // Enforce minimum amount of 3
@@ -171,8 +191,26 @@ router.post("/", async (req, res) => {
             mode: normalizeMode(getDefaultMode()),
         };
         try {
-            const resp = await bitvcard.post("create-card/", payload);
-            const respData = resp.data;
+            let respData;
+            try {
+                const resp = await bitvcard.post("create-card/", payload, {
+                    headers: { "Content-Type": "application/json" },
+                });
+                respData = resp.data;
+            }
+            catch (firstErr) {
+                // Fallback for deployments that parse some fields from query params.
+                const fallbackResp = await bitvcard.post("create-card/", payload, {
+                    headers: { "Content-Type": "application/json" },
+                    params: payload,
+                });
+                respData = fallbackResp.data;
+                console.warn("[card-requests] create-card primary attempt failed, fallback succeeded", {
+                    userId,
+                    status: firstErr?.response?.status,
+                    message: firstErr?.response?.data?.message || firstErr?.response?.data?.error || firstErr?.message,
+                });
+            }
             const { cardId, cardNumber, cvc } = extractCardInfo(respData);
             if (!cardId) {
                 request.status = "declined";

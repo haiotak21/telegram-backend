@@ -388,7 +388,10 @@ router.post("/action/status", async (req, res) => {
     const body = ActionStatusSchema.parse(req.body || {});
     const public_key = requirePublicKey();
     const payload = { ...body, public_key };
-    const resp = await bitvcard.post("action/status/", payload);
+    const resp = await bitvcard.post("action/status/", payload, {
+      // StroWallet docs require these fields as query params for this endpoint.
+      params: payload,
+    });
     return ok(res, resp.data, 200);
   } catch (e) {
     const { status, message } = normalizeError(e);

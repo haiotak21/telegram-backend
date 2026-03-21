@@ -1,4 +1,5 @@
 import express from "express";
+import mongoose from "mongoose";
 import { z } from "zod";
 import User from "../models/User";
 import Card from "../models/Card";
@@ -8,6 +9,7 @@ import { topUpCard } from "../services/topupService";
 import { TelegramLink } from "../models/TelegramLink";
 import Transaction from "../models/Transaction";
 import RuntimeAudit from "../models/RuntimeAudit";
+import { notifyDepositCredited, notifyDepositReviewDeclined } from "../services/botService";
 import { ok, fail } from "../utils/apiResponse";
 
 const router = express.Router();
@@ -25,6 +27,8 @@ const PricingSchema = z.object({
   topupMin: z.number().min(0).optional(),
   topupMax: z.number().min(0).optional(),
   cardRequestFeeEtb: z.number().min(0).optional(),
+  firstCardAmountUsd: z.number().min(0).optional(),
+  firstCardFeeUsd: z.number().min(0).optional(),
   updatedBy: z.string().optional(),
 });
 
@@ -40,6 +44,11 @@ const ResetUsersSchema = z.object({
   userId: z.string().optional(),
   removeTransactions: z.boolean().optional(),
   reason: z.string().optional(),
+});
+
+const TransactionDecisionSchema = z.object({
+  action: z.enum(["approve", "decline"]),
+  reason: z.string().max(500).optional(),
 });
 
 function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -165,7 +174,134 @@ router.get("/transactions/recent", requireAdmin, async (req, res) => {
 });
 
 router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
-  return fail(res, "Manual approval/decline is disabled. StroWallet is the source of truth.", 405);
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const id = String(req.params.id || "");
+    const { action, reason } = TransactionDecisionSchema.parse(req.body || {});
+
+    const tx = await Transaction.findById(id).session(session);
+    if (!tx) {
+      await session.abortTransaction();
+      session.endSession();
+      return fail(res, "Transaction not found", 404);
+    }
+
+    if (tx.transactionType !== "deposit") {
+      await session.abortTransaction();
+      session.endSession();
+      return fail(res, "Only deposit transactions can be reviewed manually", 400);
+    }
+
+    if (tx.status === "completed") {
+      await session.commitTransaction();
+      session.endSession();
+      return ok(res, {
+        id: String(tx._id),
+        status: tx.status,
+        message: "Transaction already completed",
+      });
+    }
+
+    if (tx.status !== "pending") {
+      await session.abortTransaction();
+      session.endSession();
+      return fail(res, `Only pending transactions can be reviewed (current: ${tx.status})`, 400);
+    }
+
+    if (action === "decline") {
+      tx.status = "failed";
+      tx.verified = false;
+      tx.metadata = {
+        ...(tx.metadata || {}),
+        manualReviewRequired: false,
+        manualReview: {
+          status: "declined",
+          reviewedAt: new Date(),
+          reviewedBy: "admin",
+          reason: reason || "Declined by admin",
+        },
+      };
+      await tx.save({ session });
+      await session.commitTransaction();
+      session.endSession();
+
+      await notifyDepositReviewDeclined(String(tx.userId), reason);
+      return ok(res, {
+        id: String(tx._id),
+        status: tx.status,
+        action,
+      });
+    }
+
+    const amountEtbRaw = tx.amountEtb ?? tx.metadata?.expectedAmountEtb ?? tx.amount;
+    const amountEtb = Number(amountEtbRaw);
+    if (!Number.isFinite(amountEtb) || amountEtb <= 0) {
+      await session.abortTransaction();
+      session.endSession();
+      return fail(res, "Cannot approve transaction without a valid ETB amount", 400);
+    }
+
+    const pricing = await loadPricingConfig();
+    const quote = quoteDeposit(amountEtb, pricing);
+    if (quote.creditedUsdt <= 0) {
+      await session.abortTransaction();
+      session.endSession();
+      return fail(res, "Deposit amount is too low after fees", 400);
+    }
+
+    const user = await User.findOneAndUpdate(
+      { userId: String(tx.userId) },
+      { $inc: { balance: quote.creditedUsdt } },
+      { new: true, session }
+    );
+    if (!user) {
+      await session.abortTransaction();
+      session.endSession();
+      return fail(res, "User not found", 404);
+    }
+
+    tx.status = "completed";
+    tx.verified = true;
+    tx.amountEtb = amountEtb;
+    tx.amountUsdt = quote.creditedUsdt;
+    tx.amount = quote.creditedUsdt;
+    tx.currency = "USDT";
+    tx.feeEtb = quote.feeEtb;
+    tx.rateSnapshot = quote.rate;
+    tx.metadata = {
+      ...(tx.metadata || {}),
+      manualReviewRequired: false,
+      manualReview: {
+        status: "approved",
+        reviewedAt: new Date(),
+        reviewedBy: "admin",
+        reason: reason || "Approved by admin",
+      },
+    };
+    await tx.save({ session });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    await notifyDepositCredited(String(tx.userId), quote.creditedUsdt, user.balance);
+    return ok(res, {
+      id: String(tx._id),
+      status: tx.status,
+      action,
+      creditedUsdt: quote.creditedUsdt,
+      newBalance: user.balance,
+      feeEtb: quote.feeEtb,
+      rate: quote.rate,
+    });
+  } catch (err: any) {
+    try {
+      await session.abortTransaction();
+    } catch {}
+    session.endSession();
+    const message = err?.errors?.[0]?.message || err?.message || "Failed to process decision";
+    return fail(res, message, 400);
+  }
 });
 
 // Admin: reset all existing users to start fresh (zero balances, unlink cards, archive transactions)

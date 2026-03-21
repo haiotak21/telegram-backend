@@ -784,7 +784,7 @@ function parseCbeComposite(raw: string): { reference: string; suffixOverride?: s
     decoded = trimmed;
   }
 
-  // Accept URL forms like: https://apps.cbe.com.et:100/?id=FT26066RPTJ473027449
+  // Accept URL forms like: https://apps.cbe.com.et:100/?id=FT26066RPTJ439256208
   let candidate = decoded;
   try {
     const url = new URL(decoded);
@@ -801,7 +801,7 @@ function parseCbeComposite(raw: string): { reference: string; suffixOverride?: s
 
   const text = String(candidate || decoded || "").trim();
 
-  // Accept explicit composite: FT...&73027449
+  // Accept explicit composite: FT...&39256208
   const amp = text.split("&").map((p) => p.trim()).filter(Boolean);
   if (amp.length >= 2) {
     const ref = (amp[0].match(/FT[A-Z0-9]{10}/i)?.[0] || amp[0]).toUpperCase();
@@ -809,7 +809,7 @@ function parseCbeComposite(raw: string): { reference: string; suffixOverride?: s
     return suffix ? { reference: ref, suffixOverride: suffix } : { reference: ref };
   }
 
-  // Accept concatenated value: FT26066RPTJ473027449 => FT26066RPTJ4 + 73027449
+  // Accept concatenated value: FT26066RPTJ439256208 => FT26066RPTJ4 + 39256208
   const concat = text.match(/(FT[A-Z0-9]{10})(\d{8})$/i);
   if (concat) {
     return { reference: concat[1].toUpperCase(), suffixOverride: concat[2] };
