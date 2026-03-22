@@ -892,14 +892,25 @@ async function initBot() {
                 }
                 else {
                     const selected = depositSelections.get(msg.chat.id);
-                    const queued = await queueDepositManualReview({
-                        userId: String(msg.chat.id),
-                        paymentMethod: method,
-                        transactionNumber: normalizedTxn,
-                        expectedAmountEtb: selected?.amount ?? pending.expectedAmount,
-                        reason: b?.message || "Automatic verifier returned failure",
-                        responseData: b,
-                    });
+                    let queued = { queued: false, transactionId: null };
+                    try {
+                        queued = await queueDepositManualReview({
+                            userId: String(msg.chat.id),
+                            paymentMethod: method,
+                            transactionNumber: normalizedTxn,
+                            expectedAmountEtb: selected?.amount ?? pending.expectedAmount,
+                            reason: b?.message || "Automatic verifier returned failure",
+                            responseData: b,
+                        });
+                    }
+                    catch (queueErr) {
+                        console.error("Failed to queue manual review", {
+                            userId: String(msg.chat.id),
+                            paymentMethod: method,
+                            transactionNumber: normalizedTxn,
+                            error: queueErr?.message || String(queueErr),
+                        });
+                    }
                     depositSelections.delete(msg.chat.id);
                     if (queued.queued) {
                         await bot.sendMessage(msg.chat.id, [
@@ -915,14 +926,25 @@ async function initBot() {
             }
             catch (e) {
                 const selected = depositSelections.get(msg.chat.id);
-                const queued = await queueDepositManualReview({
-                    userId: String(msg.chat.id),
-                    paymentMethod: method,
-                    transactionNumber: normalizedTxn,
-                    expectedAmountEtb: selected?.amount ?? pending.expectedAmount,
-                    reason: e?.message || "Automatic verifier threw an error",
-                    responseData: { error: e?.message || String(e) },
-                });
+                let queued = { queued: false, transactionId: null };
+                try {
+                    queued = await queueDepositManualReview({
+                        userId: String(msg.chat.id),
+                        paymentMethod: method,
+                        transactionNumber: normalizedTxn,
+                        expectedAmountEtb: selected?.amount ?? pending.expectedAmount,
+                        reason: e?.message || "Automatic verifier threw an error",
+                        responseData: { error: e?.message || String(e) },
+                    });
+                }
+                catch (queueErr) {
+                    console.error("Failed to queue manual review after verifier error", {
+                        userId: String(msg.chat.id),
+                        paymentMethod: method,
+                        transactionNumber: normalizedTxn,
+                        error: queueErr?.message || String(queueErr),
+                    });
+                }
                 depositSelections.delete(msg.chat.id);
                 if (queued.queued) {
                     await bot.sendMessage(msg.chat.id, [
@@ -1620,31 +1642,49 @@ async function queueDepositManualReview(params) {
         return { queued: false, transactionId: String(existing._id) };
     }
     const amountEtb = Number.isFinite(expectedAmountEtb) ? Number(expectedAmountEtb) : undefined;
-    const doc = await Transaction_1.default.findOneAndUpdate({
-        userId,
-        transactionType: "deposit",
-        transactionNumber: txn,
-    }, {
-        $set: {
-            paymentMethod,
-            amount: amountEtb ?? 0,
-            amountEtb,
-            status: "pending",
-            verified: false,
-            responseData,
-            metadata: {
-                manualReviewRequired: true,
-                expectedAmountEtb: amountEtb,
-                verificationMode: "manual_fallback",
-                verificationFailureReason: reason,
-                queuedAt: new Date(),
+    try {
+        const doc = await Transaction_1.default.findOneAndUpdate({
+            userId,
+            transactionType: "deposit",
+            $or: [{ transactionNumber: txn }, { referenceNumber: txn }],
+        }, {
+            $set: {
+                paymentMethod,
+                amount: amountEtb ?? 0,
+                amountEtb,
+                referenceNumber: txn,
+                status: "pending",
+                verified: false,
+                responseData,
+                metadata: {
+                    manualReviewRequired: true,
+                    expectedAmountEtb: amountEtb,
+                    verificationMode: "manual_fallback",
+                    verificationFailureReason: reason,
+                    queuedAt: new Date(),
+                },
             },
-        },
-        $setOnInsert: {
-            currency: "ETB",
-        },
-    }, { upsert: true, new: true });
-    return { queued: true, transactionId: String(doc._id) };
+            $setOnInsert: {
+                transactionNumber: txn,
+                referenceNumber: txn,
+                currency: "ETB",
+            },
+        }, { upsert: true, new: true });
+        return { queued: true, transactionId: String(doc._id) };
+    }
+    catch (err) {
+        if (err?.code === 11000) {
+            const duplicate = await Transaction_1.default.findOne({
+                userId,
+                transactionType: "deposit",
+                $or: [{ transactionNumber: txn }, { referenceNumber: txn }],
+            }).lean();
+            if (duplicate) {
+                return { queued: true, transactionId: String(duplicate._id) };
+            }
+        }
+        throw err;
+    }
 }
 async function handleMenuSelection(action, chatId, message) {
     if (shouldSuppressOutgoing(chatId, `menu_action:${action}`, 1200))
