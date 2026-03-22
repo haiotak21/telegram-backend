@@ -4,11 +4,13 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
+const axios_1 = __importDefault(require("axios"));
 const mongoose_1 = __importDefault(require("mongoose"));
 const zod_1 = require("zod");
 const User_1 = __importDefault(require("../models/User"));
 const Card_1 = __importDefault(require("../models/Card"));
 const CardRequest_1 = __importDefault(require("../models/CardRequest"));
+const Customer_1 = __importDefault(require("../models/Customer"));
 const pricingService_1 = require("../services/pricingService");
 const topupService_1 = require("../services/topupService");
 const TelegramLink_1 = require("../models/TelegramLink");
@@ -218,6 +220,79 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
                 id: String(tx._id),
                 status: tx.status,
                 action,
+            });
+        }
+        const isCardRequestManual = tx.metadata?.kind === "card_request_manual";
+        if (isCardRequestManual) {
+            const userId = String(tx.userId);
+            const userRecord = await User_1.default.findOne({ userId }).lean();
+            const customer = await Customer_1.default.findOne({ userId }).lean();
+            if (!userRecord) {
+                await session.abortTransaction();
+                session.endSession();
+                return (0, apiResponse_1.fail)(res, "User not found", 404);
+            }
+            if (!customer || customer.kycStatus !== "approved") {
+                await session.abortTransaction();
+                session.endSession();
+                return (0, apiResponse_1.fail)(res, "User KYC is not approved for card creation", 400);
+            }
+            const cardAmountUsdRaw = tx.metadata?.cardAmountUsd;
+            const cardAmountUsd = Number(cardAmountUsdRaw);
+            const amount = Number.isFinite(cardAmountUsd) && cardAmountUsd >= 3 ? cardAmountUsd : 3;
+            const nameOnCard = [userRecord.firstName, userRecord.lastName].filter(Boolean).join(" ") || "StroWallet User";
+            const customerEmail = customer.email || userRecord.customerEmail;
+            if (!customerEmail) {
+                await session.abortTransaction();
+                session.endSession();
+                return (0, apiResponse_1.fail)(res, "User email is missing for card request", 400);
+            }
+            const backendBase = process.env.BOT_BACKEND_BASE || `http://127.0.0.1:${process.env.PORT || 3000}`;
+            let createResp;
+            try {
+                createResp = await axios_1.default.post(`${backendBase}/api/card-requests`, {
+                    userId,
+                    nameOnCard,
+                    cardType: "visa",
+                    amount: String(amount),
+                    customerEmail,
+                    metadata: {
+                        source: "admin_manual_review",
+                        transactionId: String(tx._id),
+                    },
+                }, { timeout: 30000 });
+            }
+            catch (createErr) {
+                await session.abortTransaction();
+                session.endSession();
+                const msg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
+                return (0, apiResponse_1.fail)(res, msg, 400);
+            }
+            const cardId = createResp?.data?.data?.cardId;
+            tx.status = "completed";
+            tx.verified = true;
+            tx.metadata = {
+                ...(tx.metadata || {}),
+                manualReviewRequired: false,
+                manualReview: {
+                    status: "approved",
+                    reviewedAt: new Date(),
+                    reviewedBy: "admin",
+                    reason: reason || "Approved by admin",
+                },
+                cardRequest: {
+                    approvedAt: new Date(),
+                    cardId: cardId || null,
+                },
+            };
+            await tx.save({ session });
+            await session.commitTransaction();
+            session.endSession();
+            return (0, apiResponse_1.ok)(res, {
+                id: String(tx._id),
+                status: tx.status,
+                action,
+                cardId: cardId || null,
             });
         }
         const amountEtbRaw = tx.amountEtb ?? tx.metadata?.expectedAmountEtb ?? tx.amount;
