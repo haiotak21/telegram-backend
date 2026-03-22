@@ -978,11 +978,12 @@ export async function initBot() {
               msg.chat.id,
               [
                 "✅ Payment Verified",
-                "Your deposit will be credited automatically.",
-                depositResult.creditedUsdt != null ? `Credited: ${Number(depositResult.creditedUsdt).toFixed(2)} USDT` : undefined,
+                depositResult.creditedUsdt != null ? `Credited to wallet: ${Number(depositResult.creditedUsdt).toFixed(2)} USDT` : undefined,
+                depositResult.newBalance != null ? `Wallet balance: ${Number(depositResult.newBalance).toFixed(2)} USDT` : undefined,
                 liveCardBalance != null
                   ? `Card balance: ${Number(liveCardBalance).toFixed(2)} ${liveCardCurrency}`
                   : "Your card balance will update shortly once the credit is posted.",
+                "Note: deposit credits your wallet first. Card balance changes when funds are topped up to the card.",
               ].filter(Boolean).join("\n"),
               { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
             );
