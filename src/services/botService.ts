@@ -187,10 +187,7 @@ const MENU_KEYBOARD: InlineKeyboardButton[][] = [
     { text: "➕ Request Card", callback_data: "MENU_CREATE_CARD" },
     { text: "💳 My Cards", callback_data: "MENU_MY_CARDS" },
   ],
-  [
-    { text: "✅ Verify Payment", callback_data: "MENU_VERIFY" },
-    { text: "💰 Deposit", callback_data: "MENU_DEPOSIT" },
-  ],
+  [{ text: "💰 Deposit", callback_data: "MENU_DEPOSIT" }],
   [
     { text: "👤 User Info", callback_data: "MENU_USER_INFO" },
     { text: "💰 Wallet", callback_data: "MENU_WALLET" },
@@ -285,7 +282,7 @@ export async function initBot() {
     { command: "requestcard", description: "Request a virtual card" },
     { command: "mycard", description: "View your card details" },
     { command: "cardstatus", description: "View your card status" },
-    { command: "transactions", description: "View card transactions" },
+    { command: "transactions", description: "View all transactions" },
     { command: "freeze", description: "Freeze your card" },
     { command: "unfreeze", description: "Unfreeze your card" },
     { command: "linkemail", description: "Link your email: /linkemail your@example.com" },
@@ -667,11 +664,23 @@ export async function initBot() {
       return;
     }
 
-    if (action === "CARD_TXN_NO_CARD" || action === "CARD_FREEZE_NO_CARD") {
+    if (action === "CARD_TXN_NO_CARD") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      await sendCardTransactions(chatId);
+      return;
+    }
+
+    if (action === "CARD_FREEZE_NO_CARD") {
       await bot!.answerCallbackQuery(query.id).catch(() => { });
       await bot!.sendMessage(chatId, "No card found. Use /card_request to create your virtual card.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
+      return;
+    }
+
+    if (action === "TXN_BACK_ALL") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      await sendCardTransactions(chatId);
       return;
     }
 
@@ -1122,12 +1131,36 @@ export async function initBot() {
             selected: { method, amount: selection.totalEtb },
           });
           if (validationErrors.length) {
-            const notice = [
-              "❌ Verification failed due to:",
-              ...validationErrors.map((v) => `- ${v}`),
-              "Please check your receipt and try again.",
-            ].join("\n");
-            await bot!.sendMessage(msg.chat.id, notice, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+            const queued = await queueCardRequestManualReview({
+              userId: String(msg.chat.id),
+              paymentMethod: method,
+              transactionNumber: normalizedTxn,
+              expectedAmountEtb: selection.totalEtb,
+              cardAmountUsd: selection.cardAmountUsd,
+              feeUsd: selection.feeUsd,
+              totalUsd: selection.totalUsd,
+              rate: selection.rate,
+              reason: `Receipt validation failed: ${validationErrors.join("; ")}`,
+              responseData: b,
+            });
+            if (queued.queued) {
+              await bot!.sendMessage(
+                msg.chat.id,
+                [
+                  "⏳ Automatic verification failed.",
+                  "Your card-request payment was sent to admin for manual review.",
+                  "You will be notified once approved or declined.",
+                ].join("\n"),
+                { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+              );
+            } else {
+              const notice = [
+                "❌ Verification failed due to:",
+                ...validationErrors.map((v) => `- ${v}`),
+                "Please check your receipt and try again.",
+              ].join("\n");
+              await bot!.sendMessage(msg.chat.id, notice, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+            }
             clearPendingAction(msg.chat.id);
             return;
           }
@@ -1195,14 +1228,78 @@ export async function initBot() {
           cardRequestSelections.delete(msg.chat.id);
           await submitCardRequest(String(msg.chat.id), user, customer, undefined, selection.cardAmountUsd);
         } else {
-          await bot!.sendMessage(msg.chat.id, `❌ Verification failed: ${b?.message || "Unknown error"}`, {
+          const selection = cardRequestSelections.get(msg.chat.id);
+          if (!selection) {
+            await bot!.sendMessage(msg.chat.id, `❌ Verification failed: ${b?.message || "Unknown error"}`, {
+              reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
+            clearPendingAction(msg.chat.id);
+            return;
+          }
+
+          const queued = await queueCardRequestManualReview({
+            userId: String(msg.chat.id),
+            paymentMethod: method,
+            transactionNumber: normalizedTxn,
+            expectedAmountEtb: selection.totalEtb,
+            cardAmountUsd: selection.cardAmountUsd,
+            feeUsd: selection.feeUsd,
+            totalUsd: selection.totalUsd,
+            rate: selection.rate,
+            reason: b?.message || "Automatic verifier returned failure",
+            responseData: b,
+          });
+          if (queued.queued) {
+            await bot!.sendMessage(
+              msg.chat.id,
+              [
+                "⏳ Automatic verification failed.",
+                "Your card-request payment was sent to admin for manual review.",
+                "You will be notified once approved or declined.",
+              ].join("\n"),
+              { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+            );
+          } else {
+            await bot!.sendMessage(msg.chat.id, `❌ Verification failed: ${b?.message || "Unknown error"}`, {
+              reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
+          }
+        }
+      } catch (e: any) {
+        const selection = cardRequestSelections.get(msg.chat.id);
+        if (selection) {
+          const queued = await queueCardRequestManualReview({
+            userId: String(msg.chat.id),
+            paymentMethod: method,
+            transactionNumber: normalizedTxn,
+            expectedAmountEtb: selection.totalEtb,
+            cardAmountUsd: selection.cardAmountUsd,
+            feeUsd: selection.feeUsd,
+            totalUsd: selection.totalUsd,
+            rate: selection.rate,
+            reason: e?.message || "Automatic verifier threw an error",
+            responseData: { error: e?.message || String(e) },
+          });
+          if (queued.queued) {
+            await bot!.sendMessage(
+              msg.chat.id,
+              [
+                "⏳ Automatic verification failed.",
+                "Your card-request payment was sent to admin for manual review.",
+                "You will be notified once approved or declined.",
+              ].join("\n"),
+              { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+            );
+          } else {
+            await bot!.sendMessage(msg.chat.id, `❌ Verification error: ${e?.message || "Unexpected error"}`, {
+              reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
+          }
+        } else {
+          await bot!.sendMessage(msg.chat.id, `❌ Verification error: ${e?.message || "Unexpected error"}`, {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
           });
         }
-      } catch (e: any) {
-        await bot!.sendMessage(msg.chat.id, `❌ Verification error: ${e?.message || "Unexpected error"}`, {
-          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-        });
       } finally {
         clearPendingAction(msg.chat.id);
       }
@@ -1802,6 +1899,98 @@ async function queueDepositManualReview(params: {
           metadata: {
             manualReviewRequired: true,
             expectedAmountEtb: amountEtb,
+            verificationMode: "manual_fallback",
+            verificationFailureReason: reason,
+            queuedAt: new Date(),
+          },
+        },
+        $setOnInsert: {
+          transactionNumber: txn,
+          referenceNumber: txn,
+          currency: "ETB",
+        },
+      },
+      { upsert: true, new: true }
+    );
+
+    return { queued: true as const, transactionId: String(doc._id) };
+  } catch (err: any) {
+    if (err?.code === 11000) {
+      const duplicate = await Transaction.findOne({
+        userId,
+        transactionType: "deposit",
+        $or: [{ transactionNumber: txn }, { referenceNumber: txn }],
+      }).lean();
+      if (duplicate) {
+        return { queued: true as const, transactionId: String(duplicate._id) };
+      }
+    }
+    throw err;
+  }
+}
+
+async function queueCardRequestManualReview(params: {
+  userId: string;
+  paymentMethod: PaymentMethod;
+  transactionNumber: string;
+  expectedAmountEtb: number;
+  cardAmountUsd: number;
+  feeUsd: number;
+  totalUsd: number;
+  rate: number;
+  reason: string;
+  responseData?: any;
+}) {
+  const {
+    userId,
+    paymentMethod,
+    transactionNumber,
+    expectedAmountEtb,
+    cardAmountUsd,
+    feeUsd,
+    totalUsd,
+    rate,
+    reason,
+    responseData,
+  } = params;
+  const txn = normalizeTxnRef(transactionNumber, paymentMethod);
+  if (!txn) return { queued: false as const, transactionId: null as string | null };
+
+  const existing = await Transaction.findOne({
+    userId,
+    transactionType: "deposit",
+    $or: [{ transactionNumber: txn }, { referenceNumber: txn }],
+    "metadata.kind": "card_request_manual",
+  }).lean();
+
+  if (existing?.status === "completed") {
+    return { queued: false as const, transactionId: String(existing._id) };
+  }
+
+  try {
+    const doc = await Transaction.findOneAndUpdate(
+      {
+        userId,
+        transactionType: "deposit",
+        $or: [{ transactionNumber: txn }, { referenceNumber: txn }],
+      },
+      {
+        $set: {
+          paymentMethod,
+          amount: expectedAmountEtb,
+          amountEtb: expectedAmountEtb,
+          referenceNumber: txn,
+          status: "pending",
+          verified: false,
+          responseData,
+          metadata: {
+            kind: "card_request_manual",
+            manualReviewRequired: true,
+            expectedAmountEtb,
+            cardAmountUsd,
+            feeUsd,
+            totalUsd,
+            conversionRateEtbPerUsdt: rate,
             verificationMode: "manual_fallback",
             verificationFailureReason: reason,
             queuedAt: new Date(),
@@ -3527,46 +3716,21 @@ async function sendCardSensitiveDetails(chatId: number, cardId: string) {
 async function sendCardTransactions(chatId: number, cardId?: string) {
   try {
     const userId = String(chatId);
-    const primaryCard = cardId ? await Card.findOne({ cardId }).lean() : await getPrimaryCardForUser(userId);
-    const targetCardId = cardId || primaryCard?.cardId;
-
-    if (!shouldSuppressOutgoing(chatId, `card_txn_loading:${targetCardId}`, 1500)) {
+    if (!shouldSuppressOutgoing(chatId, `user_txn_loading:${cardId || "all"}`, 1500)) {
       await bot!.sendMessage(chatId, "Loading transactions...", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
     }
 
-    if (!targetCardId) {
-      await bot!.sendMessage(chatId, "❌ No cards linked yet.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
-      return;
-    }
-
-    if (primaryCard?.status && String(primaryCard.status).toLowerCase() === "frozen") {
-      await bot!.sendMessage(chatId, "❄️ Your card is frozen. Transactions are unavailable while the card is frozen.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
-    }
-
-    try {
-      const resp = await callStroWallet("card-transactions", "post", { card_id: targetCardId }, { silentOnStatus: [400, 403, 404] });
-      const items = extractCardTransactions(resp?.data || resp);
-      if (items.length) {
-        await cacheCardTransactions(userId, targetCardId, items);
-      }
-    } catch {
-      // If upstream fails, fall back to cached transactions.
-    }
-
-    const query: any = { userId, transactionType: "card" };
-    query["metadata.cardId"] = targetCardId;
+    const query: any = { userId };
+    if (cardId) query["metadata.cardId"] = cardId;
     const txns = await Transaction.find(query)
       .sort({ createdAt: -1 })
-      .limit(8)
+      .limit(20)
       .lean();
 
     if (!txns.length) {
-      await bot!.sendMessage(chatId, "No card transactions found yet.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+      await bot!.sendMessage(chatId, "No transactions found yet.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
       return;
     }
 
@@ -3575,15 +3739,17 @@ async function sendCardTransactions(chatId: number, cardId?: string) {
 
     for (const t of txns) {
       const meta = (t as any).metadata || {};
-      const direction = meta.direction === "debit" ? "-" : "+";
-      const amountValue = Number((t as any).amount || 0);
-      const currency = (t as any).currency || "USD";
+      const type = String((t as any).transactionType || "transaction");
+      const direction = meta.direction === "debit" || type === "withdrawal" ? "-" : "+";
+      const amountValue = Number(((t as any).amountUsdt ?? (t as any).amount) || 0);
+      const currency = (t as any).currency || "USDT";
       const statusIcon = formatTxnStatusIcon((t as any).status || meta.rawStatus);
-      const label = formatTxnLabel(meta.direction, meta.description);
+      const rawLabel = meta.description || type.replace(/_/g, " ");
+      const label = formatTxnLabel(meta.direction, rawLabel);
       const dateLabel = formatTxnDate(meta.date) || formatTxnDate((t as any).createdAt);
-      const amountLabel = `${direction} $${amountValue.toFixed(2)}`;
-      lines.push(`${statusIcon} ${label}`);
-      lines.push(`${amountLabel}`);
+      const amountLabel = `${direction} ${amountValue.toFixed(2)} ${currency}`;
+      lines.push(`${statusIcon} ${label} (${type})`);
+      lines.push(amountLabel);
       if (dateLabel) lines.push(`${dateLabel}`);
       lines.push("");
 
@@ -3647,7 +3813,7 @@ async function sendCardTransactionDetail(chatId: number, txnId: string) {
   ].filter(Boolean) as string[];
 
   await bot!.sendMessage(chatId, lines.join("\n"), {
-    reply_markup: { inline_keyboard: [[{ text: "⬅️ Back to Transactions", callback_data: `CARD_TXN::${meta.cardId}` }], [MENU_BUTTON]] },
+    reply_markup: { inline_keyboard: [[{ text: "⬅️ Back to Transactions", callback_data: "TXN_BACK_ALL" }], [MENU_BUTTON]] },
   });
 }
 

@@ -1,9 +1,11 @@
 import express from "express";
+import axios from "axios";
 import mongoose from "mongoose";
 import { z } from "zod";
 import User from "../models/User";
 import Card from "../models/Card";
 import CardRequest from "../models/CardRequest";
+import Customer from "../models/Customer";
 import { enforceTopupLimits, loadPricingConfig, quoteDeposit, quoteTopup, upsertPricingConfig } from "../services/pricingService";
 import { topUpCard } from "../services/topupService";
 import { TelegramLink } from "../models/TelegramLink";
@@ -231,6 +233,88 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
         id: String(tx._id),
         status: tx.status,
         action,
+      });
+    }
+
+    const isCardRequestManual = tx.metadata?.kind === "card_request_manual";
+    if (isCardRequestManual) {
+      const userId = String(tx.userId);
+      const userRecord = await User.findOne({ userId }).lean();
+      const customer = await Customer.findOne({ userId }).lean();
+      if (!userRecord) {
+        await session.abortTransaction();
+        session.endSession();
+        return fail(res, "User not found", 404);
+      }
+      if (!customer || customer.kycStatus !== "approved") {
+        await session.abortTransaction();
+        session.endSession();
+        return fail(res, "User KYC is not approved for card creation", 400);
+      }
+
+      const cardAmountUsdRaw = tx.metadata?.cardAmountUsd;
+      const cardAmountUsd = Number(cardAmountUsdRaw);
+      const amount = Number.isFinite(cardAmountUsd) && cardAmountUsd >= 3 ? cardAmountUsd : 3;
+      const nameOnCard = [userRecord.firstName, userRecord.lastName].filter(Boolean).join(" ") || "StroWallet User";
+      const customerEmail = customer.email || userRecord.customerEmail;
+      if (!customerEmail) {
+        await session.abortTransaction();
+        session.endSession();
+        return fail(res, "User email is missing for card request", 400);
+      }
+
+      const backendBase = process.env.BOT_BACKEND_BASE || `http://127.0.0.1:${process.env.PORT || 3000}`;
+      let createResp: any;
+      try {
+        createResp = await axios.post(
+          `${backendBase}/api/card-requests`,
+          {
+            userId,
+            nameOnCard,
+            cardType: "visa",
+            amount: String(amount),
+            customerEmail,
+            metadata: {
+              source: "admin_manual_review",
+              transactionId: String(tx._id),
+            },
+          },
+          { timeout: 30000 }
+        );
+      } catch (createErr: any) {
+        await session.abortTransaction();
+        session.endSession();
+        const msg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
+        return fail(res, msg, 400);
+      }
+
+      const cardId = createResp?.data?.data?.cardId;
+      tx.status = "completed";
+      tx.verified = true;
+      tx.metadata = {
+        ...(tx.metadata || {}),
+        manualReviewRequired: false,
+        manualReview: {
+          status: "approved",
+          reviewedAt: new Date(),
+          reviewedBy: "admin",
+          reason: reason || "Approved by admin",
+        },
+        cardRequest: {
+          approvedAt: new Date(),
+          cardId: cardId || null,
+        },
+      };
+      await tx.save({ session });
+
+      await session.commitTransaction();
+      session.endSession();
+
+      return ok(res, {
+        id: String(tx._id),
+        status: tx.status,
+        action,
+        cardId: cardId || null,
       });
     }
 
