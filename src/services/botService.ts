@@ -4,6 +4,7 @@ import crypto from "crypto";
 import axios from "axios";
 import sharp from "sharp";
 import path from "path";
+import mongoose from "mongoose";
 import { promises as fs } from "fs";
 import { v2 as cloudinary } from "cloudinary";
 import { TelegramLink, ITelegramLink } from "../models/TelegramLink";
@@ -143,6 +144,7 @@ const DEPOSIT_ACCOUNTS: Record<PaymentMethod, { title: string; account: string; 
 const CARD_REQUEST_BASE_AMOUNT_ETB = Number(process.env.CARD_REQUEST_BASE_AMOUNT_ETB || 3);
 const BOT_LOCK_KEY = "telegram-bot";
 const BOT_LOCK_TTL_MS = Number(process.env.TELEGRAM_BOT_LOCK_TTL_MS || 90000);
+const TELEGRAM_BOT_USE_DB_LOCK = String(process.env.TELEGRAM_BOT_USE_DB_LOCK ?? "true").toLowerCase() !== "false";
 const STROWALLET_LOW_BALANCE_THRESHOLD_USD = Number(process.env.STROWALLET_LOW_BALANCE_THRESHOLD_USD || 50);
 const STROWALLET_LOW_BALANCE_ALERT_CHAT_ID = (process.env.STROWALLET_LOW_BALANCE_ALERT_CHAT_ID || "504201714").trim();
 const STROWALLET_LOW_BALANCE_ALERT_COOLDOWN_MS = Number(process.env.STROWALLET_LOW_BALANCE_ALERT_COOLDOWN_MS || 900000);
@@ -253,10 +255,16 @@ export async function initBot() {
     return;
   }
   const lockOwner = buildInstanceId();
-  const hasLock = await acquireBotLock(lockOwner, BOT_LOCK_TTL_MS);
-  if (!hasLock) {
-    console.warn("Telegram bot lock not acquired; another instance is active.");
-    return;
+  let hasLock = true;
+  const useDbLock = TELEGRAM_BOT_USE_DB_LOCK && mongoose.connection.readyState === 1;
+  if (!useDbLock) {
+    console.warn("Telegram bot DB lock disabled or Mongo unavailable; starting without distributed lock.");
+  } else {
+    hasLock = await acquireBotLock(lockOwner, BOT_LOCK_TTL_MS);
+    if (!hasLock) {
+      console.warn("Telegram bot lock not acquired; another instance is active.");
+      return;
+    }
   }
 
   const botRef = new TelegramBot(activeToken, { polling: false });
@@ -270,7 +278,9 @@ export async function initBot() {
   (botRef as any).getMe().then((me: any) => {
     console.log(`Telegram bot identity: @${me.username} (${me.id})`);
   }).catch(() => { });
-  startBotLockHeartbeat(lockOwner, botRef, BOT_LOCK_TTL_MS);
+  if (useDbLock) {
+    startBotLockHeartbeat(lockOwner, botRef, BOT_LOCK_TTL_MS);
+  }
 
   botRef.setMyCommands([
     { command: "start", description: "Show welcome message" },

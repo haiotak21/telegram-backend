@@ -22,6 +22,7 @@ const crypto_1 = __importDefault(require("crypto"));
 const axios_1 = __importDefault(require("axios"));
 const sharp_1 = __importDefault(require("sharp"));
 const path_1 = __importDefault(require("path"));
+const mongoose_1 = __importDefault(require("mongoose"));
 const fs_1 = require("fs");
 const cloudinary_1 = require("cloudinary");
 const TelegramLink_1 = require("../models/TelegramLink");
@@ -88,6 +89,7 @@ const DEPOSIT_ACCOUNTS = {
 const CARD_REQUEST_BASE_AMOUNT_ETB = Number(process.env.CARD_REQUEST_BASE_AMOUNT_ETB || 3);
 const BOT_LOCK_KEY = "telegram-bot";
 const BOT_LOCK_TTL_MS = Number(process.env.TELEGRAM_BOT_LOCK_TTL_MS || 90000);
+const TELEGRAM_BOT_USE_DB_LOCK = String(process.env.TELEGRAM_BOT_USE_DB_LOCK ?? "true").toLowerCase() !== "false";
 const STROWALLET_LOW_BALANCE_THRESHOLD_USD = Number(process.env.STROWALLET_LOW_BALANCE_THRESHOLD_USD || 50);
 const STROWALLET_LOW_BALANCE_ALERT_CHAT_ID = (process.env.STROWALLET_LOW_BALANCE_ALERT_CHAT_ID || "504201714").trim();
 const STROWALLET_LOW_BALANCE_ALERT_COOLDOWN_MS = Number(process.env.STROWALLET_LOW_BALANCE_ALERT_COOLDOWN_MS || 900000);
@@ -182,10 +184,17 @@ async function initBot() {
         return;
     }
     const lockOwner = buildInstanceId();
-    const hasLock = await acquireBotLock(lockOwner, BOT_LOCK_TTL_MS);
-    if (!hasLock) {
-        console.warn("Telegram bot lock not acquired; another instance is active.");
-        return;
+    let hasLock = true;
+    const useDbLock = TELEGRAM_BOT_USE_DB_LOCK && mongoose_1.default.connection.readyState === 1;
+    if (!useDbLock) {
+        console.warn("Telegram bot DB lock disabled or Mongo unavailable; starting without distributed lock.");
+    }
+    else {
+        hasLock = await acquireBotLock(lockOwner, BOT_LOCK_TTL_MS);
+        if (!hasLock) {
+            console.warn("Telegram bot lock not acquired; another instance is active.");
+            return;
+        }
     }
     const botRef = new node_telegram_bot_api_1.default(activeToken, { polling: false });
     await botRef.deleteWebHook({ drop_pending_updates: true }).catch(() => { });
@@ -198,7 +207,9 @@ async function initBot() {
     botRef.getMe().then((me) => {
         console.log(`Telegram bot identity: @${me.username} (${me.id})`);
     }).catch(() => { });
-    startBotLockHeartbeat(lockOwner, botRef, BOT_LOCK_TTL_MS);
+    if (useDbLock) {
+        startBotLockHeartbeat(lockOwner, botRef, BOT_LOCK_TTL_MS);
+    }
     botRef.setMyCommands([
         { command: "start", description: "Show welcome message" },
         { command: "menu", description: "Show main menu" },
