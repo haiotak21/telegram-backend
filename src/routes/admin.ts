@@ -136,6 +136,36 @@ const TransactionQuerySchema = z.object({
   cardId: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
+const DeclineFeeReportQuerySchema = z.object({
+  days: z.coerce.number().int().min(1).max(365).optional(),
+  minOccurrences: z.coerce.number().int().min(1).max(1000).optional(),
+  limit: z.coerce.number().int().min(1).max(1000).optional(),
+  format: z.enum(["json", "csv"]).optional(),
+});
+const DECLINE_FEE_MARKER = /decline[\s_-]*fees?/i;
+
+function includesDeclineFeeMarker(value?: any): boolean {
+  if (value == null) return false;
+  return DECLINE_FEE_MARKER.test(String(value));
+}
+
+function isDeclineFeeTransaction(tx: any): boolean {
+  return (
+    includesDeclineFeeMarker(tx?.metadata?.description) ||
+    includesDeclineFeeMarker(tx?.transactionNumber) ||
+    includesDeclineFeeMarker(tx?.referenceNumber) ||
+    includesDeclineFeeMarker(tx?.responseData?.description) ||
+    includesDeclineFeeMarker(tx?.responseData?.merchant)
+  );
+}
+
+function csvEscape(value: any): string {
+  const str = value == null ? "" : String(value);
+  if (/[,"\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
 
 const CardLinkSchema = z
   .object({
@@ -429,6 +459,42 @@ router.get("/users/:telegramUserId/kyc-debug", requireAdmin, async (req, res) =>
   }
 });
 
+router.get("/users/:telegramUserId/telegram-link", requireAdmin, async (req, res) => {
+  try {
+    const telegramUserId = String(req.params.telegramUserId || "").trim();
+    if (!telegramUserId) return fail(res, "telegramUserId is required", 400);
+
+    const user = await User.findOne({ userId: telegramUserId })
+      .select({ userId: 1, username: 1, chatId: 1, firstName: 1, lastName: 1, customerEmail: 1 })
+      .lean();
+
+    const chatIdRaw = user?.chatId || telegramUserId;
+    const chatIdNum = Number(chatIdRaw);
+    const chatId = Number.isFinite(chatIdNum) ? chatIdNum : null;
+
+    const link = chatId != null ? await TelegramLink.findOne({ chatId }).lean() : null;
+
+    const usernameRaw = user?.username ? String(user.username).trim() : "";
+    const username = usernameRaw ? usernameRaw.replace(/^@+/, "") : null;
+    const deepLink = chatId != null ? `tg://user?id=${chatId}` : null;
+    const webLink = username ? `https://t.me/${username}` : null;
+
+    return ok(res, {
+      userId: telegramUserId,
+      chatId,
+      username,
+      name: [user?.firstName, user?.lastName].filter(Boolean).join(" ") || null,
+      customerEmail: user?.customerEmail || link?.customerEmail || null,
+      linkedCardIds: link?.cardIds || [],
+      deepLink,
+      webLink,
+    });
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
 router.post("/cards/link", requireAdmin, async (req, res) => {
   try {
     const body = CardLinkSchema.parse(req.body || {});
@@ -704,19 +770,166 @@ router.get("/transactions", requireAdmin, async (req, res) => {
       .limit(limit || 50)
       .lean();
 
-    const transactions = items.map((t) => ({
-      id: t._id,
-      userId: t.userId,
-      cardId: t.metadata?.cardId,
-      amount: t.amount,
-      currency: t.currency,
-      direction: t.metadata?.direction,
-      description: t.metadata?.description,
-      status: t.status,
-      createdAt: t.createdAt,
-    }));
+    let declineFeeCount = 0;
+    const transactions = items.map((t) => {
+      const isDeclineFee = isDeclineFeeTransaction(t);
+      if (isDeclineFee) declineFeeCount += 1;
+      return {
+        id: t._id,
+        userId: t.userId,
+        cardId: t.metadata?.cardId,
+        amount: t.amount,
+        currency: t.currency,
+        direction: t.metadata?.direction,
+        description: t.metadata?.description,
+        status: t.status,
+        createdAt: t.createdAt,
+        isDeclineFee,
+        warningTags: isDeclineFee ? ["DECLINE_FEE"] : [],
+      };
+    });
 
-    return ok(res, { transactions });
+    return ok(res, { transactions, declineFeeCount });
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.get("/transactions/decline-fees/report", requireAdmin, async (req, res) => {
+  try {
+    const { days, minOccurrences, limit, format } = DeclineFeeReportQuerySchema.parse(req.query || {});
+    const windowDays = days || 30;
+    const minimum = minOccurrences || 3;
+    const maxRows = limit || 200;
+
+    const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+    const txQuery: any = {
+      transactionType: "card",
+      createdAt: { $gte: since },
+      $or: [
+        { "metadata.description": { $regex: DECLINE_FEE_MARKER } },
+        { transactionNumber: { $regex: DECLINE_FEE_MARKER } },
+        { referenceNumber: { $regex: DECLINE_FEE_MARKER } },
+      ],
+    };
+
+    const txns = await Transaction.find(txQuery)
+      .sort({ createdAt: -1 })
+      .limit(10000)
+      .lean();
+
+    const grouped = new Map<string, {
+      userId: string;
+      occurrences: number;
+      totalFeeUsd: number;
+      firstSeenAt?: Date;
+      lastSeenAt?: Date;
+      cards: Set<string>;
+      sampleRefs: string[];
+    }>();
+
+    for (const tx of txns) {
+      if (!isDeclineFeeTransaction(tx)) continue;
+      const userId = String(tx.userId || "").trim();
+      if (!userId) continue;
+
+      const amount = Number(tx.amount || 0);
+      const feeAbs = Number.isFinite(amount) ? Math.abs(amount) : 0;
+      const current = grouped.get(userId) || {
+        userId,
+        occurrences: 0,
+        totalFeeUsd: 0,
+        firstSeenAt: undefined,
+        lastSeenAt: undefined,
+        cards: new Set<string>(),
+        sampleRefs: [],
+      };
+
+      current.occurrences += 1;
+      current.totalFeeUsd += feeAbs;
+
+      if (tx.createdAt) {
+        const createdAt = new Date(tx.createdAt);
+        if (!current.firstSeenAt || createdAt < current.firstSeenAt) current.firstSeenAt = createdAt;
+        if (!current.lastSeenAt || createdAt > current.lastSeenAt) current.lastSeenAt = createdAt;
+      }
+
+      if (tx.metadata?.cardId) current.cards.add(String(tx.metadata.cardId));
+      const ref = tx.transactionNumber || tx.referenceNumber;
+      if (ref && current.sampleRefs.length < 5) current.sampleRefs.push(String(ref));
+
+      grouped.set(userId, current);
+    }
+
+    const impacted = Array.from(grouped.values())
+      .filter((entry) => entry.occurrences >= minimum)
+      .sort((a, b) => b.occurrences - a.occurrences || b.totalFeeUsd - a.totalFeeUsd)
+      .slice(0, maxRows);
+
+    const userIds = impacted.map((i) => i.userId);
+    const users = userIds.length
+      ? await User.find({ userId: { $in: userIds } })
+          .select({ userId: 1, firstName: 1, lastName: 1, customerEmail: 1 })
+          .lean()
+      : [];
+    const userMap = new Map(users.map((u) => [String(u.userId), u]));
+
+    const rows = impacted.map((entry) => {
+      const user = userMap.get(entry.userId);
+      return {
+        userId: entry.userId,
+        userName: [user?.firstName, user?.lastName].filter(Boolean).join(" ") || null,
+        customerEmail: user?.customerEmail || null,
+        occurrences: entry.occurrences,
+        totalFeeUsd: Number(entry.totalFeeUsd.toFixed(2)),
+        affectedCards: Array.from(entry.cards),
+        firstSeenAt: entry.firstSeenAt || null,
+        lastSeenAt: entry.lastSeenAt || null,
+        sampleRefs: entry.sampleRefs,
+      };
+    });
+
+    if (format === "csv") {
+      const header = [
+        "userId",
+        "userName",
+        "customerEmail",
+        "occurrences",
+        "totalFeeUsd",
+        "affectedCards",
+        "firstSeenAt",
+        "lastSeenAt",
+        "sampleRefs",
+      ].join(",");
+
+      const lines = rows.map((r) =>
+        [
+          csvEscape(r.userId),
+          csvEscape(r.userName || ""),
+          csvEscape(r.customerEmail || ""),
+          csvEscape(r.occurrences),
+          csvEscape(r.totalFeeUsd),
+          csvEscape(r.affectedCards.join("|")),
+          csvEscape(r.firstSeenAt ? new Date(r.firstSeenAt).toISOString() : ""),
+          csvEscape(r.lastSeenAt ? new Date(r.lastSeenAt).toISOString() : ""),
+          csvEscape(r.sampleRefs.join("|")),
+        ].join(",")
+      );
+
+      const csv = [header, ...lines].join("\n");
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename=decline-fee-report-${Date.now()}.csv`);
+      return res.status(200).send(csv);
+    }
+
+    return ok(res, {
+      generatedAt: new Date(),
+      windowDays,
+      minOccurrences: minimum,
+      totalAffectedUsers: rows.length,
+      rows,
+    });
   } catch (e) {
     const { status, message } = normalizeError(e);
     return fail(res, message, status);

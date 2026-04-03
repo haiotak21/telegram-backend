@@ -8,7 +8,7 @@ const router = express.Router();
 const DepositSchema = z.object({
   userId: z.union([z.string(), z.number()]).transform((v) => String(v)),
   paymentMethod: z.enum(["telebirr", "cbe"]),
-  amount: z.number().positive(),
+  amount: z.number().min(1000, "Minimum deposit amount is 1000 ETB"),
   transactionNumber: z.string().min(1),
 });
 

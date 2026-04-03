@@ -16,7 +16,7 @@ import { ok, fail } from "../utils/apiResponse";
 
 const router = express.Router();
 
-const AmountEtbSchema = z.object({ amountEtb: z.number().positive() });
+const AmountEtbSchema = z.object({ amountEtb: z.number().min(1000, "Minimum deposit amount is 1000 ETB") });
 const AmountUsdtSchema = z.object({ amountUsdt: z.number().positive() });
 const BalanceParamSchema = z.object({ userId: z.string().min(1) });
 
@@ -179,10 +179,20 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
   try {
-    const id = String(req.params.id || "");
+    const id = String(req.params.id || "").trim();
+    if (!id) {
+      await session.abortTransaction();
+      session.endSession();
+      return fail(res, "Transaction id is required", 400);
+    }
     const { action, reason } = TransactionDecisionSchema.parse(req.body || {});
 
-    const tx = await Transaction.findById(id).session(session);
+    const txQuery: any[] = [{ transactionNumber: id }, { referenceNumber: id }];
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      txQuery.unshift({ _id: id });
+    }
+
+    const tx = await Transaction.findOne({ $or: txQuery }).session(session);
     if (!tx) {
       await session.abortTransaction();
       session.endSession();
@@ -228,7 +238,13 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
       await session.commitTransaction();
       session.endSession();
 
-      await notifyDepositReviewDeclined(String(tx.userId), reason);
+      await notifyDepositReviewDeclined(String(tx.userId), reason).catch((notifyErr: any) => {
+        console.warn("Failed to notify declined deposit review", {
+          userId: String(tx.userId),
+          txId: String(tx._id),
+          error: notifyErr?.message || String(notifyErr),
+        });
+      });
       return ok(res, {
         id: String(tx._id),
         status: tx.status,
@@ -368,7 +384,13 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
-    await notifyDepositCredited(String(tx.userId), quote.creditedUsdt, user.balance);
+    await notifyDepositCredited(String(tx.userId), quote.creditedUsdt, user.balance).catch((notifyErr: any) => {
+      console.warn("Failed to notify approved deposit review", {
+        userId: String(tx.userId),
+        txId: String(tx._id),
+        error: notifyErr?.message || String(notifyErr),
+      });
+    });
     return ok(res, {
       id: String(tx._id),
       status: tx.status,

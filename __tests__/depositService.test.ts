@@ -54,7 +54,7 @@ describe('processDeposit', () => {
     (verifyPayment as any).mockResolvedValue({
       body: {
         success: true,
-        amount: 100,
+        amount: 1000,
         transactionNumber: 'SIM2',
         raw: { data: { creditedPartyName: 'Addisu melke admasu' } },
       },
@@ -66,7 +66,7 @@ describe('processDeposit', () => {
     (User.findOneAndUpdate as any).mockResolvedValue({ userId: 'u2', balance: 0.45454545 });
     (Transaction.create as any).mockResolvedValue([{ _id: 'txPending' }]);
 
-    const res = await processDeposit({ userId: 'u2', paymentMethod: 'telebirr', amount: 100, transactionNumber: 'SIM2' });
+    const res = await processDeposit({ userId: 'u2', paymentMethod: 'telebirr', amount: 1000, transactionNumber: 'SIM2' });
     expect(res.success).toBe(true);
     expect(res.status).toBe('completed');
     expect(res.message).toMatch(/credited successfully/i);
@@ -78,7 +78,7 @@ describe('processDeposit', () => {
     (verifyPayment as any).mockResolvedValue({ body: { success: false, message: 'Invalid receipt', raw: {} } });
     (Transaction.create as any).mockResolvedValue([{ _id: 'txFail' }]);
 
-    const res = await processDeposit({ userId: 'u3', paymentMethod: 'telebirr', amount: 100, transactionNumber: 'SIM3' });
+    const res = await processDeposit({ userId: 'u3', paymentMethod: 'telebirr', amount: 1000, transactionNumber: 'SIM3' });
     expect(res.success).toBe(false);
     expect(res.message).toMatch(/Invalid receipt/);
   });
@@ -95,7 +95,7 @@ describe('processDeposit', () => {
     });
     (Transaction.create as any).mockResolvedValue([{ _id: 'txFail2' }]);
 
-    const res = await processDeposit({ userId: 'u4', paymentMethod: 'telebirr', amount: 100, transactionNumber: 'SIM4' });
+    const res = await processDeposit({ userId: 'u4', paymentMethod: 'telebirr', amount: 1000, transactionNumber: 'SIM4' });
     expect(res.success).toBe(false);
     expect(res.message).toMatch(/selected deposit amount/i);
   });
@@ -106,13 +106,13 @@ describe('processDeposit', () => {
     (verifyPayment as any).mockResolvedValue({
       body: {
         success: true,
-        amount: 100,
+        amount: 1000,
         raw: { data: { creditedPartyName: 'John' } },
       },
     });
     (Transaction.create as any).mockResolvedValue([{ _id: 'txFailReceiver' }]);
 
-    const res = await processDeposit({ userId: 'u6', paymentMethod: 'telebirr', amount: 100, transactionNumber: 'SIM6' });
+    const res = await processDeposit({ userId: 'u6', paymentMethod: 'telebirr', amount: 1000, transactionNumber: 'SIM6' });
     expect(res.success).toBe(false);
     expect(res.message).toBe('Receiver name does not match the expected payment account.');
   });
@@ -124,7 +124,7 @@ describe('processDeposit', () => {
     (Transaction.findOne as any).mockReturnValue({ lean: jest.fn().mockResolvedValue({ status: 'completed', _id: 'existingTx', amountUsdt: 0.5, rateSnapshot: 200, feeEtb: 0 }) });
     (User.findOne as any).mockReturnValue({ lean: jest.fn().mockResolvedValue({ balance: 1.23 }) });
 
-    const res = await processDeposit({ userId: 'u5', paymentMethod: 'telebirr', amount: 100, transactionNumber: 'SIM5' });
+    const res = await processDeposit({ userId: 'u5', paymentMethod: 'telebirr', amount: 1000, transactionNumber: 'SIM5' });
     expect(res.success).toBe(true);
     expect(res.status).toBe('completed');
     expect(res.message).toMatch(/Deposit already processed/);

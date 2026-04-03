@@ -11,7 +11,7 @@ const router = express_1.default.Router();
 const DepositSchema = zod_1.z.object({
     userId: zod_1.z.union([zod_1.z.string(), zod_1.z.number()]).transform((v) => String(v)),
     paymentMethod: zod_1.z.enum(["telebirr", "cbe"]),
-    amount: zod_1.z.number().positive(),
+    amount: zod_1.z.number().min(1000, "Minimum deposit amount is 1000 ETB"),
     transactionNumber: zod_1.z.string().min(1),
 });
 router.post("/deposit", async (req, res) => {

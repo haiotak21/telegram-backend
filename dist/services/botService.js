@@ -79,7 +79,8 @@ function normalizeMode(mode) {
         return undefined;
     return m;
 }
-const DEPOSIT_AMOUNTS = [5, 10, 20, 100, 1000];
+const MIN_DEPOSIT_ETB = 1000;
+const DEPOSIT_AMOUNTS = [1000, 2000, 3000, 5000, 10000];
 const DEPOSIT_ACCOUNTS = {
     cbe: { title: "CBE Deposit", account: "1000139256208", name: "Addisu melke admasu", typeLabel: "CBE" },
     telebirr: { title: "Telebirr Deposit", account: "0910840397", name: "Addisu melke admasu", typeLabel: "Telebirr" },
@@ -634,6 +635,12 @@ async function initBot() {
             if ((method !== "telebirr" && method !== "cbe") || !Number.isFinite(amount))
                 return;
             await bot.answerCallbackQuery(query.id).catch(() => { });
+            if (amount < MIN_DEPOSIT_ETB) {
+                await bot.sendMessage(chatId, `Minimum deposit is ${MIN_DEPOSIT_ETB} ETB.`, {
+                    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+                });
+                return;
+            }
             await sendDepositSummary(chatId, method, amount);
             return;
         }
@@ -647,7 +654,7 @@ async function initBot() {
                 if (key)
                     pendingActions.set(key, { type: "deposit_amount", method });
             }
-            await bot.sendMessage(chatId, `Enter the amount to deposit via ${method.toUpperCase()} (ETB).`, {
+            await bot.sendMessage(chatId, `Enter the amount to deposit via ${method.toUpperCase()} (ETB, minimum ${MIN_DEPOSIT_ETB}).`, {
                 reply_markup: { force_reply: true },
             });
             return;
@@ -658,7 +665,7 @@ async function initBot() {
                 return;
             await bot.answerCallbackQuery(query.id).catch(() => { });
             const selected = depositSelections.get(chatId);
-            if (!selected || selected.method !== method || !Number.isFinite(selected.amount) || selected.amount <= 0) {
+            if (!selected || selected.method !== method || !Number.isFinite(selected.amount) || selected.amount < MIN_DEPOSIT_ETB) {
                 await bot.sendMessage(chatId, "Please select a deposit amount first, then verify payment.", {
                     reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
                 });
@@ -1183,8 +1190,8 @@ async function initBot() {
         else if (pending.type === "deposit_amount") {
             const method = pending.method;
             const amount = Number(text.replace(/,/g, ""));
-            if (!Number.isFinite(amount) || amount <= 0) {
-                return bot.sendMessage(msg.chat.id, "Please enter a valid amount in ETB (greater than 0), or /cancel.");
+            if (!Number.isFinite(amount) || amount < MIN_DEPOSIT_ETB) {
+                return bot.sendMessage(msg.chat.id, `Please enter a valid amount in ETB (minimum ${MIN_DEPOSIT_ETB}), or /cancel.`);
             }
             clearPendingAction(msg.chat.id);
             await sendDepositSummary(msg.chat.id, method, amount);
@@ -1839,6 +1846,32 @@ async function queueCardRequestManualReview(params) {
 async function handleMenuSelection(action, chatId, message) {
     if (shouldSuppressOutgoing(chatId, `menu_action:${action}`, 1200))
         return;
+    if (action.startsWith("TXN_PAGE_ALL::")) {
+        const [, pageRaw, daysRaw] = action.split("::");
+        const page = Number(pageRaw);
+        const days = Number(daysRaw);
+        return sendCardTransactions(chatId, undefined, Number.isFinite(page) ? page : 1, Number.isFinite(days) ? days : 0);
+    }
+    if (action.startsWith("TXN_PAGE_CARD::")) {
+        const [, cardId, pageRaw, daysRaw] = action.split("::");
+        const page = Number(pageRaw);
+        const days = Number(daysRaw);
+        if (!cardId) {
+            return sendCardTransactions(chatId, undefined, Number.isFinite(page) ? page : 1, Number.isFinite(days) ? days : 0);
+        }
+        return sendCardTransactions(chatId, cardId, Number.isFinite(page) ? page : 1, Number.isFinite(days) ? days : 0);
+    }
+    if (action.startsWith("TXN_FILTER_ALL::")) {
+        const days = Number(action.replace("TXN_FILTER_ALL::", ""));
+        return sendCardTransactions(chatId, undefined, 1, Number.isFinite(days) ? days : 0);
+    }
+    if (action.startsWith("TXN_FILTER_CARD::")) {
+        const [, cardId, daysRaw] = action.split("::");
+        const days = Number(daysRaw);
+        if (!cardId)
+            return sendCardTransactions(chatId, undefined, 1, Number.isFinite(days) ? days : 0);
+        return sendCardTransactions(chatId, cardId, 1, Number.isFinite(days) ? days : 0);
+    }
     if (action.startsWith("CARD_DETAIL::")) {
         const cardId = action.replace("CARD_DETAIL::", "");
         return sendCardDetail(chatId, cardId);
@@ -1917,11 +1950,17 @@ async function sendDepositAmountSelect(chatId, method) {
     rows.push([{ text: "🧮 Enter custom amount", callback_data: `DEPOSIT_CUSTOM::${method}` }]);
     rows.push([{ text: "🔁 Choose method", callback_data: "MENU_DEPOSIT" }]);
     rows.push([MENU_BUTTON]);
-    await bot.sendMessage(chatId, `Select amount for ${methodLabel}:`, {
+    await bot.sendMessage(chatId, `Select amount for ${methodLabel} (minimum ${MIN_DEPOSIT_ETB} ETB):`, {
         reply_markup: { inline_keyboard: rows },
     });
 }
 async function sendDepositSummary(chatId, method, amount) {
+    if (!Number.isFinite(amount) || amount < MIN_DEPOSIT_ETB) {
+        await bot.sendMessage(chatId, `Minimum deposit is ${MIN_DEPOSIT_ETB} ETB.`, {
+            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+    }
     const meta = DEPOSIT_ACCOUNTS[method];
     depositSelections.set(chatId, { method, amount });
     const lines = [
@@ -3419,9 +3458,14 @@ async function sendCardSensitiveDetails(chatId, cardId) {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
 }
-async function sendCardTransactions(chatId, cardId) {
+async function sendCardTransactions(chatId, cardId, pageRaw = 1, daysFilterRaw = 0) {
     try {
         const userId = String(chatId);
+        const pageSize = 10;
+        const requestedPage = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
+        const allowedFilters = new Set([0, 7, 30, 90]);
+        const parsedDays = Number(daysFilterRaw);
+        const daysFilter = Number.isFinite(parsedDays) && allowedFilters.has(parsedDays) ? parsedDays : 0;
         if (!shouldSuppressOutgoing(chatId, `user_txn_loading:${cardId || "all"}`, 1500)) {
             await bot.sendMessage(chatId, "Loading transactions...", {
                 reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -3430,15 +3474,28 @@ async function sendCardTransactions(chatId, cardId) {
         const query = { userId };
         if (cardId)
             query["metadata.cardId"] = cardId;
+        if (daysFilter > 0) {
+            const since = new Date(Date.now() - daysFilter * 24 * 60 * 60 * 1000);
+            query.createdAt = { $gte: since };
+        }
+        const totalCount = await Transaction_1.default.countDocuments(query);
+        const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+        const page = Math.min(requestedPage, totalPages);
         const txns = await Transaction_1.default.find(query)
             .sort({ createdAt: -1 })
-            .limit(20)
+            .skip((page - 1) * pageSize)
+            .limit(pageSize)
             .lean();
         if (!txns.length) {
             await bot.sendMessage(chatId, "No transactions found yet.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
             return;
         }
-        const lines = ["📊 Recent Transactions", ""];
+        const lines = [
+            "📊 Transaction History",
+            `Showing ${txns.length} of ${totalCount} (Page ${page}/${totalPages})`,
+            `Range: ${daysFilter > 0 ? `Last ${daysFilter} days` : "All time"}`,
+            "",
+        ];
         const keyboard = [];
         for (const t of txns) {
             const meta = t.metadata || {};
@@ -3462,6 +3519,44 @@ async function sendCardTransactions(chatId, cardId) {
                     callback_data: `TXN_DETAIL::${t._id}`,
                 },
             ]);
+        }
+        const buildFilterCallback = (days) => {
+            if (cardId)
+                return `TXN_FILTER_CARD::${cardId}::${days}`;
+            return `TXN_FILTER_ALL::${days}`;
+        };
+        keyboard.push([
+            {
+                text: `${daysFilter === 7 ? "✅ " : ""}7d`,
+                callback_data: buildFilterCallback(7),
+            },
+            {
+                text: `${daysFilter === 30 ? "✅ " : ""}30d`,
+                callback_data: buildFilterCallback(30),
+            },
+            {
+                text: `${daysFilter === 90 ? "✅ " : ""}90d`,
+                callback_data: buildFilterCallback(90),
+            },
+            {
+                text: `${daysFilter === 0 ? "✅ " : ""}All`,
+                callback_data: buildFilterCallback(0),
+            },
+        ]);
+        if (totalPages > 1) {
+            const navRow = [];
+            if (page > 1) {
+                navRow.push(cardId
+                    ? { text: "⬅️ Prev", callback_data: `TXN_PAGE_CARD::${cardId}::${page - 1}::${daysFilter}` }
+                    : { text: "⬅️ Prev", callback_data: `TXN_PAGE_ALL::${page - 1}::${daysFilter}` });
+            }
+            if (page < totalPages) {
+                navRow.push(cardId
+                    ? { text: "Next ➡️", callback_data: `TXN_PAGE_CARD::${cardId}::${page + 1}::${daysFilter}` }
+                    : { text: "Next ➡️", callback_data: `TXN_PAGE_ALL::${page + 1}::${daysFilter}` });
+            }
+            if (navRow.length)
+                keyboard.push(navRow);
         }
         keyboard.push([MENU_BUTTON]);
         await bot.sendMessage(chatId, lines.join("\n"), { reply_markup: { inline_keyboard: keyboard } });

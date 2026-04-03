@@ -416,6 +416,9 @@
           <button class="menu-btn" data-target="cardTransactions">
             Card Transactions
           </button>
+          <button class="menu-btn" data-target="declineFeeReport">
+            Decline Fee Report
+          </button>
           <button class="menu-btn" data-target="reconciliation">
             Reconciliation
           </button>
@@ -860,6 +863,45 @@
           <div class="status" id="cardTxnStatus"></div>
         </section>
 
+        <section class="card panel-view" data-view="declineFeeReport">
+          <div
+            class="toolbar"
+            style="justify-content: space-between; margin-bottom: 6px"
+          >
+            <div>
+              <h2>Decline Fee Report</h2>
+              <p class="sub">
+                Identify users repeatedly charged DECLINE_FEE transactions.
+              </p>
+            </div>
+            <div class="toolbar">
+              <button id="declineFeeLoad" type="button" class="secondary">
+                Load
+              </button>
+              <button id="declineFeeExport" type="button">
+                Export CSV
+              </button>
+            </div>
+          </div>
+          <div class="row inline">
+            <div>
+              <label>Window (days)</label>
+              <input id="declineFeeDays" type="number" min="1" max="365" value="30" />
+            </div>
+            <div>
+              <label>Min occurrences per user</label>
+              <input id="declineFeeMinOccurrences" type="number" min="1" max="1000" value="3" />
+            </div>
+            <div>
+              <label>Result limit</label>
+              <input id="declineFeeLimit" type="number" min="1" max="1000" value="200" />
+            </div>
+          </div>
+          <div class="data-box" id="declineFeeSummary">No data yet. Load to view.</div>
+          <div class="data-box" id="declineFeeTable">No report rows yet.</div>
+          <div class="status" id="declineFeeStatus"></div>
+        </section>
+
         <section class="card panel-view" data-view="reconciliation">
           <div
             class="toolbar"
@@ -1037,6 +1079,14 @@
         cardTxnCardId: document.getElementById("cardTxnCardId"),
         cardTxnTable: document.getElementById("cardTxnTable"),
         cardTxnStatus: document.getElementById("cardTxnStatus"),
+        declineFeeLoad: document.getElementById("declineFeeLoad"),
+        declineFeeExport: document.getElementById("declineFeeExport"),
+        declineFeeDays: document.getElementById("declineFeeDays"),
+        declineFeeMinOccurrences: document.getElementById("declineFeeMinOccurrences"),
+        declineFeeLimit: document.getElementById("declineFeeLimit"),
+        declineFeeSummary: document.getElementById("declineFeeSummary"),
+        declineFeeTable: document.getElementById("declineFeeTable"),
+        declineFeeStatus: document.getElementById("declineFeeStatus"),
         reconFilter: document.getElementById("reconFilter"),
         reconLimit: document.getElementById("reconLimit"),
         reconRefresh: document.getElementById("reconRefresh"),
@@ -1139,6 +1189,34 @@
         return Boolean((els.adminToken.value || "").trim());
       }
 
+      function navigateToPanel(target) {
+        const menuButtons = Array.from(document.querySelectorAll(".menu-btn"));
+        const views = Array.from(document.querySelectorAll(".panel-view"));
+        menuButtons.forEach((btn) => {
+          btn.classList.toggle("active", btn.dataset.target === target);
+        });
+        views.forEach((view) => {
+          view.classList.toggle("active", view.dataset.view === target);
+        });
+      }
+
+      async function copyText(value) {
+        if (!value) return;
+        if (navigator?.clipboard?.writeText) {
+          await navigator.clipboard.writeText(value);
+          return;
+        }
+        const ta = document.createElement("textarea");
+        ta.value = value;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+      }
+
       async function safeFetch(url, options = {}) {
         const res = await fetch(url, {
           ...options,
@@ -1171,6 +1249,20 @@
 
       let latestTxns = [];
 
+      function normalizeTxnId(value) {
+        if (value == null) return "";
+        if (typeof value === "string") return value;
+        if (typeof value === "number") return String(value);
+        if (typeof value === "object") {
+          if (typeof value.$oid === "string") return value.$oid;
+          if (typeof value.toString === "function") {
+            const rendered = value.toString();
+            if (rendered && rendered !== "[object Object]") return rendered;
+          }
+        }
+        return "";
+      }
+
       function renderRecent(items) {
         latestTxns = items || [];
         const container = els.recentList;
@@ -1196,7 +1288,11 @@
 
           const card = document.createElement("div");
           card.className = "txn-card";
-          card.dataset.id = t._id || t.transactionNumber || "";
+          const txId =
+            normalizeTxnId(t._id) ||
+            normalizeTxnId(t.transactionNumber) ||
+            normalizeTxnId(t.referenceNumber);
+          card.dataset.id = txId;
           const statusLabel =
             t.status === "pending" || t.status === "waiting"
               ? "waiting.."
@@ -1220,12 +1316,12 @@
             <div class="toolbar" style="margin-top: 6px">
               <span class="pill small">${t.paymentMethod || "-"}</span>
               <div style="flex:1"></div>
-              <button class="secondary" data-action="decline" data-id="${
-                card.dataset.id
-              }" ${canReview ? "" : "disabled"}>Decline</button>
-              <button data-action="approve" data-id="${
-                card.dataset.id
-              }" ${canReview ? "" : "disabled"}>Approve</button>
+              <button class="secondary" data-action="decline" data-id="${txId}" ${
+                canReview && txId ? "" : "disabled"
+              }>Decline</button>
+              <button data-action="approve" data-id="${txId}" ${
+                canReview && txId ? "" : "disabled"
+              }>Approve</button>
             </div>
           `;
           container.appendChild(card);
@@ -1725,6 +1821,9 @@
             const amount = `${direction}${Number(t.amount || 0).toFixed(2)} ${t.currency || "USD"}`;
             const desc = t.description || "Card transaction";
             const cardId = t.cardId || "-";
+            const warning = t.isDeclineFee
+              ? `<span class="tag bad">DECLINE FEE</span>`
+              : "";
             return `
               <div class="req-card">
                 <div class="mono req-line">${when}</div>
@@ -1733,6 +1832,7 @@
                 <div class="req-line">Amount: ${amount}</div>
                 <div class="req-line">Description: ${desc}</div>
                 <div class="req-line">Status: ${t.status || "-"}</div>
+                ${warning ? `<div class="req-line">Warning: ${warning}</div>` : ""}
               </div>
             `;
           })
@@ -1757,11 +1857,118 @@
             : "/api/admin/transactions";
           const data = await safeFetch(url);
           renderCardTransactions(data.transactions || []);
-          els.cardTxnStatus.textContent = `Loaded ${data.transactions?.length || 0}`;
+          const warnCount = Number(data.declineFeeCount || 0);
+          els.cardTxnStatus.textContent = `Loaded ${data.transactions?.length || 0}${warnCount ? ` | Decline-fee flagged: ${warnCount}` : ""}`;
         } catch (err) {
           const msg = err?.message || "Failed to load card transactions";
           els.cardTxnStatus.textContent = msg;
           showToast(msg, "error");
+        }
+      }
+
+      function renderDeclineFeeReport(rows, meta = {}) {
+        const summary = els.declineFeeSummary;
+        const container = els.declineFeeTable;
+        summary.textContent = `Window: ${meta.windowDays || "-"} days | Min occurrences: ${meta.minOccurrences || "-"} | Affected users: ${meta.totalAffectedUsers || 0}`;
+
+        if (!rows || !rows.length) {
+          container.textContent = "No users matched the repeated decline-fee threshold.";
+          return;
+        }
+
+        container.innerHTML = rows
+          .map((r) => {
+            const firstSeen = r.firstSeenAt ? new Date(r.firstSeenAt).toLocaleString() : "-";
+            const lastSeen = r.lastSeenAt ? new Date(r.lastSeenAt).toLocaleString() : "-";
+            const cards = Array.isArray(r.affectedCards) && r.affectedCards.length ? r.affectedCards.join(", ") : "-";
+            const refs = Array.isArray(r.sampleRefs) && r.sampleRefs.length ? r.sampleRefs.join(", ") : "-";
+            const firstCardId = Array.isArray(r.affectedCards) && r.affectedCards.length ? r.affectedCards[0] : "";
+            return `
+              <div class="req-card">
+                <div class="req-line"><span class="tag bad">DECLINE FEE</span> User: ${r.userName || "-"} | ID: ${r.userId}</div>
+                <div class="req-line">Email: ${r.customerEmail || "-"}</div>
+                <div class="req-line">Occurrences: ${r.occurrences} | Total fee: $${Number(r.totalFeeUsd || 0).toFixed(2)}</div>
+                <div class="req-line">Cards: ${cards}</div>
+                <div class="req-line">First seen: ${firstSeen}</div>
+                <div class="req-line">Last seen: ${lastSeen}</div>
+                <div class="mono req-line">Refs: ${refs}</div>
+                <div class="toolbar" style="margin-top:6px">
+                  <button class="secondary" data-action="open-user" data-user-id="${r.userId || ""}">Open User</button>
+                  <button class="secondary" data-action="open-card-tx" data-user-id="${r.userId || ""}" data-card-id="${firstCardId || ""}">View Card Txns</button>
+                  <button class="secondary" data-action="open-telegram" data-user-id="${r.userId || ""}">Open Telegram</button>
+                  <button class="secondary" data-action="copy-contact" data-user-id="${r.userId || ""}" data-email="${r.customerEmail || ""}" data-user-name="${r.userName || ""}">Copy Contact</button>
+                </div>
+              </div>
+            `;
+          })
+          .join("\n");
+      }
+
+      async function loadDeclineFeeReport() {
+        if (!hasToken()) {
+          els.declineFeeStatus.textContent = "Missing admin token";
+          return;
+        }
+        els.declineFeeStatus.textContent = "Loading...";
+        setLoading(els.declineFeeLoad, true);
+        try {
+          const params = new URLSearchParams();
+          params.set("days", String(Number(els.declineFeeDays.value) || 30));
+          params.set("minOccurrences", String(Number(els.declineFeeMinOccurrences.value) || 3));
+          params.set("limit", String(Number(els.declineFeeLimit.value) || 200));
+          const data = await safeFetch(`/api/admin/transactions/decline-fees/report?${params.toString()}`);
+          renderDeclineFeeReport(data.rows || [], data);
+          els.declineFeeStatus.textContent = `Loaded ${data.rows?.length || 0} rows`;
+        } catch (err) {
+          const msg = err?.message || "Failed to load decline-fee report";
+          els.declineFeeStatus.textContent = msg;
+          showToast(msg, "error");
+        } finally {
+          setLoading(els.declineFeeLoad, false);
+        }
+      }
+
+      async function exportDeclineFeeReportCsv() {
+        if (!hasToken()) {
+          els.declineFeeStatus.textContent = "Missing admin token";
+          return;
+        }
+        setLoading(els.declineFeeExport, true);
+        els.declineFeeStatus.textContent = "Exporting...";
+        try {
+          const params = new URLSearchParams();
+          params.set("days", String(Number(els.declineFeeDays.value) || 30));
+          params.set("minOccurrences", String(Number(els.declineFeeMinOccurrences.value) || 3));
+          params.set("limit", String(Number(els.declineFeeLimit.value) || 200));
+          params.set("format", "csv");
+
+          const token = (els.adminToken.value || "").trim();
+          const res = await fetch(`/api/admin/transactions/decline-fees/report?${params.toString()}`, {
+            headers: token ? { "x-admin-token": token } : {},
+          });
+
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(text || "Export failed");
+          }
+
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `decline-fee-report-${new Date().toISOString().slice(0, 10)}.csv`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+          els.declineFeeStatus.textContent = "CSV exported";
+          showToast("Decline-fee report exported", "success");
+        } catch (err) {
+          const msg = err?.message || "Failed to export report";
+          els.declineFeeStatus.textContent = msg;
+          showToast(msg, "error");
+        } finally {
+          setLoading(els.declineFeeExport, false);
         }
       }
 
@@ -1903,6 +2110,12 @@
       els.refreshConfig.addEventListener("click", loadConfig);
       if (els.cardTxnRefresh) {
         els.cardTxnRefresh.addEventListener("click", loadCardTransactions);
+      }
+      if (els.declineFeeLoad) {
+        els.declineFeeLoad.addEventListener("click", loadDeclineFeeReport);
+      }
+      if (els.declineFeeExport) {
+        els.declineFeeExport.addEventListener("click", exportDeclineFeeReportCsv);
       }
       if (els.reconRefresh) {
         els.reconRefresh.addEventListener("click", loadReconciliations);
@@ -2210,7 +2423,9 @@
 
           showToast("Marked declined", "info");
         } catch (err) {
-          showToast(err?.message || "Action failed", "error");
+          const msg = err?.message || "Action failed";
+          if (els.recentStatus) els.recentStatus.textContent = msg;
+          showToast(msg, "error");
         } finally {
           setLoading(btn, false);
         }
@@ -2500,6 +2715,74 @@
         });
       }
 
+      if (els.declineFeeTable) {
+        els.declineFeeTable.addEventListener("click", async (ev) => {
+          const target = ev.target;
+          const action = target?.dataset?.action;
+          if (!action) return;
+
+          const userId = (target?.dataset?.userId || "").trim();
+          const cardId = (target?.dataset?.cardId || "").trim();
+          const email = (target?.dataset?.email || "").trim();
+          const userName = (target?.dataset?.userName || "").trim();
+
+          setLoading(target, true);
+          try {
+            if (action === "open-user") {
+              navigateToPanel("kyc");
+              if (els.kycSearch) els.kycSearch.value = userId;
+              await loadKycUsers();
+              showToast("Opened user in KYC view", "success");
+              return;
+            }
+
+            if (action === "open-card-tx") {
+              navigateToPanel("cardTransactions");
+              if (els.cardTxnUserId) els.cardTxnUserId.value = userId;
+              if (els.cardTxnCardId) els.cardTxnCardId.value = cardId;
+              await loadCardTransactions();
+              showToast("Loaded user card transactions", "success");
+              return;
+            }
+
+            if (action === "open-telegram") {
+              const data = await safeFetch(
+                `/api/admin/users/${encodeURIComponent(userId)}/telegram-link`
+              );
+              const lines = [
+                `User ID: ${data.userId || userId || "-"}`,
+                `Name: ${data.name || userName || "-"}`,
+                `Email: ${data.customerEmail || email || "-"}`,
+                `Chat ID: ${data.chatId ?? "-"}`,
+                `Username: ${data.username ? "@" + data.username : "-"}`,
+                `Telegram Link: ${data.webLink || data.deepLink || "-"}`,
+              ];
+              await copyText(lines.join("\n"));
+              const linkToOpen = data.webLink || data.deepLink;
+              if (linkToOpen) {
+                window.open(linkToOpen, "_blank", "noopener,noreferrer");
+              }
+              showToast("Telegram details copied", "success");
+              return;
+            }
+
+            if (action === "copy-contact") {
+              const lines = [
+                `User ID: ${userId || "-"}`,
+                `Name: ${userName || "-"}`,
+                `Email: ${email || "-"}`,
+              ];
+              await copyText(lines.join("\n"));
+              showToast("Contact copied", "success");
+            }
+          } catch (err) {
+            showToast(err?.message || "Action failed", "error");
+          } finally {
+            setLoading(target, false);
+          }
+        });
+      }
+
       els.saveToken.addEventListener("click", () => {
         localStorage.setItem("adminToken", (els.adminToken.value || "").trim());
         updateTokenStatus();
@@ -2545,19 +2828,9 @@
 
       function initNavigation() {
         const menuButtons = Array.from(document.querySelectorAll(".menu-btn"));
-        const views = Array.from(document.querySelectorAll(".panel-view"));
-
-        function setActive(target) {
-          menuButtons.forEach((btn) => {
-            btn.classList.toggle("active", btn.dataset.target === target);
-          });
-          views.forEach((view) => {
-            view.classList.toggle("active", view.dataset.view === target);
-          });
-        }
 
         menuButtons.forEach((btn) => {
-          btn.addEventListener("click", () => setActive(btn.dataset.target));
+          btn.addEventListener("click", () => navigateToPanel(btn.dataset.target));
         });
       }
 

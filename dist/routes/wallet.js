@@ -19,7 +19,7 @@ const RuntimeAudit_1 = __importDefault(require("../models/RuntimeAudit"));
 const botService_1 = require("../services/botService");
 const apiResponse_1 = require("../utils/apiResponse");
 const router = express_1.default.Router();
-const AmountEtbSchema = zod_1.z.object({ amountEtb: zod_1.z.number().positive() });
+const AmountEtbSchema = zod_1.z.object({ amountEtb: zod_1.z.number().min(1000, "Minimum deposit amount is 1000 ETB") });
 const AmountUsdtSchema = zod_1.z.object({ amountUsdt: zod_1.z.number().positive() });
 const BalanceParamSchema = zod_1.z.object({ userId: zod_1.z.string().min(1) });
 const PricingSchema = zod_1.z.object({
@@ -172,9 +172,18 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
     const session = await mongoose_1.default.startSession();
     session.startTransaction();
     try {
-        const id = String(req.params.id || "");
+        const id = String(req.params.id || "").trim();
+        if (!id) {
+            await session.abortTransaction();
+            session.endSession();
+            return (0, apiResponse_1.fail)(res, "Transaction id is required", 400);
+        }
         const { action, reason } = TransactionDecisionSchema.parse(req.body || {});
-        const tx = await Transaction_1.default.findById(id).session(session);
+        const txQuery = [{ transactionNumber: id }, { referenceNumber: id }];
+        if (mongoose_1.default.Types.ObjectId.isValid(id)) {
+            txQuery.unshift({ _id: id });
+        }
+        const tx = await Transaction_1.default.findOne({ $or: txQuery }).session(session);
         if (!tx) {
             await session.abortTransaction();
             session.endSession();
@@ -215,7 +224,13 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
             await tx.save({ session });
             await session.commitTransaction();
             session.endSession();
-            await (0, botService_1.notifyDepositReviewDeclined)(String(tx.userId), reason);
+            await (0, botService_1.notifyDepositReviewDeclined)(String(tx.userId), reason).catch((notifyErr) => {
+                console.warn("Failed to notify declined deposit review", {
+                    userId: String(tx.userId),
+                    txId: String(tx._id),
+                    error: notifyErr?.message || String(notifyErr),
+                });
+            });
             return (0, apiResponse_1.ok)(res, {
                 id: String(tx._id),
                 status: tx.status,
@@ -336,7 +351,13 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
         await tx.save({ session });
         await session.commitTransaction();
         session.endSession();
-        await (0, botService_1.notifyDepositCredited)(String(tx.userId), quote.creditedUsdt, user.balance);
+        await (0, botService_1.notifyDepositCredited)(String(tx.userId), quote.creditedUsdt, user.balance).catch((notifyErr) => {
+            console.warn("Failed to notify approved deposit review", {
+                userId: String(tx.userId),
+                txId: String(tx._id),
+                error: notifyErr?.message || String(notifyErr),
+            });
+        });
         return (0, apiResponse_1.ok)(res, {
             id: String(tx._id),
             status: tx.status,

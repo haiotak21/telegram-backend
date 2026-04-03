@@ -6,6 +6,7 @@ import { loadPricingConfig, quoteDeposit } from "./pricingService";
 
 const EXPECTED_CBE_RECEIVER_NAME = (process.env.CBE_RECEIVER_NAME || process.env.RECEIVER_NAME || "Addisu melke admasu").trim();
 const EXPECTED_TELEBIRR_RECEIVER_NAME = (process.env.TELEBIRR_RECEIVER_NAME || "Addisu melke admasu").trim();
+const MIN_DEPOSIT_ETB = Number(process.env.MIN_DEPOSIT_ETB || 1000);
 
 function amountsClose(a: number, b: number, tol = 0.01) {
   return Math.abs(a - b) <= tol;
@@ -47,8 +48,8 @@ export async function creditVerifiedDeposit(params: {
 }) {
   const { userId, paymentMethod, amountEtb, transactionNumber, referenceNumber, responseData } = params;
 
-  if (!amountEtb || amountEtb <= 0) {
-    return { success: false, message: "Amount must be greater than zero" };
+  if (!amountEtb || amountEtb < MIN_DEPOSIT_ETB) {
+    return { success: false, message: `Minimum deposit amount is ${MIN_DEPOSIT_ETB} ETB` };
   }
 
   const pricing = await loadPricingConfig();
@@ -160,8 +161,8 @@ export async function processDeposit(params: {
 }) {
   const { userId, paymentMethod, amount, transactionNumber } = params;
 
-  if (amount <= 0) {
-    return { success: false, message: "Amount must be greater than zero" };
+  if (amount < MIN_DEPOSIT_ETB) {
+    return { success: false, message: `Minimum deposit amount is ${MIN_DEPOSIT_ETB} ETB` };
   }
 
   const existing = await Transaction.findOne({ transactionType: "deposit", transactionNumber }).lean();
