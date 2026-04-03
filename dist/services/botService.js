@@ -35,6 +35,8 @@ const User_1 = __importDefault(require("../models/User"));
 const Customer_1 = __importDefault(require("../models/Customer"));
 const pricingService_1 = require("./pricingService");
 const depositService_1 = require("./depositService");
+const prisma_1 = __importDefault(require("../utils/prisma"));
+const persistence_1 = require("../utils/persistence");
 let bot = null;
 const pendingActions = new Map();
 function chatKey(value) {
@@ -106,6 +108,23 @@ async function upsertTelegramIdentity(msg) {
     if (!telegramId || !chatId)
         return;
     const username = msg?.from?.username ? String(msg.from.username) : undefined;
+    if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+        await prisma_1.default.user.upsert({
+            where: { userId: telegramId },
+            create: {
+                userId: telegramId,
+                telegramId,
+                chatId,
+                username,
+            },
+            update: {
+                telegramId,
+                chatId,
+                username,
+            },
+        });
+        return;
+    }
     await User_1.default.findOneAndUpdate({ $or: [{ telegramId }, { userId: telegramId }] }, {
         $set: {
             telegramId,
@@ -116,6 +135,13 @@ async function upsertTelegramIdentity(msg) {
             userId: telegramId,
         },
     }, { upsert: true, new: true });
+}
+async function findUserForChat(chatId) {
+    const userId = String(chatId);
+    if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+        return prisma_1.default.user.findUnique({ where: { userId } });
+    }
+    return User_1.default.findOne({ userId }).lean();
 }
 const MENU_BUTTON = { text: "📋 Menu", callback_data: "MENU" };
 const MENU_KEYBOARD = [
@@ -237,7 +263,7 @@ async function initBot() {
             from: msg.from?.username || msg.from?.id,
             text: msg.text,
         });
-        const existingUser = await User_1.default.findOne({ userId: String(chatId) }).lean();
+        const existingUser = await findUserForChat(chatId);
         await upsertTelegramIdentity(msg);
         if (shouldSuppressOutgoing(chatId, "start", 10000)) {
             console.warn("/start suppressed by rate limit", { chatId });

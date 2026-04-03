@@ -18,6 +18,8 @@ import Customer from "../models/Customer";
 import type { PaymentMethod } from "./paymentVerification";
 import { loadPricingConfig } from "./pricingService";
 import { creditVerifiedDeposit } from "./depositService";
+import prisma from "../utils/prisma";
+import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
 let bot: TelegramBot | null = null;
 type PendingAction =
@@ -168,6 +170,23 @@ async function upsertTelegramIdentity(msg: any) {
   const chatId = msg?.chat?.id != null ? String(msg.chat.id) : undefined;
   if (!telegramId || !chatId) return;
   const username = msg?.from?.username ? String(msg.from.username) : undefined;
+  if (isPrismaPersistenceEnabled()) {
+    await prisma.user.upsert({
+      where: { userId: telegramId },
+      create: {
+        userId: telegramId,
+        telegramId,
+        chatId,
+        username,
+      },
+      update: {
+        telegramId,
+        chatId,
+        username,
+      },
+    });
+    return;
+  }
   await User.findOneAndUpdate(
     { $or: [{ telegramId }, { userId: telegramId }] },
     {
@@ -182,6 +201,14 @@ async function upsertTelegramIdentity(msg: any) {
     },
     { upsert: true, new: true }
   );
+}
+
+async function findUserForChat(chatId: number | string) {
+  const userId = String(chatId);
+  if (isPrismaPersistenceEnabled()) {
+    return prisma.user.findUnique({ where: { userId } });
+  }
+  return User.findOne({ userId }).lean();
 }
 
 const MENU_BUTTON: InlineKeyboardButton = { text: "📋 Menu", callback_data: "MENU" };
@@ -310,7 +337,7 @@ export async function initBot() {
       from: msg.from?.username || msg.from?.id,
       text: msg.text,
     });
-    const existingUser = await User.findOne({ userId: String(chatId) }).lean();
+    const existingUser = await findUserForChat(chatId);
     await upsertTelegramIdentity(msg);
     if (shouldSuppressOutgoing(chatId, "start", 10000)) {
       console.warn("/start suppressed by rate limit", { chatId });
