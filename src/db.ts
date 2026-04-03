@@ -18,8 +18,9 @@ export async function connectDB(uri?: string) {
       throw err;
     }
 
+    const allowMongoFallback = String(process.env.ENABLE_MONGO_FALLBACK || "false").toLowerCase() === "true";
     const mongoUriInPrismaMode = uri || process.env.MONGODB_URI;
-    if (mongoUriInPrismaMode) {
+    if (allowMongoFallback && mongoUriInPrismaMode) {
       try {
         await mongoose.connect(mongoUriInPrismaMode, {});
         const { host, port, name } = mongoose.connection;
@@ -29,6 +30,8 @@ export async function connectDB(uri?: string) {
       } catch (err) {
         console.warn("MongoDB fallback connection failed; only Prisma-backed routes will work.");
       }
+    } else if (mongoUriInPrismaMode && !allowMongoFallback) {
+      console.log("Prisma mode active; Mongo fallback disabled (set ENABLE_MONGO_FALLBACK=true to enable).\nIf legacy data is missing, run migrate:mongo-to-supabase from an accessible Mongo source.");
     }
     return;
   }
