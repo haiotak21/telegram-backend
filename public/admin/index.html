@@ -878,26 +878,44 @@
               <button id="declineFeeLoad" type="button" class="secondary">
                 Load
               </button>
-              <button id="declineFeeExport" type="button">
-                Export CSV
-              </button>
+              <button id="declineFeeExport" type="button">Export CSV</button>
             </div>
           </div>
           <div class="row inline">
             <div>
               <label>Window (days)</label>
-              <input id="declineFeeDays" type="number" min="1" max="365" value="30" />
+              <input
+                id="declineFeeDays"
+                type="number"
+                min="1"
+                max="365"
+                value="30"
+              />
             </div>
             <div>
               <label>Min occurrences per user</label>
-              <input id="declineFeeMinOccurrences" type="number" min="1" max="1000" value="3" />
+              <input
+                id="declineFeeMinOccurrences"
+                type="number"
+                min="1"
+                max="1000"
+                value="3"
+              />
             </div>
             <div>
               <label>Result limit</label>
-              <input id="declineFeeLimit" type="number" min="1" max="1000" value="200" />
+              <input
+                id="declineFeeLimit"
+                type="number"
+                min="1"
+                max="1000"
+                value="200"
+              />
             </div>
           </div>
-          <div class="data-box" id="declineFeeSummary">No data yet. Load to view.</div>
+          <div class="data-box" id="declineFeeSummary">
+            No data yet. Load to view.
+          </div>
           <div class="data-box" id="declineFeeTable">No report rows yet.</div>
           <div class="status" id="declineFeeStatus"></div>
         </section>
@@ -1082,7 +1100,9 @@
         declineFeeLoad: document.getElementById("declineFeeLoad"),
         declineFeeExport: document.getElementById("declineFeeExport"),
         declineFeeDays: document.getElementById("declineFeeDays"),
-        declineFeeMinOccurrences: document.getElementById("declineFeeMinOccurrences"),
+        declineFeeMinOccurrences: document.getElementById(
+          "declineFeeMinOccurrences",
+        ),
         declineFeeLimit: document.getElementById("declineFeeLimit"),
         declineFeeSummary: document.getElementById("declineFeeSummary"),
         declineFeeTable: document.getElementById("declineFeeTable"),
@@ -1872,17 +1892,31 @@
         summary.textContent = `Window: ${meta.windowDays || "-"} days | Min occurrences: ${meta.minOccurrences || "-"} | Affected users: ${meta.totalAffectedUsers || 0}`;
 
         if (!rows || !rows.length) {
-          container.textContent = "No users matched the repeated decline-fee threshold.";
+          container.textContent =
+            "No users matched the repeated decline-fee threshold.";
           return;
         }
 
         container.innerHTML = rows
           .map((r) => {
-            const firstSeen = r.firstSeenAt ? new Date(r.firstSeenAt).toLocaleString() : "-";
-            const lastSeen = r.lastSeenAt ? new Date(r.lastSeenAt).toLocaleString() : "-";
-            const cards = Array.isArray(r.affectedCards) && r.affectedCards.length ? r.affectedCards.join(", ") : "-";
-            const refs = Array.isArray(r.sampleRefs) && r.sampleRefs.length ? r.sampleRefs.join(", ") : "-";
-            const firstCardId = Array.isArray(r.affectedCards) && r.affectedCards.length ? r.affectedCards[0] : "";
+            const firstSeen = r.firstSeenAt
+              ? new Date(r.firstSeenAt).toLocaleString()
+              : "-";
+            const lastSeen = r.lastSeenAt
+              ? new Date(r.lastSeenAt).toLocaleString()
+              : "-";
+            const cards =
+              Array.isArray(r.affectedCards) && r.affectedCards.length
+                ? r.affectedCards.join(", ")
+                : "-";
+            const refs =
+              Array.isArray(r.sampleRefs) && r.sampleRefs.length
+                ? r.sampleRefs.join(", ")
+                : "-";
+            const firstCardId =
+              Array.isArray(r.affectedCards) && r.affectedCards.length
+                ? r.affectedCards[0]
+                : "";
             return `
               <div class="req-card">
                 <div class="req-line"><span class="tag bad">DECLINE FEE</span> User: ${r.userName || "-"} | ID: ${r.userId}</div>
@@ -1914,9 +1948,14 @@
         try {
           const params = new URLSearchParams();
           params.set("days", String(Number(els.declineFeeDays.value) || 30));
-          params.set("minOccurrences", String(Number(els.declineFeeMinOccurrences.value) || 3));
+          params.set(
+            "minOccurrences",
+            String(Number(els.declineFeeMinOccurrences.value) || 3),
+          );
           params.set("limit", String(Number(els.declineFeeLimit.value) || 200));
-          const data = await safeFetch(`/api/admin/transactions/decline-fees/report?${params.toString()}`);
+          const data = await safeFetch(
+            `/api/admin/transactions/decline-fees/report?${params.toString()}`,
+          );
           renderDeclineFeeReport(data.rows || [], data);
           els.declineFeeStatus.textContent = `Loaded ${data.rows?.length || 0} rows`;
         } catch (err) {
@@ -1938,14 +1977,20 @@
         try {
           const params = new URLSearchParams();
           params.set("days", String(Number(els.declineFeeDays.value) || 30));
-          params.set("minOccurrences", String(Number(els.declineFeeMinOccurrences.value) || 3));
+          params.set(
+            "minOccurrences",
+            String(Number(els.declineFeeMinOccurrences.value) || 3),
+          );
           params.set("limit", String(Number(els.declineFeeLimit.value) || 200));
           params.set("format", "csv");
 
           const token = (els.adminToken.value || "").trim();
-          const res = await fetch(`/api/admin/transactions/decline-fees/report?${params.toString()}`, {
-            headers: token ? { "x-admin-token": token } : {},
-          });
+          const res = await fetch(
+            `/api/admin/transactions/decline-fees/report?${params.toString()}`,
+            {
+              headers: token ? { "x-admin-token": token } : {},
+            },
+          );
 
           if (!res.ok) {
             const text = await res.text();
@@ -2115,7 +2160,10 @@
         els.declineFeeLoad.addEventListener("click", loadDeclineFeeReport);
       }
       if (els.declineFeeExport) {
-        els.declineFeeExport.addEventListener("click", exportDeclineFeeReportCsv);
+        els.declineFeeExport.addEventListener(
+          "click",
+          exportDeclineFeeReportCsv,
+        );
       }
       if (els.reconRefresh) {
         els.reconRefresh.addEventListener("click", loadReconciliations);
@@ -2747,7 +2795,7 @@
 
             if (action === "open-telegram") {
               const data = await safeFetch(
-                `/api/admin/users/${encodeURIComponent(userId)}/telegram-link`
+                `/api/admin/users/${encodeURIComponent(userId)}/telegram-link`,
               );
               const lines = [
                 `User ID: ${data.userId || userId || "-"}`,
@@ -2830,7 +2878,9 @@
         const menuButtons = Array.from(document.querySelectorAll(".menu-btn"));
 
         menuButtons.forEach((btn) => {
-          btn.addEventListener("click", () => navigateToPanel(btn.dataset.target));
+          btn.addEventListener("click", () =>
+            navigateToPanel(btn.dataset.target),
+          );
         });
       }
 

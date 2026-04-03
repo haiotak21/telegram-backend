@@ -13,6 +13,8 @@ import Transaction from "../models/Transaction";
 import RuntimeAudit from "../models/RuntimeAudit";
 import { notifyDepositCredited, notifyDepositReviewDeclined } from "../services/botService";
 import { ok, fail } from "../utils/apiResponse";
+import prisma from "../utils/prisma";
+import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
 const router = express.Router();
 
@@ -91,6 +93,10 @@ router.put("/config", requireAdmin, async (req, res) => {
 router.get("/balance/:userId", async (req, res) => {
   try {
     const params = BalanceParamSchema.parse(req.params);
+    if (isPrismaPersistenceEnabled()) {
+      const user = await prisma.user.findUnique({ where: { userId: params.userId } });
+      return ok(res, { balance: user?.balance ?? 0, currency: user?.currency ?? "USDT" });
+    }
     const user = await User.findOne({ userId: params.userId }).lean();
     return ok(res, { balance: user?.balance ?? 0, currency: user?.currency ?? "USDT" });
   } catch (err: any) {

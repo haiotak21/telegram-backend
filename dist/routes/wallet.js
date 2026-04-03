@@ -18,6 +18,8 @@ const Transaction_1 = __importDefault(require("../models/Transaction"));
 const RuntimeAudit_1 = __importDefault(require("../models/RuntimeAudit"));
 const botService_1 = require("../services/botService");
 const apiResponse_1 = require("../utils/apiResponse");
+const prisma_1 = __importDefault(require("../utils/prisma"));
+const persistence_1 = require("../utils/persistence");
 const router = express_1.default.Router();
 const AmountEtbSchema = zod_1.z.object({ amountEtb: zod_1.z.number().min(1000, "Minimum deposit amount is 1000 ETB") });
 const AmountUsdtSchema = zod_1.z.object({ amountUsdt: zod_1.z.number().positive() });
@@ -88,6 +90,10 @@ router.put("/config", requireAdmin, async (req, res) => {
 router.get("/balance/:userId", async (req, res) => {
     try {
         const params = BalanceParamSchema.parse(req.params);
+        if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+            const user = await prisma_1.default.user.findUnique({ where: { userId: params.userId } });
+            return (0, apiResponse_1.ok)(res, { balance: user?.balance ?? 0, currency: user?.currency ?? "USDT" });
+        }
         const user = await User_1.default.findOne({ userId: params.userId }).lean();
         return (0, apiResponse_1.ok)(res, { balance: user?.balance ?? 0, currency: user?.currency ?? "USDT" });
     }
