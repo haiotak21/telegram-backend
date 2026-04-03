@@ -165,6 +165,14 @@ const recentCallbackActions = new Map<number, { action: string; at: number }>();
 const recentOutgoing = new Map<number, { key: string; at: number }>();
 const recentUpdates = new Map<string, number>();
 
+function isMongoReady() {
+  return mongoose.connection.readyState === 1;
+}
+
+function isPrismaOnlyMode() {
+  return isPrismaPersistenceEnabled() && !isMongoReady();
+}
+
 async function upsertTelegramIdentity(msg: any) {
   const telegramId = msg?.from?.id != null ? String(msg.from.id) : undefined;
   const chatId = msg?.chat?.id != null ? String(msg.chat.id) : undefined;
@@ -209,6 +217,19 @@ async function findUserForChat(chatId: number | string) {
     return prisma.user.findUnique({ where: { userId } });
   }
   return User.findOne({ userId }).lean();
+}
+
+async function findActiveCardsForUser(userId: string) {
+  if (isPrismaPersistenceEnabled()) {
+    return prisma.card.findMany({
+      where: {
+        userId,
+        status: { in: ["active", "ACTIVE", "frozen", "FROZEN"] },
+      },
+      orderBy: { updatedAt: "desc" },
+    });
+  }
+  return Card.find({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
 }
 
 const MENU_BUTTON: InlineKeyboardButton = { text: "📋 Menu", callback_data: "MENU" };
@@ -448,6 +469,12 @@ export async function initBot() {
   botRef.onText(/^\/kyc$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "kyc")) return;
     const chatId = msg.chat.id;
+    if (isPrismaOnlyMode()) {
+      await bot!.sendMessage(chatId, "KYC is temporarily unavailable during database migration. Please try again shortly.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      return;
+    }
     const [user, customer] = await Promise.all([
       User.findOne({ userId: String(chatId) }).lean(),
       Customer.findOne({ userId: String(chatId) }).lean(),
@@ -477,6 +504,12 @@ export async function initBot() {
   botRef.onText(/^\/kyc_edit$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "kyc_edit")) return;
     const chatId = msg.chat.id;
+    if (isPrismaOnlyMode()) {
+      await bot!.sendMessage(chatId, "KYC edit is temporarily unavailable during database migration. Please try again shortly.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      return;
+    }
     const [user, customer] = await Promise.all([
       User.findOne({ userId: String(chatId) }).lean(),
       Customer.findOne({ userId: String(chatId) }).lean(),
@@ -550,8 +583,8 @@ export async function initBot() {
   botRef.onText(/^\/status$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "status")) return;
     const [link, cards] = await Promise.all([
-      TelegramLink.findOne({ chatId: msg.chat.id }).lean(),
-      Card.find({ userId: String(msg.chat.id), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean(),
+      isPrismaOnlyMode() ? Promise.resolve(null) : TelegramLink.findOne({ chatId: msg.chat.id }).lean(),
+      findActiveCardsForUser(String(msg.chat.id)),
     ]);
     const cardLabels = cards.map((c) => `${c.cardId}${c.last4 ? ` (••••${c.last4})` : ""}`);
     await bot!.sendMessage(
@@ -1507,6 +1540,9 @@ export async function notifyKycStatus(userId: string, status: KycStatus) {
 }
 
 export async function pollPendingKycUpdates() {
+  if (isPrismaOnlyMode()) {
+    return { checked: 0, updated: 0 };
+  }
   const pendingCustomers = await Customer.find({ kycStatus: "pending" }).lean();
   let checked = 0;
   let updated = 0;
@@ -2231,6 +2267,12 @@ async function sendDepositSummary(chatId: number, method: PaymentMethod, amount:
 
 async function handleCardRequest(chatId: number, message?: any) {
   if (shouldSuppressOutgoing(chatId, "card_request")) return;
+  if (isPrismaOnlyMode()) {
+    await bot!.sendMessage(chatId, "Card request is temporarily unavailable during migration. Please try again shortly.", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+    return;
+  }
   const user = await User.findOne({ userId: String(chatId) }).lean();
   const customerRecord = await Customer.findOne({ userId: String(chatId) }).lean();
   const kycStatus = resolveKycStatus(user, customerRecord);
@@ -2342,6 +2384,12 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
 }
 
 async function startCreateCardFlow(chatId: number, message?: any) {
+  if (isPrismaOnlyMode()) {
+    await bot!.sendMessage(chatId, "Create card is temporarily unavailable during migration. Please try again shortly.", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+    return;
+  }
   const user = await User.findOne({ userId: String(chatId) }).lean();
   const customer = await Customer.findOne({ userId: String(chatId) }).lean();
   const status = resolveKycStatus(user, customer);
@@ -2442,6 +2490,13 @@ function buildCreateCardSummary(data: CreateCardSession["data"]) {
 }
 
 async function submitCreateCard(chatId: number, session: CreateCardSession) {
+  if (isPrismaOnlyMode()) {
+    createCardSessions.delete(chatId);
+    await bot!.sendMessage(chatId, "Create card is temporarily unavailable during migration. Please try again shortly.", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+    return;
+  }
   const user = await User.findOne({ userId: String(chatId) }).lean();
   const customer = await Customer.findOne({ userId: String(chatId) }).lean();
   if (!customer || customer.kycStatus !== "approved") {
@@ -3474,8 +3529,8 @@ function chunk<T>(items: T[], size: number): T[][] {
 async function sendWalletSummary(chatId: number, message?: any) {
   if (shouldSuppressOutgoing(chatId, "wallet_summary")) return;
   const [link, user, primaryCard] = await Promise.all([
-    TelegramLink.findOne({ chatId }).lean(),
-    User.findOne({ userId: String(chatId) }).lean(),
+    isPrismaOnlyMode() ? Promise.resolve(null) : TelegramLink.findOne({ chatId }).lean(),
+    isPrismaPersistenceEnabled() ? prisma.user.findUnique({ where: { userId: String(chatId) } }) : User.findOne({ userId: String(chatId) }).lean(),
     getPrimaryCardForUser(String(chatId)),
   ]);
   const baseWalletBalance = user?.balance ?? 0;
@@ -3508,6 +3563,43 @@ async function sendMyCards(chatId: number, message?: any) {
     });
   }
   const userId = String(chatId);
+  if (isPrismaOnlyMode()) {
+    const [user, card] = await Promise.all([
+      prisma.user.findUnique({ where: { userId } }),
+      prisma.card.findFirst({ where: { userId }, orderBy: { updatedAt: "desc" } }),
+    ]);
+    if (!card) {
+      await editOrSend(chatId, message, [
+        "💳 Your Virtual Card",
+        "Status: ✅ None",
+        "Card Number: /card_request",
+      ].join("\n"), {
+        inline_keyboard: [[MENU_BUTTON]],
+      });
+      return;
+    }
+    const statusText = isFrozenStatus(card.status || undefined) ? "❄️ Frozen" : "✅ Active";
+    const balanceLabel = formatCardMoney(card.balance ?? user?.balance, card.currency || user?.currency || "USD");
+    const lines = [
+      "💳 Your Virtual Card",
+      `Card Type: ${String(card.cardType || "virtual").toLowerCase()}`,
+      `Status: ${statusText}`,
+      `Card Number: ${formatMaskedCard(card.last4 || undefined)}`,
+      balanceLabel ? `Balance: ${balanceLabel}` : undefined,
+    ].filter(Boolean) as string[];
+    const freezeAction = isFrozenStatus(card.status || undefined) ? "CARD_UNFREEZE" : "CARD_FREEZE";
+    const freezeLabel = isFrozenStatus(card.status || undefined) ? "🔥 Unfreeze Card" : "❄️ Freeze Card";
+    await editOrSend(chatId, message, lines.join("\n"), {
+      inline_keyboard: [
+        [
+          { text: "🔍 Transactions", callback_data: `CARD_TXN::${card.cardId}` },
+          { text: freezeLabel, callback_data: `${freezeAction}::${card.cardId}` },
+        ],
+        [MENU_BUTTON],
+      ],
+    });
+    return;
+  }
   const [user, customer, link, cardIds] = await Promise.all([
     User.findOne({ userId }).lean(),
     Customer.findOne({ userId }).lean(),
@@ -3612,27 +3704,34 @@ function isLikelyCardId(value?: string) {
 
 async function getUserCardIds(chatId: number) {
   const userId = String(chatId);
-  const cards = await Card.find({ userId }).lean();
+  const cards = isPrismaPersistenceEnabled()
+    ? await prisma.card.findMany({ where: { userId } })
+    : await Card.find({ userId }).lean();
   const cardIdsFromCards = cards.map((c) => c.cardId).filter(isLikelyCardId);
   if (cardIdsFromCards.length) return Array.from(new Set(cardIdsFromCards));
 
-  const requests = await CardRequest.find({ userId, status: "approved", cardId: { $exists: true, $ne: "" } }).lean();
+  const requests = isPrismaOnlyMode()
+    ? []
+    : await CardRequest.find({ userId, status: "approved", cardId: { $exists: true, $ne: "" } }).lean();
   const requestIds = requests.map((r) => String(r.cardId)).filter(isLikelyCardId);
   if (requestIds.length) return Array.from(new Set(requestIds));
 
-  const legacyLink = await TelegramLink.findOne({ chatId }).lean();
+  const legacyLink = isPrismaOnlyMode() ? null : await TelegramLink.findOne({ chatId }).lean();
   const legacyIds = (legacyLink?.cardIds || []).filter(isLikelyCardId);
-  if (legacyLink && legacyIds.length !== (legacyLink.cardIds || []).length) {
+  if (!isPrismaOnlyMode() && legacyLink && legacyIds.length !== (legacyLink.cardIds || []).length) {
     await TelegramLink.updateOne({ chatId }, { $set: { cardIds: legacyIds } });
   }
   return Array.from(new Set(legacyIds));
 }
 
 async function getPrimaryCardForUser(userId: string) {
-  const card = await Card.findOne({ userId })
-    .sort({ updatedAt: -1 })
-    .lean();
+  const card = isPrismaPersistenceEnabled()
+    ? await prisma.card.findFirst({ where: { userId }, orderBy: { updatedAt: "desc" } })
+    : await Card.findOne({ userId })
+      .sort({ updatedAt: -1 })
+      .lean();
   if (card) return card;
+  if (isPrismaOnlyMode()) return null;
   const request = await CardRequest.findOne({ userId, status: "approved", cardId: { $exists: true, $ne: "" } })
     .sort({ updatedAt: -1 })
     .lean();
@@ -3682,12 +3781,16 @@ async function sendCardStatus(chatId: number) {
 
 async function sendCardDetail(chatId: number, cardId: string) {
   try {
-    const user = await User.findOne({ userId: String(chatId) }).lean();
+    const user = isPrismaPersistenceEnabled()
+      ? await prisma.user.findUnique({ where: { userId: String(chatId) } })
+      : await User.findOne({ userId: String(chatId) }).lean();
     const walletBalance = user?.balance ?? 0;
-    const card = await Card.findOne({ cardId }).lean();
+    const card = isPrismaPersistenceEnabled()
+      ? await prisma.card.findUnique({ where: { cardId } })
+      : await Card.findOne({ cardId }).lean();
 
     // If this card was generated locally, serve synthetic details and avoid upstream call
-    const local = await CardRequest.findOne({ cardId, status: "approved" }).lean();
+    const local = isPrismaOnlyMode() ? null : await CardRequest.findOne({ cardId, status: "approved" }).lean();
     if (local) {
       const detail = {
         card_id: cardId,
