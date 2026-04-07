@@ -8,6 +8,7 @@
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "reset-users": "node scripts/reset-users.js",
     "migrate:mongo-to-supabase": "node scripts/migrate-mongo-to-supabase.js",
+    "backup:supabase": "node scripts/backup-supabase.js",
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
     "prisma:studio": "prisma studio",
