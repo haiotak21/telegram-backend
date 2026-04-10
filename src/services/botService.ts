@@ -490,16 +490,7 @@ export async function initBot() {
   botRef.onText(/^\/kyc$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "kyc")) return;
     const chatId = msg.chat.id;
-    if (isPrismaOnlyMode()) {
-      await bot!.sendMessage(chatId, "KYC is temporarily unavailable during database migration. Please try again shortly.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
-    }
-    const [user, customer] = await Promise.all([
-      User.findOne({ userId: String(chatId) }).lean(),
-      Customer.findOne({ userId: String(chatId) }).lean(),
-    ]);
+    const { user, customer } = await getUserAndCustomerContext(String(chatId));
     const status = resolveKycStatus(user, customer);
     if (status === "pending") {
       await bot!.sendMessage(chatId, "✅ KYC already submitted. Status: pending verification.", {
@@ -525,16 +516,7 @@ export async function initBot() {
   botRef.onText(/^\/kyc_edit$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "kyc_edit")) return;
     const chatId = msg.chat.id;
-    if (isPrismaOnlyMode()) {
-      await bot!.sendMessage(chatId, "KYC edit is temporarily unavailable during database migration. Please try again shortly.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
-    }
-    const [user, customer] = await Promise.all([
-      User.findOne({ userId: String(chatId) }).lean(),
-      Customer.findOne({ userId: String(chatId) }).lean(),
-    ]);
+    const { user, customer } = await getUserAndCustomerContext(String(chatId));
     const status = resolveKycStatus(user, customer);
     if (status === "not_started") {
       await bot!.sendMessage(chatId, "No KYC record found. Use /kyc to submit.", {
@@ -3488,10 +3470,7 @@ function resolveKycStatus(user?: any, customer?: any): KycStatus | "not_started"
 }
 
 async function sendKycStatus(chatId: number) {
-  const [user, customer] = await Promise.all([
-    User.findOne({ userId: String(chatId) }).lean(),
-    Customer.findOne({ userId: String(chatId) }).lean(),
-  ]);
+  const { user, customer } = await getUserAndCustomerContext(String(chatId));
   let status = resolveKycStatus(user, customer);
   if (user && status !== "approved" && status !== "rejected") {
     const refreshed = await refreshKycStatusFromStroWallet(user);
@@ -3597,12 +3576,12 @@ function normalizeCardDetail(raw: any) {
 
 async function sendUserInfo(chatId: number, message?: any) {
   if (shouldSuppressOutgoing(chatId, "user_info")) return;
-  const [link, user, customer, primaryCard] = await Promise.all([
-    TelegramLink.findOne({ chatId }).lean(),
-    User.findOne({ userId: String(chatId) }).lean(),
-    Customer.findOne({ userId: String(chatId) }).lean(),
+  const [link, profile, primaryCard] = await Promise.all([
+    isPrismaOnlyMode() ? Promise.resolve(null) : TelegramLink.findOne({ chatId }).lean(),
+    getUserAndCustomerContext(String(chatId)),
     getPrimaryCardForUser(String(chatId)),
   ]);
+  const { user, customer } = profile;
   const baseBalance = user?.balance ?? 0;
   const currency = user?.currency || "USDT";
   const email = user?.customerEmail || link?.customerEmail;
