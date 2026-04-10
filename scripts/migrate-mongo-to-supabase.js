@@ -11,6 +11,12 @@ const CardRequest = require("../dist/models/CardRequest").default;
 
 const prisma = new PrismaClient();
 
+function argValue(flag) {
+  const exact = process.argv.find((a) => a.startsWith(`${flag}=`));
+  if (!exact) return null;
+  return exact.slice(flag.length + 1);
+}
+
 function toNullableString(value) {
   if (value == null) return null;
   const text = String(value).trim();
@@ -29,9 +35,9 @@ function toNullableDate(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-async function migrateUsers() {
+async function migrateUsers(filter = {}) {
   let count = 0;
-  const cursor = User.find({}).lean().cursor();
+  const cursor = User.find(filter).lean().cursor();
   for await (const doc of cursor) {
     const userId = toNullableString(doc.userId);
     if (!userId) continue;
@@ -104,9 +110,9 @@ async function migrateUsers() {
   return count;
 }
 
-async function migrateCards() {
+async function migrateCards(filter = {}) {
   let count = 0;
-  const cursor = Card.find({}).lean().cursor();
+  const cursor = Card.find(filter).lean().cursor();
   for await (const doc of cursor) {
     const cardId = toNullableString(doc.cardId);
     if (!cardId) continue;
@@ -145,9 +151,9 @@ async function migrateCards() {
   return count;
 }
 
-async function migrateTransactions() {
+async function migrateTransactions(filter = {}) {
   let count = 0;
-  const cursor = Transaction.find({}).lean().cursor();
+  const cursor = Transaction.find(filter).lean().cursor();
   for await (const doc of cursor) {
     const userId = toNullableString(doc.userId);
     if (!userId) continue;
@@ -178,9 +184,9 @@ async function migrateTransactions() {
   return count;
 }
 
-async function migrateCardRequests() {
+async function migrateCardRequests(filter = {}) {
   let count = 0;
-  const cursor = CardRequest.find({}).lean().cursor();
+  const cursor = CardRequest.find(filter).lean().cursor();
   for await (const doc of cursor) {
     const userId = toNullableString(doc.userId);
     if (!userId) continue;
@@ -217,9 +223,64 @@ async function truncatePrismaTables() {
   await prisma.$executeRawUnsafe('TRUNCATE TABLE "User" RESTART IDENTITY CASCADE');
 }
 
+async function clearTargetUser(userId, customerEmail) {
+  console.log(`Clearing existing Supabase rows for user ${userId}...`);
+  await prisma.transaction.deleteMany({ where: { userId } });
+  await prisma.cardRequest.deleteMany({
+    where: {
+      OR: [{ userId }, ...(customerEmail ? [{ customerEmail }] : [])],
+    },
+  });
+  await prisma.card.deleteMany({
+    where: {
+      OR: [{ userId }, ...(customerEmail ? [{ customerEmail }] : [])],
+    },
+  });
+  await prisma.user.deleteMany({ where: { userId } });
+}
+
+async function resolveTargetUserFilter(targetUserId) {
+  const users = await User.find({
+    $or: [{ userId: targetUserId }, { telegramId: targetUserId }, { chatId: targetUserId }],
+  })
+    .lean()
+    .limit(1);
+
+  const user = users[0] || null;
+  if (!user) {
+    return {
+      userFilter: { userId: targetUserId },
+      cardFilter: { userId: targetUserId },
+      cardRequestFilter: { userId: targetUserId },
+      transactionFilter: { userId: targetUserId },
+      resolvedUserId: targetUserId,
+      customerEmail: null,
+      found: false,
+    };
+  }
+
+  const resolvedUserId = toNullableString(user.userId) || targetUserId;
+  const customerEmail = toNullableString(user.customerEmail);
+  return {
+    userFilter: { userId: resolvedUserId },
+    cardFilter: {
+      $or: [{ userId: resolvedUserId }, ...(customerEmail ? [{ customerEmail }] : [])],
+    },
+    cardRequestFilter: {
+      $or: [{ userId: resolvedUserId }, ...(customerEmail ? [{ customerEmail }] : [])],
+    },
+    transactionFilter: { userId: resolvedUserId },
+    resolvedUserId,
+    customerEmail,
+    found: true,
+  };
+}
+
 async function main() {
   const mongoUri = process.env.MIGRATION_MONGODB_URI || process.env.MONGODB_URI;
   const truncate = process.argv.includes("--truncate");
+  const targetUserId = argValue("--userId");
+  const wipeUser = process.argv.includes("--wipe-user");
 
   if (!mongoUri) {
     throw new Error("MIGRATION_MONGODB_URI or MONGODB_URI is required");
@@ -238,10 +299,31 @@ async function main() {
   }
 
   console.log("Starting migration...");
-  const users = await migrateUsers();
-  const cards = await migrateCards();
-  const cardRequests = await migrateCardRequests();
-  const txns = await migrateTransactions();
+  let users = 0;
+  let cards = 0;
+  let cardRequests = 0;
+  let txns = 0;
+
+  if (targetUserId) {
+    const scope = await resolveTargetUserFilter(targetUserId);
+    if (!scope.found) {
+      console.warn(`Target user ${targetUserId} not found in Mongo by userId/telegramId/chatId.`);
+    } else {
+      console.log(`Targeted restore for userId=${scope.resolvedUserId}${scope.customerEmail ? ` email=${scope.customerEmail}` : ""}`);
+    }
+    if (wipeUser) {
+      await clearTargetUser(scope.resolvedUserId, scope.customerEmail);
+    }
+    users = await migrateUsers(scope.userFilter);
+    cards = await migrateCards(scope.cardFilter);
+    cardRequests = await migrateCardRequests(scope.cardRequestFilter);
+    txns = await migrateTransactions(scope.transactionFilter);
+  } else {
+    users = await migrateUsers();
+    cards = await migrateCards();
+    cardRequests = await migrateCardRequests();
+    txns = await migrateTransactions();
+  }
 
   console.log("Migration complete", {
     users,

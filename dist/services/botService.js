@@ -102,6 +102,12 @@ const cardRequestSelections = new Map();
 const recentCallbackActions = new Map();
 const recentOutgoing = new Map();
 const recentUpdates = new Map();
+function isMongoReady() {
+    return mongoose_1.default.connection.readyState === 1;
+}
+function isPrismaOnlyMode() {
+    return (0, persistence_1.isPrismaPersistenceEnabled)() && !isMongoReady();
+}
 async function upsertTelegramIdentity(msg) {
     const telegramId = msg?.from?.id != null ? String(msg.from.id) : undefined;
     const chatId = msg?.chat?.id != null ? String(msg.chat.id) : undefined;
@@ -142,6 +148,38 @@ async function findUserForChat(chatId) {
         return prisma_1.default.user.findUnique({ where: { userId } });
     }
     return User_1.default.findOne({ userId }).lean();
+}
+async function findActiveCardsForUser(userId) {
+    if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+        const user = await prisma_1.default.user.findUnique({ where: { userId } });
+        const customerEmail = user?.customerEmail || undefined;
+        return prisma_1.default.card.findMany({
+            where: {
+                OR: [{ userId }, ...(customerEmail ? [{ customerEmail }] : [])],
+                status: { in: ["active", "ACTIVE", "frozen", "FROZEN"] },
+            },
+            orderBy: { updatedAt: "desc" },
+        });
+    }
+    return Card_1.default.find({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
+}
+async function getUserAndCustomerContext(userId) {
+    if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+        const user = await prisma_1.default.user.findUnique({ where: { userId } });
+        const customer = user
+            ? {
+                userId,
+                email: user.customerEmail,
+                kycStatus: user.kycStatus,
+            }
+            : null;
+        return { user, customer };
+    }
+    const [user, customer] = await Promise.all([
+        User_1.default.findOne({ userId }).lean(),
+        Customer_1.default.findOne({ userId }).lean(),
+    ]);
+    return { user, customer };
 }
 const MENU_BUTTON = { text: "📋 Menu", callback_data: "MENU" };
 const MENU_KEYBOARD = [
@@ -371,6 +409,12 @@ async function initBot() {
         if (shouldSkipCommand(msg, "kyc"))
             return;
         const chatId = msg.chat.id;
+        if (isPrismaOnlyMode()) {
+            await bot.sendMessage(chatId, "KYC is temporarily unavailable during database migration. Please try again shortly.", {
+                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
+            return;
+        }
         const [user, customer] = await Promise.all([
             User_1.default.findOne({ userId: String(chatId) }).lean(),
             Customer_1.default.findOne({ userId: String(chatId) }).lean(),
@@ -400,6 +444,12 @@ async function initBot() {
         if (shouldSkipCommand(msg, "kyc_edit"))
             return;
         const chatId = msg.chat.id;
+        if (isPrismaOnlyMode()) {
+            await bot.sendMessage(chatId, "KYC edit is temporarily unavailable during database migration. Please try again shortly.", {
+                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
+            return;
+        }
         const [user, customer] = await Promise.all([
             User_1.default.findOne({ userId: String(chatId) }).lean(),
             Customer_1.default.findOne({ userId: String(chatId) }).lean(),
@@ -467,8 +517,8 @@ async function initBot() {
         if (shouldSkipCommand(msg, "status"))
             return;
         const [link, cards] = await Promise.all([
-            TelegramLink_1.TelegramLink.findOne({ chatId: msg.chat.id }).lean(),
-            Card_1.default.find({ userId: String(msg.chat.id), status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean(),
+            isPrismaOnlyMode() ? Promise.resolve(null) : TelegramLink_1.TelegramLink.findOne({ chatId: msg.chat.id }).lean(),
+            findActiveCardsForUser(String(msg.chat.id)),
         ]);
         const cardLabels = cards.map((c) => `${c.cardId}${c.last4 ? ` (••••${c.last4})` : ""}`);
         await bot.sendMessage(msg.chat.id, `Email: ${link?.customerEmail || "(none)"}\nCards: ${cardLabels.join(", ") || "(none)"}`);
@@ -1125,8 +1175,8 @@ async function initBot() {
                             return;
                         }
                     }
-                    const user = await User_1.default.findOne({ userId: String(msg.chat.id) }).lean();
-                    const customer = await Customer_1.default.findOne({ userId: String(msg.chat.id) }).lean();
+                    const userId = String(msg.chat.id);
+                    const { user, customer } = await getUserAndCustomerContext(userId);
                     if (!customer || customer.kycStatus !== "approved") {
                         await bot.sendMessage(msg.chat.id, [
                             "✅ Payment Verified",
@@ -1137,7 +1187,9 @@ async function initBot() {
                         clearPendingAction(msg.chat.id);
                         return;
                     }
-                    const existingCard = await Card_1.default.findOne({ userId: String(msg.chat.id) }).lean();
+                    const existingCard = (0, persistence_1.isPrismaPersistenceEnabled)()
+                        ? await prisma_1.default.card.findFirst({ where: { userId }, orderBy: { updatedAt: "desc" } })
+                        : await Card_1.default.findOne({ userId }).lean();
                     if (existingCard) {
                         await bot.sendMessage(msg.chat.id, "❌ You already have a card. Multiple cards are not allowed.", {
                             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -1386,6 +1438,9 @@ async function notifyKycStatus(userId, status) {
     }
 }
 async function pollPendingKycUpdates() {
+    if (isPrismaOnlyMode()) {
+        return { checked: 0, updated: 0 };
+    }
     const pendingCustomers = await Customer_1.default.find({ kycStatus: "pending" }).lean();
     let checked = 0;
     let updated = 0;
@@ -2022,12 +2077,15 @@ async function sendDepositSummary(chatId, method, amount) {
 async function handleCardRequest(chatId, message) {
     if (shouldSuppressOutgoing(chatId, "card_request"))
         return;
-    const user = await User_1.default.findOne({ userId: String(chatId) }).lean();
-    const customerRecord = await Customer_1.default.findOne({ userId: String(chatId) }).lean();
-    const kycStatus = resolveKycStatus(user, customerRecord);
     const userId = String(chatId);
-    const existingCard = await Card_1.default.findOne({ userId }).lean();
-    const approvedRequest = await CardRequest_1.default.findOne({ userId, status: "approved" }).lean();
+    const { user, customer: customerRecord } = await getUserAndCustomerContext(userId);
+    const kycStatus = resolveKycStatus(user, customerRecord);
+    const existingCard = (0, persistence_1.isPrismaPersistenceEnabled)()
+        ? await prisma_1.default.card.findFirst({ where: { userId }, orderBy: { updatedAt: "desc" } })
+        : await Card_1.default.findOne({ userId }).lean();
+    const approvedRequest = (0, persistence_1.isPrismaPersistenceEnabled)()
+        ? await prisma_1.default.cardRequest.findFirst({ where: { userId, status: "approved" }, orderBy: { updatedAt: "desc" } })
+        : await CardRequest_1.default.findOne({ userId, status: "approved" }).lean();
     if (existingCard || approvedRequest) {
         await bot.sendMessage(chatId, "❌ You already have a card. Multiple cards are not allowed.", {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -2052,7 +2110,9 @@ async function handleCardRequest(chatId, message) {
         });
         return;
     }
-    const pendingRequest = await CardRequest_1.default.findOne({ userId, status: "pending" }).lean();
+    const pendingRequest = (0, persistence_1.isPrismaPersistenceEnabled)()
+        ? await prisma_1.default.cardRequest.findFirst({ where: { userId, status: "pending" }, orderBy: { updatedAt: "desc" } })
+        : await CardRequest_1.default.findOne({ userId, status: "pending" }).lean();
     if (pendingRequest) {
         await bot.sendMessage(chatId, "⏳ Your card request is already being processed.", {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -2096,13 +2156,96 @@ async function submitCardRequest(userId, user, customer, message, cardAmountUsd)
         ? parsedCardAmount
         : getCardRequestBaseAmount();
     const amount = String(safeCardAmount);
+    const customerEmail = customer?.email || user?.customerEmail;
+    if (!customerEmail) {
+        await bot.sendMessage(Number(userId), "❌ Missing email. Please update your KYC email and try again.", {
+            reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+    }
+    if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+        try {
+            const payload = {
+                name_on_card: nameOnCard,
+                card_type: "visa",
+                amount,
+                customerEmail,
+            };
+            const resp = await callStroWallet("create-card", "post", payload);
+            const data = resp?.data ?? resp;
+            if (data?.success === false || data?.ok === false) {
+                const providerMsg = data?.message || data?.error || "Card creation rejected";
+                throw new Error(typeof providerMsg === "string" ? providerMsg : JSON.stringify(providerMsg));
+            }
+            const cardId = String(data?.card_id || data?.data?.card_id || data?.id || data?.data?.id || "");
+            if (!cardId) {
+                throw new Error("Card provider did not return card_id");
+            }
+            await prisma_1.default.cardRequest.create({
+                data: {
+                    userId,
+                    nameOnCard,
+                    cardType: "visa",
+                    amount,
+                    customerEmail,
+                    mode: normalizeMode(getDefaultMode()) || null,
+                    status: "approved",
+                    cardId,
+                    cardNumber: data?.card_number || null,
+                    cvc: data?.cvc || data?.cvv || null,
+                    responseData: data,
+                },
+            });
+            await prisma_1.default.card.upsert({
+                where: { cardId },
+                create: {
+                    cardId,
+                    userId,
+                    customerEmail,
+                    nameOnCard,
+                    cardType: "visa",
+                    status: data?.status || data?.state || "active",
+                    last4: data?.last4 || data?.card_last4 || (data?.card_number ? String(data.card_number).slice(-4) : null),
+                    currency: data?.currency || data?.ccy || null,
+                    balance: data?.balance != null ? String(data.balance) : (data?.available_balance != null ? String(data.available_balance) : null),
+                    availableBalance: data?.available_balance != null ? String(data.available_balance) : null,
+                },
+                update: {
+                    userId,
+                    customerEmail,
+                    nameOnCard,
+                    cardType: "visa",
+                    status: data?.status || data?.state || "active",
+                    last4: data?.last4 || data?.card_last4 || (data?.card_number ? String(data.card_number).slice(-4) : null),
+                    currency: data?.currency || data?.ccy || null,
+                    balance: data?.balance != null ? String(data.balance) : (data?.available_balance != null ? String(data.available_balance) : null),
+                    availableBalance: data?.available_balance != null ? String(data.available_balance) : null,
+                },
+            });
+            await bot.sendMessage(Number(userId), [
+                "✅ Payment Verified",
+                "Your virtual card has been created successfully.",
+                `Card ID: ${cardId}`,
+            ].join("\n"), {
+                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
+            return;
+        }
+        catch (e) {
+            const messageText = e?.response?.data?.error || e?.message || "Your card request could not be approved.";
+            await bot.sendMessage(Number(userId), `❌ ${messageText}`, {
+                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+            });
+            return;
+        }
+    }
     try {
         const resp = await axios_1.default.post(`${BACKEND_BASE}/api/card-requests`, {
             userId,
             nameOnCard,
             cardType: "visa",
             amount,
-            customerEmail: customer?.email || user?.customerEmail,
+            customerEmail,
         });
         if (resp?.data?.ok) {
             await bot.sendMessage(Number(userId), [
@@ -2127,8 +2270,7 @@ async function submitCardRequest(userId, user, customer, message, cardAmountUsd)
     }
 }
 async function startCreateCardFlow(chatId, message) {
-    const user = await User_1.default.findOne({ userId: String(chatId) }).lean();
-    const customer = await Customer_1.default.findOne({ userId: String(chatId) }).lean();
+    const { user, customer } = await getUserAndCustomerContext(String(chatId));
     const status = resolveKycStatus(user, customer);
     if (status !== "approved") {
         if (status === "pending") {
@@ -2224,8 +2366,8 @@ function buildCreateCardSummary(data) {
     return lines.join("\n");
 }
 async function submitCreateCard(chatId, session) {
-    const user = await User_1.default.findOne({ userId: String(chatId) }).lean();
-    const customer = await Customer_1.default.findOne({ userId: String(chatId) }).lean();
+    const userId = String(chatId);
+    const { user, customer } = await getUserAndCustomerContext(userId);
     if (!customer || customer.kycStatus !== "approved") {
         createCardSessions.delete(chatId);
         await bot.sendMessage(chatId, "❌ You must complete and pass KYC before creating a card.", {
@@ -2256,20 +2398,52 @@ async function submitCreateCard(chatId, session) {
         }
         const cardId = data?.card_id || data?.data?.card_id || data?.id || data?.data?.id;
         if (cardId) {
-            await TelegramLink_1.TelegramLink.findOneAndUpdate({ chatId }, { $addToSet: { cardIds: cardId }, $set: { customerEmail } }, { upsert: true, new: true });
-            await Card_1.default.findOneAndUpdate({ cardId }, {
-                $set: {
-                    cardId,
-                    userId: String(chatId),
-                    customerEmail,
-                    nameOnCard: payload.name_on_card,
-                    cardType: payload.card_type,
-                    status: data?.status || data?.state || "active",
-                    currency: data?.currency || data?.ccy,
-                    balance: data?.balance || data?.available_balance,
-                    availableBalance: data?.available_balance,
-                },
-            }, { upsert: true, new: true });
+            if (!isPrismaOnlyMode()) {
+                await TelegramLink_1.TelegramLink.findOneAndUpdate({ chatId }, { $addToSet: { cardIds: cardId }, $set: { customerEmail } }, { upsert: true, new: true });
+            }
+            if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+                await prisma_1.default.card.upsert({
+                    where: { cardId },
+                    create: {
+                        cardId,
+                        userId,
+                        customerEmail,
+                        nameOnCard: payload.name_on_card,
+                        cardType: payload.card_type,
+                        status: data?.status || data?.state || "active",
+                        currency: data?.currency || data?.ccy || null,
+                        balance: (data?.balance || data?.available_balance || null) != null ? String(data?.balance || data?.available_balance) : null,
+                        availableBalance: data?.available_balance != null ? String(data?.available_balance) : null,
+                        last4: data?.last4 || data?.card_last4 || null,
+                    },
+                    update: {
+                        userId,
+                        customerEmail,
+                        nameOnCard: payload.name_on_card,
+                        cardType: payload.card_type,
+                        status: data?.status || data?.state || "active",
+                        currency: data?.currency || data?.ccy || null,
+                        balance: (data?.balance || data?.available_balance || null) != null ? String(data?.balance || data?.available_balance) : null,
+                        availableBalance: data?.available_balance != null ? String(data?.available_balance) : null,
+                        last4: data?.last4 || data?.card_last4 || null,
+                    },
+                });
+            }
+            else {
+                await Card_1.default.findOneAndUpdate({ cardId }, {
+                    $set: {
+                        cardId,
+                        userId,
+                        customerEmail,
+                        nameOnCard: payload.name_on_card,
+                        cardType: payload.card_type,
+                        status: data?.status || data?.state || "active",
+                        currency: data?.currency || data?.ccy,
+                        balance: data?.balance || data?.available_balance,
+                        availableBalance: data?.available_balance,
+                    },
+                }, { upsert: true, new: true });
+            }
         }
         createCardSessions.delete(chatId);
         await bot.sendMessage(chatId, `✅ Your StroWallet card has been created!\nCard ID: ${cardId || "(pending)"}`, { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
@@ -3190,8 +3364,8 @@ async function sendWalletSummary(chatId, message) {
     if (shouldSuppressOutgoing(chatId, "wallet_summary"))
         return;
     const [link, user, primaryCard] = await Promise.all([
-        TelegramLink_1.TelegramLink.findOne({ chatId }).lean(),
-        User_1.default.findOne({ userId: String(chatId) }).lean(),
+        isPrismaOnlyMode() ? Promise.resolve(null) : TelegramLink_1.TelegramLink.findOne({ chatId }).lean(),
+        (0, persistence_1.isPrismaPersistenceEnabled)() ? prisma_1.default.user.findUnique({ where: { userId: String(chatId) } }) : User_1.default.findOne({ userId: String(chatId) }).lean(),
         getPrimaryCardForUser(String(chatId)),
     ]);
     const baseWalletBalance = user?.balance ?? 0;
@@ -3220,6 +3394,41 @@ async function sendMyCards(chatId, message) {
         });
     }
     const userId = String(chatId);
+    if (isPrismaOnlyMode()) {
+        const user = await prisma_1.default.user.findUnique({ where: { userId } });
+        const card = await getPrimaryCardForUser(userId);
+        if (!card) {
+            await editOrSend(chatId, message, [
+                "💳 Your Virtual Card",
+                "Status: ✅ None",
+                "Card Number: /card_request",
+            ].join("\n"), {
+                inline_keyboard: [[MENU_BUTTON]],
+            });
+            return;
+        }
+        const statusText = isFrozenStatus(card.status || undefined) ? "❄️ Frozen" : "✅ Active";
+        const balanceLabel = formatCardMoney(card.balance ?? user?.balance, card.currency || user?.currency || "USD");
+        const lines = [
+            "💳 Your Virtual Card",
+            `Card Type: ${String(card.cardType || "virtual").toLowerCase()}`,
+            `Status: ${statusText}`,
+            `Card Number: ${formatMaskedCard(card.last4 || undefined)}`,
+            balanceLabel ? `Balance: ${balanceLabel}` : undefined,
+        ].filter(Boolean);
+        const freezeAction = isFrozenStatus(card.status || undefined) ? "CARD_UNFREEZE" : "CARD_FREEZE";
+        const freezeLabel = isFrozenStatus(card.status || undefined) ? "🔥 Unfreeze Card" : "❄️ Freeze Card";
+        await editOrSend(chatId, message, lines.join("\n"), {
+            inline_keyboard: [
+                [
+                    { text: "🔍 Transactions", callback_data: `CARD_TXN::${card.cardId}` },
+                    { text: freezeLabel, callback_data: `${freezeAction}::${card.cardId}` },
+                ],
+                [MENU_BUTTON],
+            ],
+        });
+        return;
+    }
     const [user, customer, link, cardIds] = await Promise.all([
         User_1.default.findOne({ userId }).lean(),
         Customer_1.default.findOne({ userId }).lean(),
@@ -3314,22 +3523,67 @@ function isLikelyCardId(value) {
 }
 async function getUserCardIds(chatId) {
     const userId = String(chatId);
-    const cards = await Card_1.default.find({ userId }).lean();
+    let cards;
+    if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+        const user = await prisma_1.default.user.findUnique({ where: { userId } });
+        const customerEmail = user?.customerEmail || undefined;
+        cards = await prisma_1.default.card.findMany({
+            where: {
+                OR: [{ userId }, ...(customerEmail ? [{ customerEmail }] : [])],
+            },
+            orderBy: { updatedAt: "desc" },
+        });
+    }
+    else {
+        cards = await Card_1.default.find({ userId }).lean();
+    }
     const cardIdsFromCards = cards.map((c) => c.cardId).filter(isLikelyCardId);
     if (cardIdsFromCards.length)
         return Array.from(new Set(cardIdsFromCards));
-    const requests = await CardRequest_1.default.find({ userId, status: "approved", cardId: { $exists: true, $ne: "" } }).lean();
+    const requests = isPrismaOnlyMode()
+        ? []
+        : await CardRequest_1.default.find({ userId, status: "approved", cardId: { $exists: true, $ne: "" } }).lean();
     const requestIds = requests.map((r) => String(r.cardId)).filter(isLikelyCardId);
     if (requestIds.length)
         return Array.from(new Set(requestIds));
-    const legacyLink = await TelegramLink_1.TelegramLink.findOne({ chatId }).lean();
+    const legacyLink = isPrismaOnlyMode() ? null : await TelegramLink_1.TelegramLink.findOne({ chatId }).lean();
     const legacyIds = (legacyLink?.cardIds || []).filter(isLikelyCardId);
-    if (legacyLink && legacyIds.length !== (legacyLink.cardIds || []).length) {
+    if (!isPrismaOnlyMode() && legacyLink && legacyIds.length !== (legacyLink.cardIds || []).length) {
         await TelegramLink_1.TelegramLink.updateOne({ chatId }, { $set: { cardIds: legacyIds } });
     }
     return Array.from(new Set(legacyIds));
 }
 async function getPrimaryCardForUser(userId) {
+    if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+        const user = await prisma_1.default.user.findUnique({ where: { userId } });
+        const customerEmail = user?.customerEmail || undefined;
+        const card = await prisma_1.default.card.findFirst({
+            where: {
+                OR: [{ userId }, ...(customerEmail ? [{ customerEmail }] : [])],
+            },
+            orderBy: { updatedAt: "desc" },
+        });
+        if (card)
+            return card;
+        const request = await prisma_1.default.cardRequest.findFirst({
+            where: {
+                status: "approved",
+                cardId: { not: null },
+                OR: [{ userId }, ...(customerEmail ? [{ customerEmail }] : [])],
+            },
+            orderBy: { updatedAt: "desc" },
+        });
+        if (!request?.cardId)
+            return null;
+        return {
+            cardId: String(request.cardId),
+            cardType: request.cardType,
+            status: "active",
+            last4: request.cardNumber ? request.cardNumber.slice(-4) : undefined,
+            balance: undefined,
+            currency: undefined,
+        };
+    }
     const card = await Card_1.default.findOne({ userId })
         .sort({ updatedAt: -1 })
         .lean();
@@ -3380,11 +3634,15 @@ async function sendCardStatus(chatId) {
 }
 async function sendCardDetail(chatId, cardId) {
     try {
-        const user = await User_1.default.findOne({ userId: String(chatId) }).lean();
+        const user = (0, persistence_1.isPrismaPersistenceEnabled)()
+            ? await prisma_1.default.user.findUnique({ where: { userId: String(chatId) } })
+            : await User_1.default.findOne({ userId: String(chatId) }).lean();
         const walletBalance = user?.balance ?? 0;
-        const card = await Card_1.default.findOne({ cardId }).lean();
+        const card = (0, persistence_1.isPrismaPersistenceEnabled)()
+            ? await prisma_1.default.card.findUnique({ where: { cardId } })
+            : await Card_1.default.findOne({ cardId }).lean();
         // If this card was generated locally, serve synthetic details and avoid upstream call
-        const local = await CardRequest_1.default.findOne({ cardId, status: "approved" }).lean();
+        const local = isPrismaOnlyMode() ? null : await CardRequest_1.default.findOne({ cardId, status: "approved" }).lean();
         if (local) {
             const detail = {
                 card_id: cardId,

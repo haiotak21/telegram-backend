@@ -221,15 +221,36 @@ async function findUserForChat(chatId: number | string) {
 
 async function findActiveCardsForUser(userId: string) {
   if (isPrismaPersistenceEnabled()) {
+    const user = await prisma.user.findUnique({ where: { userId } });
+    const customerEmail = user?.customerEmail || undefined;
     return prisma.card.findMany({
       where: {
-        userId,
+        OR: [{ userId }, ...(customerEmail ? [{ customerEmail }] : [])],
         status: { in: ["active", "ACTIVE", "frozen", "FROZEN"] },
       },
       orderBy: { updatedAt: "desc" },
     });
   }
   return Card.find({ userId, status: { $in: ["active", "ACTIVE", "frozen", "FROZEN"] } }).lean();
+}
+
+async function getUserAndCustomerContext(userId: string) {
+  if (isPrismaPersistenceEnabled()) {
+    const user = await prisma.user.findUnique({ where: { userId } });
+    const customer = user
+      ? {
+          userId,
+          email: user.customerEmail,
+          kycStatus: user.kycStatus,
+        }
+      : null;
+    return { user, customer };
+  }
+  const [user, customer] = await Promise.all([
+    User.findOne({ userId }).lean(),
+    Customer.findOne({ userId }).lean(),
+  ]);
+  return { user, customer };
 }
 
 const MENU_BUTTON: InlineKeyboardButton = { text: "📋 Menu", callback_data: "MENU" };
@@ -1277,8 +1298,8 @@ export async function initBot() {
             }
           }
 
-          const user = await User.findOne({ userId: String(msg.chat.id) }).lean();
-          const customer = await Customer.findOne({ userId: String(msg.chat.id) }).lean();
+          const userId = String(msg.chat.id);
+          const { user, customer } = await getUserAndCustomerContext(userId);
           if (!customer || customer.kycStatus !== "approved") {
             await bot!.sendMessage(msg.chat.id, [
               "✅ Payment Verified",
@@ -1290,7 +1311,9 @@ export async function initBot() {
             return;
           }
 
-          const existingCard = await Card.findOne({ userId: String(msg.chat.id) }).lean();
+          const existingCard = isPrismaPersistenceEnabled()
+            ? await prisma.card.findFirst({ where: { userId }, orderBy: { updatedAt: "desc" } })
+            : await Card.findOne({ userId }).lean();
           if (existingCard) {
             await bot!.sendMessage(msg.chat.id, "❌ You already have a card. Multiple cards are not allowed.", {
               reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -2267,19 +2290,16 @@ async function sendDepositSummary(chatId: number, method: PaymentMethod, amount:
 
 async function handleCardRequest(chatId: number, message?: any) {
   if (shouldSuppressOutgoing(chatId, "card_request")) return;
-  if (isPrismaOnlyMode()) {
-    await bot!.sendMessage(chatId, "Card request is temporarily unavailable during migration. Please try again shortly.", {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
-    return;
-  }
-  const user = await User.findOne({ userId: String(chatId) }).lean();
-  const customerRecord = await Customer.findOne({ userId: String(chatId) }).lean();
+  const userId = String(chatId);
+  const { user, customer: customerRecord } = await getUserAndCustomerContext(userId);
   const kycStatus = resolveKycStatus(user, customerRecord);
 
-  const userId = String(chatId);
-  const existingCard = await Card.findOne({ userId }).lean();
-  const approvedRequest = await CardRequest.findOne({ userId, status: "approved" }).lean();
+  const existingCard = isPrismaPersistenceEnabled()
+    ? await prisma.card.findFirst({ where: { userId }, orderBy: { updatedAt: "desc" } })
+    : await Card.findOne({ userId }).lean();
+  const approvedRequest = isPrismaPersistenceEnabled()
+    ? await prisma.cardRequest.findFirst({ where: { userId, status: "approved" }, orderBy: { updatedAt: "desc" } })
+    : await CardRequest.findOne({ userId, status: "approved" }).lean();
   if (existingCard || approvedRequest) {
     await bot!.sendMessage(chatId, "❌ You already have a card. Multiple cards are not allowed.", {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -2306,7 +2326,9 @@ async function handleCardRequest(chatId: number, message?: any) {
     return;
   }
 
-  const pendingRequest = await CardRequest.findOne({ userId, status: "pending" }).lean();
+  const pendingRequest = isPrismaPersistenceEnabled()
+    ? await prisma.cardRequest.findFirst({ where: { userId, status: "pending" }, orderBy: { updatedAt: "desc" } })
+    : await CardRequest.findOne({ userId, status: "pending" }).lean();
   if (pendingRequest) {
     await bot!.sendMessage(chatId, "⏳ Your card request is already being processed.", {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -2354,13 +2376,101 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
     ? parsedCardAmount
     : getCardRequestBaseAmount();
   const amount = String(safeCardAmount);
+  const customerEmail = customer?.email || user?.customerEmail;
+  if (!customerEmail) {
+    await bot!.sendMessage(Number(userId), "❌ Missing email. Please update your KYC email and try again.", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+    return;
+  }
+
+  if (isPrismaPersistenceEnabled()) {
+    try {
+      const payload = {
+        name_on_card: nameOnCard,
+        card_type: "visa",
+        amount,
+        customerEmail,
+      };
+      const resp = await callStroWallet("create-card", "post", payload);
+      const data: any = resp?.data ?? resp;
+      if (data?.success === false || data?.ok === false) {
+        const providerMsg = data?.message || data?.error || "Card creation rejected";
+        throw new Error(typeof providerMsg === "string" ? providerMsg : JSON.stringify(providerMsg));
+      }
+
+      const cardId = String(data?.card_id || data?.data?.card_id || data?.id || data?.data?.id || "");
+      if (!cardId) {
+        throw new Error("Card provider did not return card_id");
+      }
+
+      await prisma.cardRequest.create({
+        data: {
+          userId,
+          nameOnCard,
+          cardType: "visa",
+          amount,
+          customerEmail,
+          mode: normalizeMode(getDefaultMode()) || null,
+          status: "approved",
+          cardId,
+          cardNumber: data?.card_number || null,
+          cvc: data?.cvc || data?.cvv || null,
+          responseData: data,
+        },
+      });
+
+      await prisma.card.upsert({
+        where: { cardId },
+        create: {
+          cardId,
+          userId,
+          customerEmail,
+          nameOnCard,
+          cardType: "visa",
+          status: data?.status || data?.state || "active",
+          last4: data?.last4 || data?.card_last4 || (data?.card_number ? String(data.card_number).slice(-4) : null),
+          currency: data?.currency || data?.ccy || null,
+          balance: data?.balance != null ? String(data.balance) : (data?.available_balance != null ? String(data.available_balance) : null),
+          availableBalance: data?.available_balance != null ? String(data.available_balance) : null,
+        },
+        update: {
+          userId,
+          customerEmail,
+          nameOnCard,
+          cardType: "visa",
+          status: data?.status || data?.state || "active",
+          last4: data?.last4 || data?.card_last4 || (data?.card_number ? String(data.card_number).slice(-4) : null),
+          currency: data?.currency || data?.ccy || null,
+          balance: data?.balance != null ? String(data.balance) : (data?.available_balance != null ? String(data.available_balance) : null),
+          availableBalance: data?.available_balance != null ? String(data.available_balance) : null,
+        },
+      });
+
+      await bot!.sendMessage(Number(userId), [
+        "✅ Payment Verified",
+        "Your virtual card has been created successfully.",
+        `Card ID: ${cardId}`,
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      return;
+    } catch (e: any) {
+      const messageText = e?.response?.data?.error || e?.message || "Your card request could not be approved.";
+      await bot!.sendMessage(Number(userId), `❌ ${messageText}`, {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      return;
+    }
+  }
+
   try {
     const resp = await axios.post(`${BACKEND_BASE}/api/card-requests`, {
       userId,
       nameOnCard,
       cardType: "visa",
       amount,
-      customerEmail: customer?.email || user?.customerEmail,
+      customerEmail,
     });
     if (resp?.data?.ok) {
       await bot!.sendMessage(Number(userId), [
@@ -2384,14 +2494,7 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
 }
 
 async function startCreateCardFlow(chatId: number, message?: any) {
-  if (isPrismaOnlyMode()) {
-    await bot!.sendMessage(chatId, "Create card is temporarily unavailable during migration. Please try again shortly.", {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
-    return;
-  }
-  const user = await User.findOne({ userId: String(chatId) }).lean();
-  const customer = await Customer.findOne({ userId: String(chatId) }).lean();
+  const { user, customer } = await getUserAndCustomerContext(String(chatId));
   const status = resolveKycStatus(user, customer);
   if (status !== "approved") {
     if (status === "pending") {
@@ -2490,15 +2593,8 @@ function buildCreateCardSummary(data: CreateCardSession["data"]) {
 }
 
 async function submitCreateCard(chatId: number, session: CreateCardSession) {
-  if (isPrismaOnlyMode()) {
-    createCardSessions.delete(chatId);
-    await bot!.sendMessage(chatId, "Create card is temporarily unavailable during migration. Please try again shortly.", {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
-    return;
-  }
-  const user = await User.findOne({ userId: String(chatId) }).lean();
-  const customer = await Customer.findOne({ userId: String(chatId) }).lean();
+  const userId = String(chatId);
+  const { user, customer } = await getUserAndCustomerContext(userId);
   if (!customer || customer.kycStatus !== "approved") {
     createCardSessions.delete(chatId);
     await bot!.sendMessage(chatId, "❌ You must complete and pass KYC before creating a card.", {
@@ -2529,28 +2625,59 @@ async function submitCreateCard(chatId: number, session: CreateCardSession) {
     }
     const cardId = data?.card_id || data?.data?.card_id || data?.id || data?.data?.id;
     if (cardId) {
-      await TelegramLink.findOneAndUpdate(
-        { chatId },
-        { $addToSet: { cardIds: cardId }, $set: { customerEmail } },
-        { upsert: true, new: true }
-      );
-      await Card.findOneAndUpdate(
-        { cardId },
-        {
-          $set: {
+      if (!isPrismaOnlyMode()) {
+        await TelegramLink.findOneAndUpdate(
+          { chatId },
+          { $addToSet: { cardIds: cardId }, $set: { customerEmail } },
+          { upsert: true, new: true }
+        );
+      }
+      if (isPrismaPersistenceEnabled()) {
+        await prisma.card.upsert({
+          where: { cardId },
+          create: {
             cardId,
-            userId: String(chatId),
+            userId,
             customerEmail,
             nameOnCard: payload.name_on_card,
             cardType: payload.card_type,
             status: data?.status || data?.state || "active",
-            currency: data?.currency || data?.ccy,
-            balance: data?.balance || data?.available_balance,
-            availableBalance: data?.available_balance,
+            currency: data?.currency || data?.ccy || null,
+            balance: (data?.balance || data?.available_balance || null) != null ? String(data?.balance || data?.available_balance) : null,
+            availableBalance: data?.available_balance != null ? String(data?.available_balance) : null,
+            last4: data?.last4 || data?.card_last4 || null,
           },
-        },
-        { upsert: true, new: true }
-      );
+          update: {
+            userId,
+            customerEmail,
+            nameOnCard: payload.name_on_card,
+            cardType: payload.card_type,
+            status: data?.status || data?.state || "active",
+            currency: data?.currency || data?.ccy || null,
+            balance: (data?.balance || data?.available_balance || null) != null ? String(data?.balance || data?.available_balance) : null,
+            availableBalance: data?.available_balance != null ? String(data?.available_balance) : null,
+            last4: data?.last4 || data?.card_last4 || null,
+          },
+        });
+      } else {
+        await Card.findOneAndUpdate(
+          { cardId },
+          {
+            $set: {
+              cardId,
+              userId,
+              customerEmail,
+              nameOnCard: payload.name_on_card,
+              cardType: payload.card_type,
+              status: data?.status || data?.state || "active",
+              currency: data?.currency || data?.ccy,
+              balance: data?.balance || data?.available_balance,
+              availableBalance: data?.available_balance,
+            },
+          },
+          { upsert: true, new: true }
+        );
+      }
     }
     createCardSessions.delete(chatId);
     await bot!.sendMessage(
@@ -3564,10 +3691,8 @@ async function sendMyCards(chatId: number, message?: any) {
   }
   const userId = String(chatId);
   if (isPrismaOnlyMode()) {
-    const [user, card] = await Promise.all([
-      prisma.user.findUnique({ where: { userId } }),
-      prisma.card.findFirst({ where: { userId }, orderBy: { updatedAt: "desc" } }),
-    ]);
+    const user = await prisma.user.findUnique({ where: { userId } });
+    const card = await getPrimaryCardForUser(userId);
     if (!card) {
       await editOrSend(chatId, message, [
         "💳 Your Virtual Card",
@@ -3704,9 +3829,19 @@ function isLikelyCardId(value?: string) {
 
 async function getUserCardIds(chatId: number) {
   const userId = String(chatId);
-  const cards = isPrismaPersistenceEnabled()
-    ? await prisma.card.findMany({ where: { userId } })
-    : await Card.find({ userId }).lean();
+  let cards;
+  if (isPrismaPersistenceEnabled()) {
+    const user = await prisma.user.findUnique({ where: { userId } });
+    const customerEmail = user?.customerEmail || undefined;
+    cards = await prisma.card.findMany({
+      where: {
+        OR: [{ userId }, ...(customerEmail ? [{ customerEmail }] : [])],
+      },
+      orderBy: { updatedAt: "desc" },
+    });
+  } else {
+    cards = await Card.find({ userId }).lean();
+  }
   const cardIdsFromCards = cards.map((c) => c.cardId).filter(isLikelyCardId);
   if (cardIdsFromCards.length) return Array.from(new Set(cardIdsFromCards));
 
@@ -3725,13 +3860,40 @@ async function getUserCardIds(chatId: number) {
 }
 
 async function getPrimaryCardForUser(userId: string) {
-  const card = isPrismaPersistenceEnabled()
-    ? await prisma.card.findFirst({ where: { userId }, orderBy: { updatedAt: "desc" } })
-    : await Card.findOne({ userId })
-      .sort({ updatedAt: -1 })
-      .lean();
+  if (isPrismaPersistenceEnabled()) {
+    const user = await prisma.user.findUnique({ where: { userId } });
+    const customerEmail = user?.customerEmail || undefined;
+    const card = await prisma.card.findFirst({
+      where: {
+        OR: [{ userId }, ...(customerEmail ? [{ customerEmail }] : [])],
+      },
+      orderBy: { updatedAt: "desc" },
+    });
+    if (card) return card;
+
+    const request = await prisma.cardRequest.findFirst({
+      where: {
+        status: "approved",
+        cardId: { not: null },
+        OR: [{ userId }, ...(customerEmail ? [{ customerEmail }] : [])],
+      },
+      orderBy: { updatedAt: "desc" },
+    });
+    if (!request?.cardId) return null;
+    return {
+      cardId: String(request.cardId),
+      cardType: request.cardType,
+      status: "active",
+      last4: request.cardNumber ? request.cardNumber.slice(-4) : undefined,
+      balance: undefined,
+      currency: undefined,
+    } as any;
+  }
+
+  const card = await Card.findOne({ userId })
+    .sort({ updatedAt: -1 })
+    .lean();
   if (card) return card;
-  if (isPrismaOnlyMode()) return null;
   const request = await CardRequest.findOne({ userId, status: "approved", cardId: { $exists: true, $ne: "" } })
     .sort({ updatedAt: -1 })
     .lean();
