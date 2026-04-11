@@ -1044,16 +1044,31 @@ export async function initBot() {
               return;
             }
 
-            await Transaction.create({
-              userId: String(msg.chat.id),
-              transactionType: "verification",
-              paymentMethod: method,
-              amount: amountNum ?? 0,
-              transactionNumber: verifiedKey,
-              referenceNumber: altKey,
-              status: "completed",
-              responseData: b.raw ?? b,
-            });
+            if (isPrismaPersistenceEnabled()) {
+              await prisma.transaction.create({
+                data: {
+                  userId: String(msg.chat.id),
+                  transactionType: "verification",
+                  paymentMethod: method,
+                  amount: amountNum ?? 0,
+                  transactionNumber: verifiedKey,
+                  referenceNumber: altKey,
+                  status: "completed",
+                  responseData: b.raw ?? b,
+                },
+              });
+            } else {
+              await Transaction.create({
+                userId: String(msg.chat.id),
+                transactionType: "verification",
+                paymentMethod: method,
+                amount: amountNum ?? 0,
+                transactionNumber: verifiedKey,
+                referenceNumber: altKey,
+                status: "completed",
+                responseData: b.raw ?? b,
+              });
+            }
             await bot!.sendMessage(msg.chat.id, lines.join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
             depositSelections.delete(msg.chat.id);
 
@@ -1250,26 +1265,51 @@ export async function initBot() {
           const altKey = normalizeTxnRef(String(rawData?.reference || normalizedTxn), method);
 
           try {
-            await Transaction.create({
-              userId: String(msg.chat.id),
-              transactionType: "card",
-              paymentMethod: method,
-              amount: selection.totalEtb,
-              amountEtb: selection.totalEtb,
-              feeEtb: roundMoney(selection.feeUsd * selection.rate),
-              status: "completed",
-              transactionNumber: verifiedKey,
-              referenceNumber: altKey,
-              responseData: b.raw ?? b,
-              metadata: {
-                kind: "card_request",
-                cardAmountUsd: selection.cardAmountUsd,
-                feeUsd: selection.feeUsd,
-                totalUsd: selection.totalUsd,
-                totalEtb: selection.totalEtb,
-                conversionRateEtbPerUsdt: selection.rate,
-              },
-            });
+            if (isPrismaPersistenceEnabled()) {
+              await prisma.transaction.create({
+                data: {
+                  userId: String(msg.chat.id),
+                  transactionType: "card",
+                  paymentMethod: method,
+                  amount: selection.totalEtb,
+                  amountEtb: selection.totalEtb,
+                  feeEtb: roundMoney(selection.feeUsd * selection.rate),
+                  status: "completed",
+                  transactionNumber: verifiedKey,
+                  referenceNumber: altKey,
+                  responseData: b.raw ?? b,
+                  metadata: {
+                    kind: "card_request",
+                    cardAmountUsd: selection.cardAmountUsd,
+                    feeUsd: selection.feeUsd,
+                    totalUsd: selection.totalUsd,
+                    totalEtb: selection.totalEtb,
+                    conversionRateEtbPerUsdt: selection.rate,
+                  },
+                },
+              });
+            } else {
+              await Transaction.create({
+                userId: String(msg.chat.id),
+                transactionType: "card",
+                paymentMethod: method,
+                amount: selection.totalEtb,
+                amountEtb: selection.totalEtb,
+                feeEtb: roundMoney(selection.feeUsd * selection.rate),
+                status: "completed",
+                transactionNumber: verifiedKey,
+                referenceNumber: altKey,
+                responseData: b.raw ?? b,
+                metadata: {
+                  kind: "card_request",
+                  cardAmountUsd: selection.cardAmountUsd,
+                  feeUsd: selection.feeUsd,
+                  totalUsd: selection.totalUsd,
+                  totalEtb: selection.totalEtb,
+                  conversionRateEtbPerUsdt: selection.rate,
+                },
+              });
+            }
           } catch (createErr: any) {
             if (createErr?.code !== 11000) {
               await bot!.sendMessage(msg.chat.id, `❌ Verification error: ${createErr?.message || "Unexpected error"}`, {
@@ -1399,6 +1439,14 @@ export async function initBot() {
 
 export async function notifyByCardId(cardId: string, message: string) {
   if (!bot) return;
+  if (isPrismaPersistenceEnabled()) {
+    const card = await prisma.card.findUnique({ where: { cardId } });
+    const chatId = Number(card?.userId);
+    if (Number.isFinite(chatId)) {
+      await bot.sendMessage(chatId, message, { disable_web_page_preview: true });
+    }
+    return;
+  }
   const links = await TelegramLink.find({ cardIds: cardId });
   const sent = new Set<number>();
   for (const link of links) {
@@ -1417,6 +1465,14 @@ export async function notifyByCardId(cardId: string, message: string) {
 
 export async function notifyByEmail(email: string, message: string) {
   if (!bot) return;
+  if (isPrismaPersistenceEnabled()) {
+    const user = await prisma.user.findFirst({ where: { customerEmail: email } });
+    const chatId = Number(user?.chatId || user?.userId);
+    if (Number.isFinite(chatId)) {
+      await bot.sendMessage(chatId, message, { disable_web_page_preview: true });
+    }
+    return;
+  }
   const link = await TelegramLink.findOne({ customerEmail: email });
   if (link) {
     await bot.sendMessage(link.chatId, message, { disable_web_page_preview: true });
@@ -1434,7 +1490,9 @@ export async function notifyByEmail(email: string, message: string) {
 
 export async function notifyCardStatusChanged(cardId: string, status: "frozen" | "active") {
   if (!bot) return;
-  const card = await Card.findOne({ cardId }).lean();
+  const card = isPrismaPersistenceEnabled()
+    ? await prisma.card.findUnique({ where: { cardId } })
+    : await Card.findOne({ cardId }).lean();
   const suffix = card?.last4 ? `••••${card.last4}` : cardId;
   const text =
     status === "frozen"
@@ -1839,6 +1897,16 @@ function namesMatch(expectedRaw: string, actualRaw: string) {
 }
 
 async function findUsedPaymentReference(paymentMethod: PaymentMethod, normalizedTxn: string) {
+  if (isPrismaPersistenceEnabled()) {
+    return prisma.transaction.findFirst({
+      where: {
+        paymentMethod,
+        transactionType: { in: ["deposit", "verification", "card"] },
+        OR: [{ transactionNumber: normalizedTxn }, { referenceNumber: normalizedTxn }],
+      },
+      orderBy: { createdAt: "desc" },
+    });
+  }
   return await Transaction.findOne({
     paymentMethod,
     transactionType: { $in: ["deposit", "verification", "card"] },
@@ -1954,6 +2022,55 @@ async function queueDepositManualReview(params: {
   const txn = normalizeTxnRef(transactionNumber, paymentMethod);
   if (!txn) return { queued: false as const, transactionId: null as string | null };
 
+  if (isPrismaPersistenceEnabled()) {
+    const existing = await prisma.transaction.findFirst({
+      where: {
+        userId,
+        transactionType: "deposit",
+        OR: [{ transactionNumber: txn }, { referenceNumber: txn }],
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    if (existing?.status === "completed") {
+      return { queued: false as const, transactionId: String(existing.id) };
+    }
+
+    const amountEtb = Number.isFinite(expectedAmountEtb) ? Number(expectedAmountEtb) : undefined;
+    const data: any = {
+      paymentMethod,
+      amount: amountEtb ?? 0,
+      amountEtb,
+      referenceNumber: txn,
+      status: "pending",
+      verified: false,
+      responseData: responseData || undefined,
+      metadata: {
+        manualReviewRequired: true,
+        expectedAmountEtb: amountEtb,
+        verificationMode: "manual_fallback",
+        verificationFailureReason: reason,
+        queuedAt: new Date(),
+      },
+      currency: "ETB",
+    };
+
+    if (existing) {
+      const updated = await prisma.transaction.update({ where: { id: existing.id }, data });
+      return { queued: true as const, transactionId: String(updated.id) };
+    }
+
+    const created = await prisma.transaction.create({
+      data: {
+        userId,
+        transactionType: "deposit",
+        transactionNumber: txn,
+        ...data,
+      },
+    });
+    return { queued: true as const, transactionId: String(created.id) };
+  }
+
   const existing = await Transaction.findOne({
     userId,
     transactionType: "deposit",
@@ -2040,6 +2157,59 @@ async function queueCardRequestManualReview(params: {
   } = params;
   const txn = normalizeTxnRef(transactionNumber, paymentMethod);
   if (!txn) return { queued: false as const, transactionId: null as string | null };
+
+  if (isPrismaPersistenceEnabled()) {
+    const existing = await prisma.transaction.findFirst({
+      where: {
+        userId,
+        transactionType: "deposit",
+        OR: [{ transactionNumber: txn }, { referenceNumber: txn }],
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    if (existing?.status === "completed" && (existing.metadata as any)?.kind === "card_request_manual") {
+      return { queued: false as const, transactionId: String(existing.id) };
+    }
+
+    const data: any = {
+      paymentMethod,
+      amount: expectedAmountEtb,
+      amountEtb: expectedAmountEtb,
+      referenceNumber: txn,
+      status: "pending",
+      verified: false,
+      responseData: responseData || undefined,
+      metadata: {
+        kind: "card_request_manual",
+        manualReviewRequired: true,
+        expectedAmountEtb,
+        cardAmountUsd,
+        feeUsd,
+        totalUsd,
+        conversionRateEtbPerUsdt: rate,
+        verificationMode: "manual_fallback",
+        verificationFailureReason: reason,
+        queuedAt: new Date(),
+      },
+      currency: "ETB",
+    };
+
+    if (existing) {
+      const updated = await prisma.transaction.update({ where: { id: existing.id }, data });
+      return { queued: true as const, transactionId: String(updated.id) };
+    }
+
+    const created = await prisma.transaction.create({
+      data: {
+        userId,
+        transactionType: "deposit",
+        transactionNumber: txn,
+        ...data,
+      },
+    });
+    return { queued: true as const, transactionId: String(created.id) };
+  }
 
   const existing = await Transaction.findOne({
     userId,
@@ -3232,7 +3402,8 @@ async function submitKyc(chatId: number, session: KycSession) {
   };
 
   try {
-    const user = await User.findOne({ userId: String(chatId) }).lean();
+    const userId = String(chatId);
+    const { user } = await getUserAndCustomerContext(userId);
     let resp: any;
     if (session.mode === "edit") {
       const customerId = user?.strowalletCustomerId;
@@ -3288,11 +3459,14 @@ async function submitKyc(chatId: number, session: KycSession) {
       console.warn("[bot] KYC_ENCRYPTION_KEY missing or invalid; idNumber not encrypted at rest");
     }
     const idNumberLast4 = data.idNumber.slice(-4);
-
-    await User.findOneAndUpdate(
-      { userId: String(chatId) },
-      {
-        $set: {
+    if (isPrismaPersistenceEnabled()) {
+      await prisma.user.upsert({
+        where: { userId },
+        create: {
+          userId,
+          telegramId: user?.telegramId || userId,
+          chatId: user?.chatId || userId,
+          username: user?.username,
           kycStatus: "pending",
           strowalletCustomerId: customerId || user?.strowalletCustomerId,
           firstName: data.firstName,
@@ -3316,23 +3490,14 @@ async function submitKyc(chatId: number, session: KycSession) {
           userPhotoUrl: data.userPhoto,
           kycSubmittedAt: new Date(),
         },
-      },
-      { upsert: true, new: true }
-    );
-
-    await Customer.findOneAndUpdate(
-      { userId: String(chatId) },
-      {
-        $set: {
-          customerId: customerId || undefined,
-          email: data.customerEmail,
-          telegramId: user?.telegramId || String(chatId),
-          chatId: user?.chatId || String(chatId),
-          username: user?.username,
+        update: {
+          kycStatus: "pending",
+          strowalletCustomerId: customerId || user?.strowalletCustomerId,
           firstName: data.firstName,
           lastName: data.lastName,
           dateOfBirth: data.dateOfBirth,
           phoneNumber: data.phoneNumber,
+          customerEmail: data.customerEmail,
           line1: data.line1,
           city: data.city,
           state: data.state,
@@ -3347,17 +3512,80 @@ async function submitKyc(chatId: number, session: KycSession) {
           idImageBackUrl: data.idImageBack,
           idImagePdfUrl: data.idImagePdf,
           userPhotoUrl: data.userPhoto,
-          kycStatus: "pending",
-          submittedAt: new Date(),
-          approvedAt: undefined,
-          rawPayload: {
-            request: session.mode === "edit" ? updatePayload : createPayload,
-            response: resp,
+          kycSubmittedAt: new Date(),
+        },
+      });
+    } else {
+      await User.findOneAndUpdate(
+        { userId },
+        {
+          $set: {
+            kycStatus: "pending",
+            strowalletCustomerId: customerId || user?.strowalletCustomerId,
+            firstName: data.firstName,
+            lastName: data.lastName,
+            dateOfBirth: data.dateOfBirth,
+            phoneNumber: data.phoneNumber,
+            customerEmail: data.customerEmail,
+            line1: data.line1,
+            city: data.city,
+            state: data.state,
+            zipCode: data.zipCode,
+            country: data.country,
+            houseNumber: data.houseNumber,
+            idType: data.idType,
+            idNumberEncrypted,
+            idNumberLast4,
+            idImageUrl: idImageForApi,
+            idImageFrontUrl: data.idImageFront,
+            idImageBackUrl: data.idImageBack,
+            idImagePdfUrl: data.idImagePdf,
+            userPhotoUrl: data.userPhoto,
+            kycSubmittedAt: new Date(),
           },
         },
-      },
-      { upsert: true, new: true }
-    );
+        { upsert: true, new: true }
+      );
+
+      await Customer.findOneAndUpdate(
+        { userId },
+        {
+          $set: {
+            customerId: customerId || undefined,
+            email: data.customerEmail,
+            telegramId: user?.telegramId || userId,
+            chatId: user?.chatId || userId,
+            username: user?.username,
+            firstName: data.firstName,
+            lastName: data.lastName,
+            dateOfBirth: data.dateOfBirth,
+            phoneNumber: data.phoneNumber,
+            line1: data.line1,
+            city: data.city,
+            state: data.state,
+            zipCode: data.zipCode,
+            country: data.country,
+            houseNumber: data.houseNumber,
+            idType: data.idType,
+            idNumberEncrypted,
+            idNumberLast4,
+            idImageUrl: idImageForApi,
+            idImageFrontUrl: data.idImageFront,
+            idImageBackUrl: data.idImageBack,
+            idImagePdfUrl: data.idImagePdf,
+            userPhotoUrl: data.userPhoto,
+            kycStatus: "pending",
+            submittedAt: new Date(),
+            approvedAt: undefined,
+            rawPayload: {
+              request: session.mode === "edit" ? updatePayload : createPayload,
+              response: resp,
+            },
+          },
+        },
+        { upsert: true, new: true }
+      );
+    }
 
     kycSessions.delete(chatId);
     await bot!.sendMessage(chatId, session.mode === "edit"
@@ -3382,7 +3610,9 @@ async function submitKyc(chatId: number, session: KycSession) {
 
 async function refreshKycStatusFromStroWallet(user: any): Promise<KycStatus | undefined> {
   try {
-    const existingCustomer = await Customer.findOne({ userId: String(user?.userId) }).lean();
+    const existingCustomer = isPrismaPersistenceEnabled()
+      ? null
+      : await Customer.findOne({ userId: String(user?.userId) }).lean();
     const customerId = user?.strowalletCustomerId || existingCustomer?.customerId;
     const customerEmail = user?.customerEmail || existingCustomer?.email;
     if (!customerId && !customerEmail) return undefined;
@@ -3413,14 +3643,24 @@ async function refreshKycStatusFromStroWallet(user: any): Promise<KycStatus | un
     const userId = String(user.userId);
 
     if ((normalized && normalized !== user?.kycStatus) || (providerCustomerId && !user?.strowalletCustomerId)) {
-      await User.findOneAndUpdate(
-        { userId },
-        { $set: { kycStatus: normalized || user?.kycStatus, ...(providerCustomerId ? { strowalletCustomerId: providerCustomerId } : {}) } },
-        { new: true }
-      );
+      if (isPrismaPersistenceEnabled()) {
+        await prisma.user.update({
+          where: { userId },
+          data: {
+            ...(normalized ? { kycStatus: normalized } : {}),
+            ...(providerCustomerId ? { strowalletCustomerId: providerCustomerId } : {}),
+          },
+        });
+      } else {
+        await User.findOneAndUpdate(
+          { userId },
+          { $set: { kycStatus: normalized || user?.kycStatus, ...(providerCustomerId ? { strowalletCustomerId: providerCustomerId } : {}) } },
+          { new: true }
+        );
+      }
     }
 
-    if (normalized || providerCustomerId) {
+    if (!isPrismaPersistenceEnabled() && (normalized || providerCustomerId)) {
       await Customer.findOneAndUpdate(
         { userId },
         {
@@ -3438,11 +3678,13 @@ async function refreshKycStatusFromStroWallet(user: any): Promise<KycStatus | un
       const lastNotified = existingCustomer?.lastKycNotificationStatus as "approved" | "rejected" | undefined;
       if (lastNotified !== normalized) {
         await notifyKycStatus(userId, normalized).catch(() => {});
-        await Customer.findOneAndUpdate(
-          { userId },
-          { $set: { lastKycNotificationStatus: normalized, lastKycNotifiedAt: new Date() } },
-          { new: true, upsert: true }
-        );
+        if (!isPrismaPersistenceEnabled()) {
+          await Customer.findOneAndUpdate(
+            { userId },
+            { $set: { lastKycNotificationStatus: normalized, lastKycNotifiedAt: new Date() } },
+            { new: true, upsert: true }
+          );
+        }
       }
     }
 
@@ -4275,10 +4517,30 @@ async function cacheCardTransactions(userId: string, cardId: string, items: any[
     const normalized = normalizeTxnItem(item);
     if (normalized.amount == null) continue;
     const reference = normalized.transactionNumber || `${cardId}-${now}-${idx++}`;
-    await Transaction.findOneAndUpdate(
-      { userId, transactionType: "card", transactionNumber: reference },
-      {
-        $set: {
+    if (isPrismaPersistenceEnabled()) {
+      await prisma.transaction.upsert({
+        where: {
+          transactionType_transactionNumber_userId: {
+            transactionType: "card",
+            transactionNumber: reference,
+            userId,
+          },
+        },
+        update: {
+          paymentMethod: "strowallet",
+          amount: Math.abs(normalized.amount),
+          currency: normalized.currency || "USD",
+          status: normalized.status,
+          metadata: {
+            cardId,
+            direction: normalized.direction,
+            description: normalized.description,
+            rawStatus: normalized.status,
+            date: normalized.date,
+          },
+          responseData: item,
+        },
+        create: {
           userId,
           transactionType: "card",
           paymentMethod: "strowallet",
@@ -4295,9 +4557,32 @@ async function cacheCardTransactions(userId: string, cardId: string, items: any[
           },
           responseData: item,
         },
-      },
-      { upsert: true, new: true }
-    );
+      });
+    } else {
+      await Transaction.findOneAndUpdate(
+        { userId, transactionType: "card", transactionNumber: reference },
+        {
+          $set: {
+            userId,
+            transactionType: "card",
+            paymentMethod: "strowallet",
+            amount: Math.abs(normalized.amount),
+            currency: normalized.currency || "USD",
+            status: normalized.status,
+            transactionNumber: reference,
+            metadata: {
+              cardId,
+              direction: normalized.direction,
+              description: normalized.description,
+              rawStatus: normalized.status,
+              date: normalized.date,
+            },
+            responseData: item,
+          },
+        },
+        { upsert: true, new: true }
+      );
+    }
   }
 }
 
@@ -4329,11 +4614,18 @@ function formatTxnLabel(direction?: string, description?: string) {
 async function handleFreezeAction(chatId: number, cardId: string, action: "freeze" | "unfreeze") {
   try {
     await callStroWallet("action/status", "post", { action, card_id: cardId });
-    await Card.findOneAndUpdate(
-      { cardId },
-      { $set: { status: action === "freeze" ? "frozen" : "active", lastSync: new Date() } },
-      { new: true }
-    );
+    if (isPrismaPersistenceEnabled()) {
+      await prisma.card.updateMany({
+        where: { cardId },
+        data: { status: action === "freeze" ? "frozen" : "active", lastSync: new Date() },
+      });
+    } else {
+      await Card.findOneAndUpdate(
+        { cardId },
+        { $set: { status: action === "freeze" ? "frozen" : "active", lastSync: new Date() } },
+        { new: true }
+      );
+    }
     await bot!.sendMessage(chatId, `${action === "freeze" ? "Card frozen" : "Card unfrozen"} for ${cardId}.`, {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
