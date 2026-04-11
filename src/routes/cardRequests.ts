@@ -9,6 +9,8 @@ import Customer from "../models/Customer";
 import Card from "../models/Card";
 import { notifyCardRequestApproved, notifyCardRequestDeclined } from "../services/botService";
 import { ok, fail } from "../utils/apiResponse";
+import prisma from "../utils/prisma";
+import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
 const router = express.Router();
 
@@ -297,6 +299,50 @@ router.get("/", requireAdmin, async (req, res) => {
     const status = typeof req.query.status === "string" ? req.query.status : "pending";
     const limitRaw = Number(req.query.limit ?? 50);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 && limitRaw <= 200 ? limitRaw : 50;
+    if (isPrismaPersistenceEnabled()) {
+      const requests = await prisma.cardRequest.findMany({
+        where: status ? { status } : undefined,
+        orderBy: { createdAt: "desc" },
+        take: limit,
+      });
+
+      const userIds = Array.from(new Set(requests.map((r) => r.userId).filter(Boolean)));
+      const [users, cards] = await Promise.all([
+        userIds.length ? prisma.user.findMany({ where: { userId: { in: userIds } } }) : Promise.resolve([]),
+        userIds.length
+          ? prisma.card.findMany({
+              where: {
+                userId: { in: userIds },
+                status: { in: ["active", "ACTIVE", "frozen", "FROZEN"] },
+              },
+            })
+          : Promise.resolve([]),
+      ]);
+
+      const userMap = new Map(users.map((u) => [u.userId, u]));
+      const activeCardMap = new Map<string, (typeof cards)[number]>();
+      for (const c of cards) {
+        if (c.userId && !activeCardMap.has(c.userId)) activeCardMap.set(c.userId, c);
+      }
+
+      const enriched = requests.map((r) => {
+        const user = r.userId ? userMap.get(r.userId) : undefined;
+        const activeCard = r.userId ? activeCardMap.get(r.userId) : undefined;
+        const fullName = [user?.firstName, user?.lastName].filter(Boolean).join(" ") || undefined;
+        const last4 = r.cardNumber ? r.cardNumber.slice(-4) : undefined;
+        return {
+          ...r,
+          userName: fullName,
+          customerEmail: r.customerEmail || user?.customerEmail,
+          hasActiveCard: Boolean(activeCard),
+          activeCardId: activeCard?.cardId,
+          activeCardLast4: activeCard?.last4,
+          last4,
+        };
+      });
+
+      return ok(res, { requests: enriched });
+    }
     const requests = await CardRequest.find(status ? { status } : {})
       .sort({ createdAt: -1 })
       .limit(limit)

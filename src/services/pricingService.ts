@@ -24,28 +24,48 @@ export interface TopupQuote {
 const DEFAULT_RATE = 220; // 1 USDT = 220 ETB (fallback)
 
 export async function loadPricingConfig(): Promise<IPricingConfig> {
-  const existing = await PricingConfig.findOne({ key: "default" });
-  if (existing) return existing;
+  try {
+    const existing = await PricingConfig.findOne({ key: "default" });
+    if (existing) return existing;
 
-  const created = await PricingConfig.create({
-    key: "default",
-    usdtRate: DEFAULT_RATE,
-    depositPercentFee: 0,
-    depositFlatFee: 0,
-    topupPercentFee: 0,
-    topupFlatFee: 0,
-    cardRequestFeeEtb: 0,
-    firstCardAmountUsd: 5,
-    firstCardFeeUsd: 0,
-  });
-  return created;
+    const created = await PricingConfig.create({
+      key: "default",
+      usdtRate: DEFAULT_RATE,
+      depositPercentFee: 0,
+      depositFlatFee: 0,
+      topupPercentFee: 0,
+      topupFlatFee: 0,
+      cardRequestFeeEtb: 0,
+      firstCardAmountUsd: 5,
+      firstCardFeeUsd: 0,
+    });
+    return created;
+  } catch {
+    return {
+      key: "default",
+      usdtRate: DEFAULT_RATE,
+      depositPercentFee: 0,
+      depositFlatFee: 0,
+      topupPercentFee: 0,
+      topupFlatFee: 0,
+      topupMin: undefined,
+      topupMax: undefined,
+      cardRequestFeeEtb: 0,
+      firstCardAmountUsd: 5,
+      firstCardFeeUsd: 0,
+    } as any;
+  }
 }
 
 export async function upsertPricingConfig(input: Partial<IPricingConfig> & { updatedBy?: string }) {
   const current = await loadPricingConfig();
   const update: Partial<IPricingConfig> = { ...input } as any;
-  const next = await PricingConfig.findOneAndUpdate({ key: "default" }, { $set: update }, { new: true, upsert: true });
-  return next ?? current;
+  try {
+    const next = await PricingConfig.findOneAndUpdate({ key: "default" }, { $set: update }, { new: true, upsert: true });
+    return next ?? current;
+  } catch {
+    return { ...current, ...update } as any;
+  }
 }
 
 function applyFees(amount: number, percent: number, flat: number): FeeCalculation {

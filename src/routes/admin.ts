@@ -13,6 +13,8 @@ import { notifyCardStatusChanged } from "../services/botService";
 import { createBroadcastJob, getBroadcastTargetCount } from "../services/broadcastService";
 import { auditCardTransactions, getReconciliationSummary, reconcileAllCards, reconcileCard } from "../services/reconciliationService";
 import { ok, fail } from "../utils/apiResponse";
+import prisma from "../utils/prisma";
+import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
 const router = express.Router();
 
@@ -215,6 +217,24 @@ function ensureCloudinary() {
 
 router.get("/stats", requireAdmin, async (_req, res) => {
   try {
+    if (isPrismaPersistenceEnabled()) {
+      const [usersTotal, kycApproved, cardHoldersRows, transactionsTotal] = await Promise.all([
+        prisma.user.count(),
+        prisma.user.count({ where: { kycStatus: "approved" } }),
+        prisma.card.findMany({
+          where: {
+            cardId: { not: "" },
+            userId: { not: null },
+          },
+          select: { userId: true },
+          distinct: ["userId"],
+        }),
+        prisma.transaction.count(),
+      ]);
+      const cardHolders = cardHoldersRows.filter((row) => Boolean(row.userId)).length;
+      return ok(res, { usersTotal, kycApproved, cardHolders, transactionsTotal });
+    }
+
     const [usersTotal, kycApproved, cardHolders, transactionsTotal] = await Promise.all([
       User.countDocuments({}),
       Customer.countDocuments({ kycStatus: "approved" }),
@@ -290,6 +310,9 @@ router.get("/broadcast", requireAdmin, async (req, res) => {
   try {
     const limitRaw = Number(req.query.limit || 20);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 && limitRaw <= 100 ? limitRaw : 20;
+    if (isPrismaPersistenceEnabled()) {
+      return ok(res, { items: [] });
+    }
     const items = await BroadcastJob.find({})
       .sort({ createdAt: -1 })
       .limit(limit)
@@ -318,6 +341,9 @@ router.get("/broadcast", requireAdmin, async (req, res) => {
 router.get("/broadcast/:id", requireAdmin, async (req, res) => {
   try {
     const id = String(req.params.id);
+    if (isPrismaPersistenceEnabled()) {
+      return fail(res, "Broadcast not found", 404);
+    }
     const job = await BroadcastJob.findById(id).lean();
     if (!job) return fail(res, "Broadcast not found", 404);
     return ok(res, {
@@ -343,6 +369,55 @@ router.get("/users", requireAdmin, async (req, res) => {
   try {
     const { search, limit } = SearchSchema.parse(req.query || {});
     const q = search?.trim();
+
+    if (isPrismaPersistenceEnabled()) {
+      const baseWhere: any = {
+        OR: [
+          { kycStatus: { in: ["pending", "approved", "declined"] } },
+          { kycSubmittedAt: { not: null } },
+          { strowalletCustomerId: { not: null } },
+        ],
+      };
+
+      let where: any = baseWhere;
+      if (q) {
+        const isNumeric = /^\d+$/.test(q);
+        where = {
+          AND: [
+            baseWhere,
+            {
+              OR: [
+                ...(isNumeric ? [{ userId: q }] : []),
+                { customerEmail: q },
+                { strowalletCustomerId: q },
+              ],
+            },
+          ],
+        };
+      }
+
+      const items = await prisma.user.findMany({
+        where,
+        orderBy: [{ kycSubmittedAt: "desc" }, { updatedAt: "desc" }],
+        take: limit || 50,
+      });
+
+      const users = items.map((u) => ({
+        telegramUserId: u.userId,
+        customerId: u.strowalletCustomerId || null,
+        kycStatus: u.kycStatus || "not_started",
+        customerKycStatus: null,
+        userKycStatus: u.kycStatus || null,
+        firstName: u.firstName,
+        lastName: u.lastName,
+        customerEmail: u.customerEmail,
+        idType: u.idType,
+        submittedAt: u.kycSubmittedAt,
+      }));
+
+      return ok(res, { users });
+    }
+
     const baseQuery: any = {
       $or: [
         { kycStatus: { $in: ["pending", "approved", "declined"] } },
@@ -637,6 +712,50 @@ router.get("/cards", requireAdmin, async (req, res) => {
   try {
     const { search, limit } = CardSearchSchema.parse(req.query || {});
     const q = search?.trim();
+
+    if (isPrismaPersistenceEnabled()) {
+      const where: any = {};
+      if (q) {
+        const isNumeric = /^\d+$/.test(q);
+        where.OR = [
+          ...(isNumeric ? [{ userId: q }] : []),
+          { customerEmail: q },
+          { cardId: q },
+        ];
+      }
+
+      const items = await prisma.card.findMany({
+        where,
+        orderBy: { updatedAt: "desc" },
+        take: limit || 100,
+      });
+
+      const userIds = Array.from(new Set(items.map((c) => c.userId).filter(Boolean))) as string[];
+      const users = userIds.length ? await prisma.user.findMany({ where: { userId: { in: userIds } } }) : [];
+      const userMap = new Map(users.map((u) => [u.userId, u]));
+
+      return ok(res, {
+        cards: items.map((c) => ({
+          cardId: c.cardId,
+          userId: c.userId,
+          userName: c.userId
+            ? [userMap.get(c.userId)?.firstName, userMap.get(c.userId)?.lastName].filter(Boolean).join(" ") || undefined
+            : undefined,
+          customerEmail: c.customerEmail,
+          email: c.customerEmail,
+          nameOnCard: c.nameOnCard,
+          cardType: c.cardType,
+          status: c.status,
+          last4: c.last4,
+          currency: c.currency,
+          balance: c.balance != null && !Number.isNaN(Number(c.balance)) ? Number(c.balance) : c.balance,
+          availableBalance: c.availableBalance,
+          createdAt: c.createdAt,
+          updatedAt: c.updatedAt,
+        })),
+      });
+    }
+
     const query: any = {};
     if (q) {
       const isNumeric = /^\d+$/.test(q);
@@ -761,6 +880,44 @@ router.get("/cards/:cardId/transactions", requireAdmin, async (req, res) => {
 router.get("/transactions", requireAdmin, async (req, res) => {
   try {
     const { userId, cardId, limit } = TransactionQuerySchema.parse(req.query || {});
+
+    if (isPrismaPersistenceEnabled()) {
+      const take = limit || 50;
+      const rows = await prisma.transaction.findMany({
+        where: {
+          transactionType: "card",
+          ...(userId ? { userId } : {}),
+        },
+        orderBy: { createdAt: "desc" },
+        take: cardId ? Math.max(take * 5, 200) : take,
+      });
+
+      const filtered = cardId
+        ? rows.filter((t) => String((t.metadata as any)?.cardId || "") === cardId).slice(0, take)
+        : rows;
+
+      let declineFeeCount = 0;
+      const transactions = filtered.map((t) => {
+        const isDeclineFee = isDeclineFeeTransaction(t);
+        if (isDeclineFee) declineFeeCount += 1;
+        return {
+          id: t.id,
+          userId: t.userId,
+          cardId: (t.metadata as any)?.cardId,
+          amount: t.amount,
+          currency: t.currency,
+          direction: (t.metadata as any)?.direction,
+          description: (t.metadata as any)?.description,
+          status: t.status,
+          createdAt: t.createdAt,
+          isDeclineFee,
+          warningTags: isDeclineFee ? ["DECLINE_FEE"] : [],
+        };
+      });
+
+      return ok(res, { transactions, declineFeeCount });
+    }
+
     const query: any = { transactionType: "card" };
     if (userId) query.userId = userId;
     if (cardId) query["metadata.cardId"] = cardId;
@@ -939,6 +1096,9 @@ router.get("/transactions/decline-fees/report", requireAdmin, async (req, res) =
 // Reconciliation summary
 router.get("/reconciliation", requireAdmin, async (req, res) => {
   try {
+    if (isPrismaPersistenceEnabled()) {
+      return ok(res, { items: [] });
+    }
     const limit = Number(req.query.limit || 50);
     const mismatchOnly = String(req.query.mismatchOnly || "false").toLowerCase() === "true";
     const items = await getReconciliationSummary(limit, mismatchOnly);

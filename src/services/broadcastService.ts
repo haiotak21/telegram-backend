@@ -2,6 +2,8 @@ import User from "../models/User";
 import Customer from "../models/Customer";
 import BroadcastJob, { BroadcastFilter } from "../models/BroadcastJob";
 import { sendBroadcastToUser } from "./botService";
+import prisma from "../utils/prisma";
+import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
 const BATCH_SIZE = Math.max(1, Number(process.env.BROADCAST_BATCH_SIZE || 25));
 const TICK_MS = Math.max(250, Number(process.env.BROADCAST_TICK_MS || 1000));
@@ -14,6 +16,27 @@ function isNumericUserId(value?: string) {
 }
 
 export async function getBroadcastTargetUserIds(filter: BroadcastFilter): Promise<string[]> {
+  if (isPrismaPersistenceEnabled()) {
+    if (filter === "balance_positive") {
+      const users = await prisma.user.findMany({
+        where: { balance: { gt: 0 } },
+        select: { userId: true },
+      });
+      return users.map((u) => String(u.userId)).filter((id) => isNumericUserId(id));
+    }
+
+    if (filter === "kyc_approved") {
+      const users = await prisma.user.findMany({
+        where: { kycStatus: "approved" },
+        select: { userId: true },
+      });
+      return users.map((u) => String(u.userId)).filter((id) => isNumericUserId(id));
+    }
+
+    const users = await prisma.user.findMany({ select: { userId: true } });
+    return users.map((u) => String(u.userId)).filter((id) => isNumericUserId(id));
+  }
+
   if (filter === "balance_positive") {
     const users = await User.find({ balance: { $gt: 0 }, userId: { $regex: /^\d+$/ } })
       .select({ userId: 1 })

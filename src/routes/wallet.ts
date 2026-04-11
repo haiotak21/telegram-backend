@@ -155,6 +155,14 @@ router.get("/transactions/recent", requireAdmin, async (req, res) => {
   try {
     const limitRaw = Number(req.query.limit ?? 20);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 && limitRaw <= 200 ? limitRaw : 20;
+    if (isPrismaPersistenceEnabled()) {
+      const rows = await prisma.transaction.findMany({
+        where: { transactionType: "deposit" },
+        orderBy: { createdAt: "desc" },
+        take: limit,
+      });
+      return ok(res, { items: rows.map((r) => ({ ...r, cardId: null })) });
+    }
     const items = await Transaction.find({ transactionType: "deposit" })
       .sort({ createdAt: -1 })
       .limit(limit)
