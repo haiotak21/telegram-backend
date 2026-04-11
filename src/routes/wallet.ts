@@ -161,7 +161,7 @@ router.get("/transactions/recent", requireAdmin, async (req, res) => {
         orderBy: { createdAt: "desc" },
         take: limit,
       });
-      return ok(res, { items: rows.map((r) => ({ ...r, cardId: null })) });
+      return ok(res, { items: rows.map((r: any) => ({ ...r, cardId: null })) });
     }
     const items = await Transaction.find({ transactionType: "deposit" })
       .sort({ createdAt: -1 })
@@ -190,6 +190,193 @@ router.get("/transactions/recent", requireAdmin, async (req, res) => {
 });
 
 router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
+  if (isPrismaPersistenceEnabled()) {
+    try {
+      const id = String(req.params.id || "").trim();
+      if (!id) return fail(res, "Transaction id is required", 400);
+      const { action, reason } = TransactionDecisionSchema.parse(req.body || {});
+
+      const tx = await prisma.transaction.findFirst({
+        where: {
+          OR: [{ id }, { transactionNumber: id }, { referenceNumber: id }],
+        },
+      });
+      if (!tx) return fail(res, "Transaction not found", 404);
+      if (tx.transactionType !== "deposit") return fail(res, "Only deposit transactions can be reviewed manually", 400);
+
+      if (tx.status === "completed") {
+        return ok(res, {
+          id: tx.id,
+          status: tx.status,
+          message: "Transaction already completed",
+        });
+      }
+      if (tx.status !== "pending") {
+        return fail(res, `Only pending transactions can be reviewed (current: ${tx.status})`, 400);
+      }
+
+      const txMetadata = tx.metadata && typeof tx.metadata === "object" && !Array.isArray(tx.metadata) ? (tx.metadata as any) : {};
+
+      if (action === "decline") {
+        await prisma.transaction.update({
+          where: { id: tx.id },
+          data: {
+            status: "failed",
+            verified: false,
+            metadata: {
+              ...txMetadata,
+              manualReviewRequired: false,
+              manualReview: {
+                status: "declined",
+                reviewedAt: new Date(),
+                reviewedBy: "admin",
+                reason: reason || "Declined by admin",
+              },
+            } as any,
+          },
+        });
+
+        await notifyDepositReviewDeclined(String(tx.userId), reason).catch((notifyErr: any) => {
+          console.warn("Failed to notify declined deposit review", {
+            userId: String(tx.userId),
+            txId: tx.id,
+            error: notifyErr?.message || String(notifyErr),
+          });
+        });
+
+        return ok(res, { id: tx.id, status: "failed", action });
+      }
+
+      const isCardRequestManual = txMetadata?.kind === "card_request_manual";
+      if (isCardRequestManual) {
+        const userId = String(tx.userId);
+        const userRecord = await prisma.user.findUnique({ where: { userId } });
+        if (!userRecord) return fail(res, "User not found", 404);
+        if ((userRecord.kycStatus || "").toLowerCase() !== "approved") {
+          return fail(res, "User KYC is not approved for card creation", 400);
+        }
+
+        const cardAmountUsdRaw = txMetadata?.cardAmountUsd;
+        const cardAmountUsd = Number(cardAmountUsdRaw);
+        const amount = Number.isFinite(cardAmountUsd) && cardAmountUsd >= 3 ? cardAmountUsd : 3;
+        const nameOnCard = [userRecord.firstName, userRecord.lastName].filter(Boolean).join(" ") || "StroWallet User";
+        const customerEmail = userRecord.customerEmail;
+        if (!customerEmail) return fail(res, "User email is missing for card request", 400);
+
+        const backendBase = process.env.BOT_BACKEND_BASE || `http://127.0.0.1:${process.env.PORT || 3000}`;
+        let createResp: any;
+        try {
+          createResp = await axios.post(
+            `${backendBase}/api/card-requests`,
+            {
+              userId,
+              nameOnCard,
+              cardType: "visa",
+              amount: String(amount),
+              customerEmail,
+              metadata: {
+                source: "admin_manual_review",
+                transactionId: tx.id,
+              },
+            },
+            { timeout: 30000 }
+          );
+        } catch (createErr: any) {
+          const msg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
+          return fail(res, msg, 400);
+        }
+
+        const cardId = createResp?.data?.data?.cardId;
+        await prisma.transaction.update({
+          where: { id: tx.id },
+          data: {
+            status: "completed",
+            verified: true,
+            metadata: {
+              ...txMetadata,
+              manualReviewRequired: false,
+              manualReview: {
+                status: "approved",
+                reviewedAt: new Date(),
+                reviewedBy: "admin",
+                reason: reason || "Approved by admin",
+              },
+              cardRequest: {
+                approvedAt: new Date(),
+                cardId: cardId || null,
+              },
+            } as any,
+          },
+        });
+
+        return ok(res, { id: tx.id, status: "completed", action, cardId: cardId || null });
+      }
+
+      const amountEtbRaw = tx.amountEtb ?? txMetadata?.expectedAmountEtb ?? tx.amount;
+      const amountEtb = Number(amountEtbRaw);
+      if (!Number.isFinite(amountEtb) || amountEtb <= 0) {
+        return fail(res, "Cannot approve transaction without a valid ETB amount", 400);
+      }
+
+      const pricing = await loadPricingConfig();
+      const quote = quoteDeposit(amountEtb, pricing);
+      if (quote.creditedUsdt <= 0) return fail(res, "Deposit amount is too low after fees", 400);
+
+      const user = await prisma.user.findUnique({ where: { userId: String(tx.userId) } });
+      if (!user) return fail(res, "User not found", 404);
+
+      const updatedUser = await prisma.user.update({
+        where: { userId: String(tx.userId) },
+        data: { balance: (user.balance || 0) + quote.creditedUsdt },
+      });
+
+      await prisma.transaction.update({
+        where: { id: tx.id },
+        data: {
+          status: "completed",
+          verified: true,
+          amountEtb,
+          amountUsdt: quote.creditedUsdt,
+          amount: quote.creditedUsdt,
+          currency: "USDT",
+          feeEtb: quote.feeEtb,
+          rateSnapshot: quote.rate,
+          metadata: {
+            ...txMetadata,
+            manualReviewRequired: false,
+            manualReview: {
+              status: "approved",
+              reviewedAt: new Date(),
+              reviewedBy: "admin",
+              reason: reason || "Approved by admin",
+            },
+          } as any,
+        },
+      });
+
+      await notifyDepositCredited(String(tx.userId), quote.creditedUsdt, updatedUser.balance).catch((notifyErr: any) => {
+        console.warn("Failed to notify approved deposit review", {
+          userId: String(tx.userId),
+          txId: tx.id,
+          error: notifyErr?.message || String(notifyErr),
+        });
+      });
+
+      return ok(res, {
+        id: tx.id,
+        status: "completed",
+        action,
+        creditedUsdt: quote.creditedUsdt,
+        newBalance: updatedUser.balance,
+        feeEtb: quote.feeEtb,
+        rate: quote.rate,
+      });
+    } catch (err: any) {
+      const message = err?.errors?.[0]?.message || err?.message || "Failed to process decision";
+      return fail(res, message, 400);
+    }
+  }
+
   const session = await mongoose.startSession();
   session.startTransaction();
   try {

@@ -19,6 +19,7 @@ import { isPrismaPersistenceEnabled } from "../utils/persistence";
 const router = express.Router();
 
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
+const ADMIN_PREFER_PRISMA_READS = String(process.env.ADMIN_PREFER_PRISMA_READS || "true").toLowerCase() !== "false";
 
 function getDefaultMode() {
   return process.env.STROWALLET_DEFAULT_MODE || (process.env.NODE_ENV !== "production" ? "sandbox" : undefined);
@@ -1056,7 +1057,7 @@ router.get("/transactions/decline-fees/report", requireAdmin, async (req, res) =
     const maxRows = limit || 200;
 
     const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
-    const shouldUsePrismaRead = isPrismaPersistenceEnabled() || mongoose.connection.readyState !== 1;
+    const shouldUsePrismaRead = ADMIN_PREFER_PRISMA_READS || isPrismaPersistenceEnabled() || mongoose.connection.readyState !== 1;
     const txns = shouldUsePrismaRead
       ? await prisma.transaction.findMany({
           where: {

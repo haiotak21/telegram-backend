@@ -106,7 +106,7 @@ export async function getBroadcastTargetUserIds(filter: BroadcastFilter): Promis
         where: { balance: { gt: 0 } },
         select: { userId: true },
       });
-      return users.map((u) => String(u.userId)).filter((id) => isNumericUserId(id));
+      return users.map((u: any) => String(u.userId)).filter((id: string) => isNumericUserId(id));
     }
 
     if (filter === "kyc_approved") {
@@ -114,11 +114,11 @@ export async function getBroadcastTargetUserIds(filter: BroadcastFilter): Promis
         where: { kycStatus: "approved" },
         select: { userId: true },
       });
-      return users.map((u) => String(u.userId)).filter((id) => isNumericUserId(id));
+      return users.map((u: any) => String(u.userId)).filter((id: string) => isNumericUserId(id));
     }
 
     const users = await prisma.user.findMany({ select: { userId: true } });
-    return users.map((u) => String(u.userId)).filter((id) => isNumericUserId(id));
+    return users.map((u: any) => String(u.userId)).filter((id: string) => isNumericUserId(id));
   }
 
   if (filter === "balance_positive") {
