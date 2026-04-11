@@ -868,7 +868,7 @@ export async function initBot() {
         "💳 Card request payment",
         `Card amount: $${selection.cardAmountUsd.toFixed(2)}`,
         `Service fee: $${selection.feeUsd.toFixed(2)}`,
-        `Total to pay: $${selection.totalUsd.toFixed(2)}`,
+        `Total to pay: $${selection.totalUsd.toFixed(2)} or ${selection.totalEtb.toFixed(2)} ETB`,
         `${meta.typeLabel} account: ${meta.account}`,
         `Name: ${meta.name}`,
         "",
@@ -2530,7 +2530,7 @@ async function handleCardRequest(chatId: number, message?: any) {
     "💳 Card request payment required.",
     `Card amount: $${cardAmountUsd.toFixed(2)}`,
     `Service fee: $${feeUsd.toFixed(2)}`,
-    `Total to pay: $${totalUsd.toFixed(2)}`,
+    `Total to pay: $${totalUsd.toFixed(2)} or ${totalEtb.toFixed(2)} ETB`,
     "Choose a payment method:",
   ];
   await bot!.sendMessage(chatId, lines.join("\n"), {
