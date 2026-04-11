@@ -18,7 +18,7 @@ import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
 const router = express.Router();
 
-const AmountEtbSchema = z.object({ amountEtb: z.number().min(1000, "Minimum deposit amount is 1000 ETB") });
+const AmountEtbSchema = z.object({ amountEtb: z.number().positive("amountEtb must be greater than 0") });
 const AmountUsdtSchema = z.object({ amountUsdt: z.number().positive() });
 const BalanceParamSchema = z.object({ userId: z.string().min(1) });
 
@@ -430,6 +430,84 @@ router.post("/reset-users", requireAdmin, async (req, res) => {
     const body = ResetUsersSchema.parse(req.body || {});
     if (body.scope === "single" && !body.userId) {
       return fail(res, "userId is required for single-user reset", 400);
+    }
+
+    if (isPrismaPersistenceEnabled()) {
+      const removeTransactions = Boolean(body.removeTransactions);
+      if (body.scope === "single") {
+        const userId = String(body.userId);
+        const [userRes, cardsRes, requestsRes, transactionsCancelledRes] = await Promise.all([
+          prisma.user.updateMany({ where: { userId }, data: { balance: 0, currency: "USDT" } }),
+          prisma.card.updateMany({ where: { userId }, data: { userId: null } }),
+          prisma.cardRequest.updateMany({
+            where: { userId, NOT: { status: "declined" } },
+            data: { status: "declined", decisionReason: "Reset by admin" },
+          }),
+          prisma.transaction.updateMany({
+            where: { userId, NOT: { status: "cancelled" } },
+            data: {
+              status: "cancelled",
+              metadata: {
+                archivedBy: "admin_reset",
+                archivedAt: new Date(),
+                reason: body.reason || undefined,
+              } as any,
+            },
+          }),
+        ]);
+
+        const transactionsDeletedRes = removeTransactions
+          ? await prisma.transaction.deleteMany({ where: { userId } })
+          : { count: 0 };
+
+        return ok(res, {
+          message: "User reset completed",
+          scope: body.scope,
+          userId,
+          usersZeroed: userRes.count,
+          linksCleared: 0,
+          cardsUnlinked: cardsRes.count,
+          requestsDeclined: requestsRes.count,
+          transactionsArchived: transactionsCancelledRes.count,
+          transactionsDeleted: transactionsDeletedRes.count,
+        });
+      }
+
+      const [usersRes, cardsRes, requestsRes, transactionsCancelledRes] = await Promise.all([
+        prisma.user.updateMany({ data: { balance: 0, currency: "USDT" } }),
+        prisma.card.updateMany({ data: { userId: null } }),
+        prisma.cardRequest.updateMany({
+          where: { NOT: { status: "declined" } },
+          data: { status: "declined", decisionReason: "Reset by admin" },
+        }),
+        prisma.transaction.updateMany({
+          where: { NOT: { status: "cancelled" } },
+          data: {
+            status: "cancelled",
+            metadata: {
+              archivedBy: "admin_reset",
+              archivedAt: new Date(),
+              reason: body.reason || undefined,
+            } as any,
+          },
+        }),
+      ]);
+
+      const transactionsDeletedRes = removeTransactions
+        ? await prisma.transaction.deleteMany({})
+        : { count: 0 };
+
+      return ok(res, {
+        message: "All users reset completed",
+        scope: body.scope,
+        userId: null,
+        usersZeroed: usersRes.count,
+        linksCleared: 0,
+        cardsUnlinked: cardsRes.count,
+        requestsDeclined: requestsRes.count,
+        transactionsArchived: transactionsCancelledRes.count,
+        transactionsDeleted: transactionsDeletedRes.count,
+      });
     }
 
     const removeTransactions = Boolean(body.removeTransactions);

@@ -6,11 +6,10 @@ import User from "../models/User";
 import Customer from "../models/Customer";
 import Card from "../models/Card";
 import CardRequest from "../models/CardRequest";
-import BroadcastJob from "../models/BroadcastJob";
 import { TelegramLink } from "../models/TelegramLink";
 import Transaction from "../models/Transaction";
 import { notifyCardStatusChanged } from "../services/botService";
-import { createBroadcastJob, getBroadcastTargetCount } from "../services/broadcastService";
+import { createBroadcastJob, getBroadcastJobById, getBroadcastTargetCount, listBroadcastJobs } from "../services/broadcastService";
 import { auditCardTransactions, getReconciliationSummary, reconcileAllCards, reconcileCard } from "../services/reconciliationService";
 import { ok, fail } from "../utils/apiResponse";
 import prisma from "../utils/prisma";
@@ -291,7 +290,7 @@ router.post("/broadcast", requireAdmin, async (req, res) => {
     return ok(
       res,
       {
-        id: job._id,
+        id: String((job as any)._id),
         status: job.status,
         targetCount: job.targetCount,
         successCount: job.successCount,
@@ -310,16 +309,10 @@ router.get("/broadcast", requireAdmin, async (req, res) => {
   try {
     const limitRaw = Number(req.query.limit || 20);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 && limitRaw <= 100 ? limitRaw : 20;
-    if (isPrismaPersistenceEnabled()) {
-      return ok(res, { items: [] });
-    }
-    const items = await BroadcastJob.find({})
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .lean();
+    const items = await listBroadcastJobs(limit);
     return ok(res, {
       items: items.map((j: any) => ({
-        id: j._id,
+        id: String(j._id),
         createdBy: j.createdBy,
         status: j.status,
         targetFilter: j.targetFilter,
@@ -341,13 +334,10 @@ router.get("/broadcast", requireAdmin, async (req, res) => {
 router.get("/broadcast/:id", requireAdmin, async (req, res) => {
   try {
     const id = String(req.params.id);
-    if (isPrismaPersistenceEnabled()) {
-      return fail(res, "Broadcast not found", 404);
-    }
-    const job = await BroadcastJob.findById(id).lean();
+    const job = await getBroadcastJobById(id);
     if (!job) return fail(res, "Broadcast not found", 404);
     return ok(res, {
-      id: job._id,
+      id: String((job as any)._id),
       status: job.status,
       targetFilter: job.targetFilter,
       targetCount: job.targetCount,
@@ -479,6 +469,23 @@ router.get("/users", requireAdmin, async (req, res) => {
 router.get("/users/:telegramUserId/kyc-status", requireAdmin, async (req, res) => {
   try {
     const telegramUserId = String(req.params.telegramUserId);
+    if (isPrismaPersistenceEnabled()) {
+      const user = await prisma.user.findUnique({ where: { userId: telegramUserId } });
+      if (!user) return fail(res, "User not found", 404);
+
+      return ok(res, {
+        telegramUserId: user.userId,
+        customerId: user.strowalletCustomerId || null,
+        customerEmail: user.customerEmail || null,
+        kycStatus: user.kycStatus || "not_started",
+        customerKycStatus: null,
+        userKycStatus: user.kycStatus || null,
+        submittedAt: user.kycSubmittedAt,
+        idType: user.idType,
+        name: [user.firstName, user.lastName].filter(Boolean).join(" "),
+      });
+    }
+
     const user = await User.findOne({ userId: telegramUserId }).lean();
     if (!user) return fail(res, "User not found", 404);
     const customer = await Customer.findOne({ userId: telegramUserId }).lean();
