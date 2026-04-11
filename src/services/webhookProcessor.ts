@@ -6,6 +6,8 @@ import Transaction from "../models/Transaction";
 import User from "../models/User";
 import Customer from "../models/Customer";
 import { notifyByCardId, notifyByEmail, notifyCardRequestApproved, notifyCardStatusChanged, notifyKycStatus } from "./botService";
+import prisma from "../utils/prisma";
+import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
 function extractField(obj: any, keys: string[]): string | undefined {
   if (!obj || typeof obj !== "object") return undefined;
@@ -76,52 +78,81 @@ export async function processStroWalletEvent(payload: any) {
   if (kycStatus && (customerId || customerEmail)) {
     // Debug: Entering KYC notification logic
     console.log('DEBUG: Entering KYC notification logic');
-    const existing = await Customer.findOne({
-      $or: [
-        ...(customerId ? [{ customerId }] : []),
-        ...(customerEmail ? [{ email: customerEmail }] : []),
-      ],
-    }).lean();
+    const existing = isPrismaPersistenceEnabled()
+      ? null
+      : await Customer.findOne({
+          $or: [
+            ...(customerId ? [{ customerId }] : []),
+            ...(customerEmail ? [{ email: customerEmail }] : []),
+          ],
+        }).lean();
 
     let userId = existing?.userId;
     if (!userId && (customerId || customerEmail)) {
-      const user = await User.findOne({
-        $or: [
-          ...(customerId ? [{ strowalletCustomerId: customerId }] : []),
-          ...(customerEmail ? [{ customerEmail }] : []),
-        ],
-      }).lean();
-      userId = user?.userId;
+      if (isPrismaPersistenceEnabled()) {
+        const user = await prisma.user.findFirst({
+          where: {
+            OR: [
+              ...(customerId ? [{ strowalletCustomerId: customerId }] : []),
+              ...(customerEmail ? [{ customerEmail }] : []),
+            ],
+          },
+        });
+        userId = user?.userId;
+      } else {
+        const user = await User.findOne({
+          $or: [
+            ...(customerId ? [{ strowalletCustomerId: customerId }] : []),
+            ...(customerEmail ? [{ customerEmail }] : []),
+          ],
+        }).lean();
+        userId = user?.userId;
+      }
     }
 
     // Debug: Log resolved userId
     console.log('DEBUG: Resolved userId:', userId);
 
     if (userId) {
-      const prevUser = await User.findOne({ userId }).lean();
+      const prevUser = isPrismaPersistenceEnabled()
+        ? await prisma.user.findUnique({ where: { userId } })
+        : await User.findOne({ userId }).lean();
       const previousStatus = normalizeKycStatus(existing?.kycStatus || prevUser?.kycStatus);
       const lastNotifiedStatus = existing?.lastKycNotificationStatus as "approved" | "rejected" | undefined;
       // Debug: Log previous KYC status
       console.log('DEBUG: Previous KYC status:', previousStatus);
       console.log('DEBUG: Last notified KYC status:', lastNotifiedStatus);
-      await Customer.findOneAndUpdate(
-        { userId },
-        {
-          $set: {
-            customerId: customerId || existing?.customerId,
-            email: customerEmail || existing?.email,
-            kycStatus,
-            approvedAt: kycStatus === "approved" ? new Date() : undefined,
+      if (!isPrismaPersistenceEnabled()) {
+        await Customer.findOneAndUpdate(
+          { userId },
+          {
+            $set: {
+              customerId: customerId || existing?.customerId,
+              email: customerEmail || existing?.email,
+              kycStatus,
+              approvedAt: kycStatus === "approved" ? new Date() : undefined,
+            },
           },
-        },
-        { upsert: true, new: true }
-      );
+          { upsert: true, new: true }
+        );
+      }
 
-      await User.findOneAndUpdate(
-        { userId },
-        { $set: { kycStatus } },
-        { new: true }
-      );
+      if (isPrismaPersistenceEnabled()) {
+        await prisma.user.update({
+          where: { userId },
+          data: {
+            kycStatus,
+            ...(customerId ? { strowalletCustomerId: customerId } : {}),
+            ...(customerEmail ? { customerEmail } : {}),
+          },
+        });
+      } else {
+        await User.findOneAndUpdate(
+          { userId },
+          { $set: { kycStatus } },
+          { new: true }
+        );
+      }
 
       const shouldNotify =
         (kycStatus === "approved" || kycStatus === "rejected") &&
@@ -133,16 +164,18 @@ export async function processStroWalletEvent(payload: any) {
         await notifyKycStatus(userId, kycStatus as any).catch((err) => {
           console.error('Error sending KYC notification:', err);
         });
-        await Customer.findOneAndUpdate(
-          { userId },
-          {
-            $set: {
-              lastKycNotificationStatus: kycStatus,
-              lastKycNotifiedAt: new Date(),
+        if (!isPrismaPersistenceEnabled()) {
+          await Customer.findOneAndUpdate(
+            { userId },
+            {
+              $set: {
+                lastKycNotificationStatus: kycStatus,
+                lastKycNotifiedAt: new Date(),
+              },
             },
-          },
-          { new: true }
-        );
+            { new: true }
+          );
+        }
       }
     } else {
       console.log('DEBUG: No userId found for notification');
@@ -155,13 +188,12 @@ export async function processStroWalletEvent(payload: any) {
   if ((lowerType === "card.created" || lowerType.includes("virtualcard.created")) && cardId) {
     const data = payload?.data || payload;
     const userId = await resolveUserId(customerEmail, cardId);
-    await Card.findOneAndUpdate(
-      { cardId },
-      {
-        $set: {
-          cardId,
+    if (isPrismaPersistenceEnabled()) {
+      await prisma.card.upsert({
+        where: { cardId },
+        update: {
           customerEmail: customerEmail || data?.customerEmail,
-          userId: userId || undefined,
+          userId: userId || null,
           nameOnCard: data?.name_on_card || data?.nameOnCard || data?.name,
           cardType: data?.card_type || data?.cardType || data?.brand,
           status: data?.status || data?.state || "active",
@@ -171,9 +203,41 @@ export async function processStroWalletEvent(payload: any) {
           availableBalance: data?.available_balance,
           lastSync: new Date(),
         },
-      },
-      { upsert: true, new: true }
-    );
+        create: {
+          cardId,
+          customerEmail: customerEmail || data?.customerEmail,
+          userId: userId || null,
+          nameOnCard: data?.name_on_card || data?.nameOnCard || data?.name,
+          cardType: data?.card_type || data?.cardType || data?.brand,
+          status: data?.status || data?.state || "active",
+          last4: data?.last4 || data?.card_last4 || data?.cardLast4,
+          currency: data?.currency || data?.ccy,
+          balance: data?.balance || data?.available_balance,
+          availableBalance: data?.available_balance,
+          lastSync: new Date(),
+        },
+      });
+    } else {
+      await Card.findOneAndUpdate(
+        { cardId },
+        {
+          $set: {
+            cardId,
+            customerEmail: customerEmail || data?.customerEmail,
+            userId: userId || undefined,
+            nameOnCard: data?.name_on_card || data?.nameOnCard || data?.name,
+            cardType: data?.card_type || data?.cardType || data?.brand,
+            status: data?.status || data?.state || "active",
+            last4: data?.last4 || data?.card_last4 || data?.cardLast4,
+            currency: data?.currency || data?.ccy,
+            balance: data?.balance || data?.available_balance,
+            availableBalance: data?.available_balance,
+            lastSync: new Date(),
+          },
+        },
+        { upsert: true, new: true }
+      );
+    }
 
     if (userId) {
       const chatId = Number(userId);
@@ -195,16 +259,29 @@ export async function processStroWalletEvent(payload: any) {
     }
 
     if (userId || customerEmail) {
-      await CardRequest.findOneAndUpdate(
-        {
-          $or: [
-            ...(userId ? [{ userId }] : []),
-            ...(customerEmail ? [{ customerEmail }] : []),
-          ],
-        },
-        { $set: { cardId, status: "approved" } },
-        { new: true }
-      );
+      if (isPrismaPersistenceEnabled()) {
+        await prisma.cardRequest.updateMany({
+          where: {
+            OR: [
+              ...(userId ? [{ userId }] : []),
+              ...(customerEmail ? [{ customerEmail }] : []),
+            ],
+            status: { in: ["pending", "approved"] },
+          },
+          data: { cardId, status: "approved" },
+        });
+      } else {
+        await CardRequest.findOneAndUpdate(
+          {
+            $or: [
+              ...(userId ? [{ userId }] : []),
+              ...(customerEmail ? [{ customerEmail }] : []),
+            ],
+          },
+          { $set: { cardId, status: "approved" } },
+          { new: true }
+        );
+      }
 
       if (userId) {
         await notifyCardRequestApproved(userId, {
@@ -328,14 +405,26 @@ export async function processStroWalletEvent(payload: any) {
 
 function normalizeKycStatus(value?: string): "pending" | "approved" | "rejected" | undefined {
   if (!value) return undefined;
-  const v = value.toLowerCase();
-  if (["approved", "verified", "success", "active", "high kyc", "high_kyc", "high-kyc"].includes(v)) return "approved";
-  if (["pending", "processing", "review", "unreview kyc", "unreview_kyc", "unreview-kyc"].includes(v)) return "pending";
-  if (["declined", "rejected", "failed", "low kyc", "low_kyc", "low-kyc"].includes(v)) return "rejected";
+  const compact = String(value).toLowerCase().replace(/[\s_-]+/g, "");
+  if (["approved", "verified", "success", "active", "highkyc"].includes(compact)) return "approved";
+  if (["pending", "processing", "review", "unreviewkyc"].includes(compact)) return "pending";
+  if (["declined", "rejected", "failed", "lowkyc"].includes(compact)) return "rejected";
   return undefined;
 }
 
 async function resolveUserId(customerEmail?: string, cardId?: string) {
+  if (isPrismaPersistenceEnabled()) {
+    if (cardId) {
+      const card = await prisma.card.findUnique({ where: { cardId } });
+      if (card?.userId) return card.userId;
+    }
+    if (customerEmail) {
+      const userByEmail = await prisma.user.findFirst({ where: { customerEmail } });
+      if (userByEmail?.userId) return userByEmail.userId;
+    }
+    return undefined;
+  }
+
   if (cardId) {
     const card = await Card.findOne({ cardId }).lean();
     if (card?.userId) return card.userId;

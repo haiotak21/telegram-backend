@@ -32,10 +32,10 @@ function normalizeMode(mode?: string) {
 
 function normalizeKycStatus(value: any): "approved" | "pending" | "rejected" | "not_started" {
   if (!value) return "not_started";
-  const v = String(value).toLowerCase();
-  if (["approved", "verified", "success", "active", "high kyc", "high_kyc", "high-kyc"].includes(v)) return "approved";
-  if (["pending", "processing", "review", "unreview kyc", "unreview_kyc", "unreview-kyc"].includes(v)) return "pending";
-  if (["declined", "rejected", "failed", "low kyc", "low_kyc", "low-kyc"].includes(v)) return "rejected";
+  const compact = String(value).toLowerCase().replace(/[\s_-]+/g, "");
+  if (["approved", "verified", "success", "active", "highkyc"].includes(compact)) return "approved";
+  if (["pending", "processing", "review", "unreviewkyc"].includes(compact)) return "pending";
+  if (["declined", "rejected", "failed", "lowkyc"].includes(compact)) return "rejected";
   return "pending";
 }
 

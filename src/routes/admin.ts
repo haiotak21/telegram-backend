@@ -1,5 +1,6 @@
 import express from "express";
 import axios, { AxiosError } from "axios";
+import mongoose from "mongoose";
 import { z } from "zod";
 import { v2 as cloudinary } from "cloudinary";
 import User from "../models/User";
@@ -59,6 +60,34 @@ function normalizeError(e: any) {
   const status = e?.status ?? 400;
   const msg = e?.message ?? "Request error";
   return { status, message: String(msg) };
+}
+
+function normalizeKycProviderStatus(value?: any): "pending" | "approved" | "rejected" | undefined {
+  if (value == null) return undefined;
+  const compact = String(value).toLowerCase().replace(/[\s_-]+/g, "");
+  if (["approved", "verified", "success", "active", "highkyc"].includes(compact)) return "approved";
+  if (["pending", "processing", "review", "unreviewkyc"].includes(compact)) return "pending";
+  if (["declined", "rejected", "failed", "lowkyc"].includes(compact)) return "rejected";
+  return undefined;
+}
+
+async function fetchCardholderKyc(customerId?: string | null, customerEmail?: string | null) {
+  const public_key = requirePublicKey();
+  const params: any = { public_key };
+  if (customerId) params.customerId = customerId;
+  if (customerEmail) params.customerEmail = customerEmail;
+  const resp = await axios.get(`${BITVCARD_BASE}getcardholder/`, {
+    params,
+    timeout: 15000,
+  });
+  const payload = resp.data;
+  const status = normalizeKycProviderStatus(
+    extractField(payload, ["kycStatus", "verificationStatus", "status", "state", "kyc_state"])
+  );
+  const providerCustomerId =
+    extractField(payload, ["customerId", "customer_id", "cardholderId", "card_holder_id"]) || customerId || undefined;
+  const providerEmail = extractField(payload, ["customerEmail", "customer_email", "email"]) || customerEmail || undefined;
+  return { status, providerCustomerId, providerEmail };
 }
 
 function extractField(obj: any, keys: string[]): string | undefined {
@@ -469,9 +498,28 @@ router.get("/users", requireAdmin, async (req, res) => {
 router.get("/users/:telegramUserId/kyc-status", requireAdmin, async (req, res) => {
   try {
     const telegramUserId = String(req.params.telegramUserId);
+    const refresh = String(req.query.refresh || "false").toLowerCase() === "true";
     if (isPrismaPersistenceEnabled()) {
-      const user = await prisma.user.findUnique({ where: { userId: telegramUserId } });
+      let user = await prisma.user.findUnique({ where: { userId: telegramUserId } });
       if (!user) return fail(res, "User not found", 404);
+
+      if (refresh && (user.strowalletCustomerId || user.customerEmail)) {
+        try {
+          const refreshed = await fetchCardholderKyc(user.strowalletCustomerId, user.customerEmail);
+          if (refreshed.status || refreshed.providerCustomerId || refreshed.providerEmail) {
+            user = await prisma.user.update({
+              where: { userId: telegramUserId },
+              data: {
+                ...(refreshed.status ? { kycStatus: refreshed.status } : {}),
+                ...(refreshed.providerCustomerId ? { strowalletCustomerId: refreshed.providerCustomerId } : {}),
+                ...(refreshed.providerEmail ? { customerEmail: refreshed.providerEmail } : {}),
+              },
+            });
+          }
+        } catch (err) {
+          console.warn("[admin] kyc refresh failed", { telegramUserId, error: (err as any)?.message || String(err) });
+        }
+      }
 
       return ok(res, {
         telegramUserId: user.userId,
@@ -486,9 +534,49 @@ router.get("/users/:telegramUserId/kyc-status", requireAdmin, async (req, res) =
       });
     }
 
-    const user = await User.findOne({ userId: telegramUserId }).lean();
+    let user = await User.findOne({ userId: telegramUserId }).lean();
     if (!user) return fail(res, "User not found", 404);
-    const customer = await Customer.findOne({ userId: telegramUserId }).lean();
+    let customer = await Customer.findOne({ userId: telegramUserId }).lean();
+    if (!customer) return fail(res, "Customer not found", 404);
+
+    if (refresh && (customer.customerId || customer.email || user.strowalletCustomerId || user.customerEmail)) {
+      try {
+        const refreshed = await fetchCardholderKyc(
+          customer.customerId || user.strowalletCustomerId,
+          customer.email || user.customerEmail
+        );
+        if (refreshed.status || refreshed.providerCustomerId || refreshed.providerEmail) {
+          await Promise.all([
+            User.updateOne(
+              { userId: telegramUserId },
+              {
+                $set: {
+                  ...(refreshed.status ? { kycStatus: refreshed.status } : {}),
+                  ...(refreshed.providerCustomerId ? { strowalletCustomerId: refreshed.providerCustomerId } : {}),
+                  ...(refreshed.providerEmail ? { customerEmail: refreshed.providerEmail } : {}),
+                },
+              }
+            ),
+            Customer.updateOne(
+              { userId: telegramUserId },
+              {
+                $set: {
+                  ...(refreshed.status ? { kycStatus: refreshed.status } : {}),
+                  ...(refreshed.providerCustomerId ? { customerId: refreshed.providerCustomerId } : {}),
+                  ...(refreshed.providerEmail ? { email: refreshed.providerEmail } : {}),
+                },
+              }
+            ),
+          ]);
+          user = await User.findOne({ userId: telegramUserId }).lean();
+          customer = await Customer.findOne({ userId: telegramUserId }).lean();
+        }
+      } catch (err) {
+        console.warn("[admin] kyc refresh failed", { telegramUserId, error: (err as any)?.message || String(err) });
+      }
+    }
+
+    if (!user) return fail(res, "User not found", 404);
     if (!customer) return fail(res, "Customer not found", 404);
 
     return ok(res, {
@@ -968,20 +1056,28 @@ router.get("/transactions/decline-fees/report", requireAdmin, async (req, res) =
     const maxRows = limit || 200;
 
     const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
-    const txQuery: any = {
-      transactionType: "card",
-      createdAt: { $gte: since },
-      $or: [
-        { "metadata.description": { $regex: DECLINE_FEE_MARKER } },
-        { transactionNumber: { $regex: DECLINE_FEE_MARKER } },
-        { referenceNumber: { $regex: DECLINE_FEE_MARKER } },
-      ],
-    };
-
-    const txns = await Transaction.find(txQuery)
-      .sort({ createdAt: -1 })
-      .limit(10000)
-      .lean();
+    const shouldUsePrismaRead = isPrismaPersistenceEnabled() || mongoose.connection.readyState !== 1;
+    const txns = shouldUsePrismaRead
+      ? await prisma.transaction.findMany({
+          where: {
+            transactionType: "card",
+            createdAt: { gte: since },
+          },
+          orderBy: { createdAt: "desc" },
+          take: 10000,
+        })
+      : await Transaction.find({
+          transactionType: "card",
+          createdAt: { $gte: since },
+          $or: [
+            { "metadata.description": { $regex: DECLINE_FEE_MARKER } },
+            { transactionNumber: { $regex: DECLINE_FEE_MARKER } },
+            { referenceNumber: { $regex: DECLINE_FEE_MARKER } },
+          ],
+        })
+          .sort({ createdAt: -1 })
+          .limit(10000)
+          .lean();
 
     const grouped = new Map<string, {
       userId: string;
@@ -1019,7 +1115,8 @@ router.get("/transactions/decline-fees/report", requireAdmin, async (req, res) =
         if (!current.lastSeenAt || createdAt > current.lastSeenAt) current.lastSeenAt = createdAt;
       }
 
-      if (tx.metadata?.cardId) current.cards.add(String(tx.metadata.cardId));
+      const metadata = tx.metadata && typeof tx.metadata === "object" && !Array.isArray(tx.metadata) ? (tx.metadata as any) : undefined;
+      if (metadata?.cardId) current.cards.add(String(metadata.cardId));
       const ref = tx.transactionNumber || tx.referenceNumber;
       if (ref && current.sampleRefs.length < 5) current.sampleRefs.push(String(ref));
 
@@ -1033,9 +1130,14 @@ router.get("/transactions/decline-fees/report", requireAdmin, async (req, res) =
 
     const userIds = impacted.map((i) => i.userId);
     const users = userIds.length
-      ? await User.find({ userId: { $in: userIds } })
-          .select({ userId: 1, firstName: 1, lastName: 1, customerEmail: 1 })
-          .lean()
+      ? shouldUsePrismaRead
+        ? await prisma.user.findMany({
+            where: { userId: { in: userIds } },
+            select: { userId: true, firstName: true, lastName: true, customerEmail: true },
+          })
+        : await User.find({ userId: { $in: userIds } })
+            .select({ userId: 1, firstName: 1, lastName: 1, customerEmail: 1 })
+            .lean()
       : [];
     const userMap = new Map(users.map((u) => [String(u.userId), u]));
 

@@ -589,7 +589,7 @@ export async function initBot() {
       isPrismaOnlyMode() ? Promise.resolve(null) : TelegramLink.findOne({ chatId: msg.chat.id }).lean(),
       findActiveCardsForUser(String(msg.chat.id)),
     ]);
-    const cardLabels = cards.map((c) => `${c.cardId}${c.last4 ? ` (••••${c.last4})` : ""}`);
+    const cardLabels = cards.map((c: any) => `${c.cardId}${c.last4 ? ` (••••${c.last4})` : ""}`);
     await bot!.sendMessage(
       msg.chat.id,
       `Email: ${link?.customerEmail || "(none)"}\nCards: ${cardLabels.join(", ") || "(none)"}`
@@ -1604,7 +1604,24 @@ export async function notifyKycStatus(userId: string, status: KycStatus) {
 
 export async function pollPendingKycUpdates() {
   if (isPrismaOnlyMode()) {
-    return { checked: 0, updated: 0 };
+    const pendingUsers = await prisma.user.findMany({
+      where: {
+        kycStatus: { in: ["pending", "review", "processing", "unreview_kyc", "unreview-kyc", "unreview kyc"] },
+      },
+    });
+    let checked = 0;
+    let updated = 0;
+
+    for (const user of pendingUsers) {
+      checked += 1;
+      const before = normalizeKycStatus(user.kycStatus);
+      const after = await refreshKycStatusFromStroWallet(user);
+      if (after && after !== before) {
+        updated += 1;
+      }
+    }
+
+    return { checked, updated };
   }
   const pendingCustomers = await Customer.find({ kycStatus: "pending" }).lean();
   let checked = 0;
@@ -3697,9 +3714,10 @@ async function refreshKycStatusFromStroWallet(user: any): Promise<KycStatus | un
 function normalizeKycStatus(value: any): KycStatus | undefined {
   if (!value) return undefined;
   const v = String(value).toLowerCase();
-  if (["approved", "verified", "success", "active", "high kyc", "high_kyc", "high-kyc"].includes(v)) return "approved";
-  if (["pending", "processing", "review", "unreview kyc", "unreview_kyc", "unreview-kyc"].includes(v)) return "pending";
-  if (["declined", "rejected", "failed", "low kyc", "low_kyc", "low-kyc"].includes(v)) return "rejected";
+  const compact = v.replace(/[\s_-]+/g, "");
+  if (["approved", "verified", "success", "active", "highkyc"].includes(compact)) return "approved";
+  if (["pending", "processing", "review", "unreviewkyc"].includes(compact)) return "pending";
+  if (["declined", "rejected", "failed", "lowkyc"].includes(compact)) return "rejected";
   return undefined;
 }
 
@@ -4063,7 +4081,7 @@ async function getUserCardIds(chatId: number) {
   } else {
     cards = await Card.find({ userId }).lean();
   }
-  const cardIdsFromCards = cards.map((c) => c.cardId).filter(isLikelyCardId);
+  const cardIdsFromCards = cards.map((c: any) => c.cardId).filter(isLikelyCardId);
   if (cardIdsFromCards.length) return Array.from(new Set(cardIdsFromCards));
 
   const requests = isPrismaOnlyMode()
