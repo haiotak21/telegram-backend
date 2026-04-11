@@ -868,7 +868,7 @@ export async function initBot() {
         "💳 Card request payment",
         `Card amount: $${selection.cardAmountUsd.toFixed(2)}`,
         `Service fee: $${selection.feeUsd.toFixed(2)}`,
-        `Total to pay: $${selection.totalUsd.toFixed(2)} (≈ ${selection.totalEtb.toFixed(2)} ETB at rate ${selection.rate.toFixed(2)})`,
+        `Total to pay: $${selection.totalUsd.toFixed(2)}`,
         `${meta.typeLabel} account: ${meta.account}`,
         `Name: ${meta.name}`,
         "",
@@ -2530,12 +2530,96 @@ async function handleCardRequest(chatId: number, message?: any) {
     "💳 Card request payment required.",
     `Card amount: $${cardAmountUsd.toFixed(2)}`,
     `Service fee: $${feeUsd.toFixed(2)}`,
-    `Total to pay: $${totalUsd.toFixed(2)} (≈ ${totalEtb.toFixed(2)} ETB at rate ${rate.toFixed(2)})`,
+    `Total to pay: $${totalUsd.toFixed(2)}`,
     "Choose a payment method:",
   ];
   await bot!.sendMessage(chatId, lines.join("\n"), {
     reply_markup: { inline_keyboard: buildCardRequestMethodKeyboard() },
   });
+}
+
+function extractCardIdFromPayload(payload: any): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const priorityKeys = ["card_id", "cardId", "virtual_card_id", "virtualCardId", "id"];
+  const seen = new Set<any>();
+  const candidates: string[] = [];
+
+  const visit = (node: any) => {
+    if (!node || typeof node !== "object" || seen.has(node)) return;
+    seen.add(node);
+
+    for (const key of priorityKeys) {
+      if ((node as any)[key] != null) {
+        candidates.push(String((node as any)[key]));
+      }
+    }
+
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) {
+        for (const item of value) visit(item);
+      } else if (value && typeof value === "object") {
+        visit(value);
+      }
+    }
+  };
+
+  visit(payload);
+  return candidates.find((c) => isLikelyCardId(c));
+}
+
+async function resolveCreatedCardId(params: {
+  userId: string;
+  customerEmail?: string;
+  providerPayload?: any;
+  attempts?: number;
+}): Promise<string | undefined> {
+  const maxAttempts = Math.max(1, Number(params.attempts || 3));
+  const immediate = extractCardIdFromPayload(params.providerPayload);
+  if (immediate) return immediate;
+
+  for (let i = 0; i < maxAttempts; i += 1) {
+    if (i > 0) await sleep(1200);
+
+    if (isPrismaPersistenceEnabled()) {
+      const card = await prisma.card.findFirst({
+        where: {
+          OR: [
+            { userId: params.userId },
+            ...(params.customerEmail ? [{ customerEmail: params.customerEmail }] : []),
+          ],
+        },
+        orderBy: { updatedAt: "desc" },
+      });
+      if (card?.cardId && isLikelyCardId(card.cardId)) return card.cardId;
+    } else {
+      const card = await Card.findOne({
+        $or: [
+          { userId: params.userId },
+          ...(params.customerEmail ? [{ customerEmail: params.customerEmail }] : []),
+        ],
+      })
+        .sort({ updatedAt: -1 })
+        .lean();
+      if (card?.cardId && isLikelyCardId(String(card.cardId))) return String(card.cardId);
+    }
+
+    if (params.customerEmail) {
+      try {
+        const lookup = await callStroWallet(
+          "getcardholder",
+          "get",
+          { customerEmail: params.customerEmail },
+          { silentOnStatus: [400, 403, 404] }
+        );
+        const fromLookup = extractCardIdFromPayload(lookup);
+        if (fromLookup) return fromLookup;
+      } catch {
+        // Ignore transient lookup errors.
+      }
+    }
+  }
+
+  return undefined;
 }
 
 async function submitCardRequest(userId: string, user: any, customer: any, message?: any, cardAmountUsd?: number) {
@@ -2568,9 +2652,29 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
         throw new Error(typeof providerMsg === "string" ? providerMsg : JSON.stringify(providerMsg));
       }
 
-      const cardId = String(data?.card_id || data?.data?.card_id || data?.id || data?.data?.id || "");
+      const cardId = await resolveCreatedCardId({ userId, customerEmail, providerPayload: data, attempts: 3 });
       if (!cardId) {
-        throw new Error("Card provider did not return card_id");
+        await prisma.cardRequest.create({
+          data: {
+            userId,
+            nameOnCard,
+            cardType: "visa",
+            amount,
+            customerEmail,
+            mode: normalizeMode(getDefaultMode()) || null,
+            status: "pending",
+            responseData: data,
+          },
+        });
+
+        await bot!.sendMessage(Number(userId), [
+          "✅ Payment Verified",
+          "Card request was accepted and is provisioning.",
+          "Please check My Cards again in a moment.",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
       }
 
       await prisma.cardRequest.create({
@@ -2792,7 +2896,7 @@ async function submitCreateCard(chatId: number, session: CreateCardSession) {
       const providerMsg = data?.message || data?.error || "Card creation rejected";
       throw new Error(typeof providerMsg === "string" ? providerMsg : JSON.stringify(providerMsg));
     }
-    const cardId = data?.card_id || data?.data?.card_id || data?.id || data?.data?.id;
+    const cardId = await resolveCreatedCardId({ userId, customerEmail, providerPayload: data, attempts: 3 });
     if (cardId) {
       if (!isPrismaOnlyMode()) {
         await TelegramLink.findOneAndUpdate(
@@ -2851,7 +2955,9 @@ async function submitCreateCard(chatId: number, session: CreateCardSession) {
     createCardSessions.delete(chatId);
     await bot!.sendMessage(
       chatId,
-      `✅ Your StroWallet card has been created!\nCard ID: ${cardId || "(pending)"}`,
+      cardId
+        ? `✅ Your StroWallet card has been created!\nCard ID: ${cardId}`
+        : "✅ Card request accepted by provider. Card is provisioning and will appear shortly in My Cards.",
       { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
     );
   } catch (err: any) {
