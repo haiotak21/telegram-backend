@@ -1,5 +1,7 @@
 import express from "express";
 import axios, { AxiosError } from "axios";
+import http from "http";
+import https from "https";
 import mongoose from "mongoose";
 import { z } from "zod";
 import { v2 as cloudinary } from "cloudinary";
@@ -19,6 +21,12 @@ import { isPrismaPersistenceEnabled } from "../utils/persistence";
 const router = express.Router();
 
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
+const API_BASE = "https://strowallet.com/api/";
+const STROWALLET_PREFER_IPV4 = String(process.env.STROWALLET_PREFER_IPV4 || "true").toLowerCase() !== "false";
+const httpAgent = STROWALLET_PREFER_IPV4 ? new http.Agent({ keepAlive: true, family: 4 } as any) : undefined;
+const httpsAgent = STROWALLET_PREFER_IPV4 ? new https.Agent({ keepAlive: true, family: 4 } as any) : undefined;
+const bitvcard = axios.create({ baseURL: BITVCARD_BASE, timeout: 15000, httpAgent, httpsAgent });
+const api = axios.create({ baseURL: API_BASE, timeout: 15000, httpAgent, httpsAgent });
 const ADMIN_PREFER_PRISMA_READS = String(process.env.ADMIN_PREFER_PRISMA_READS || "true").toLowerCase() !== "false";
 
 function getDefaultMode() {
@@ -77,9 +85,8 @@ async function fetchCardholderKyc(customerId?: string | null, customerEmail?: st
   const params: any = { public_key };
   if (customerId) params.customerId = customerId;
   if (customerEmail) params.customerEmail = customerEmail;
-  const resp = await axios.get(`${BITVCARD_BASE}getcardholder/`, {
+  const resp = await bitvcard.get("getcardholder/", {
     params,
-    timeout: 15000,
   });
   const payload = resp.data;
   const status = normalizeKycProviderStatus(
@@ -105,10 +112,10 @@ function extractField(obj: any, keys: string[]): string | undefined {
 
 async function fetchCardDetail(cardId: string, mode?: string) {
   const public_key = requirePublicKey();
-  const resp = await axios.post(
-    `${BITVCARD_BASE}fetch-card-detail/`,
+  const resp = await bitvcard.post(
+    "fetch-card-detail/",
     { card_id: cardId, public_key, mode },
-    { timeout: 15000 }
+    {}
   );
   return resp.data;
 }
@@ -116,13 +123,12 @@ async function fetchCardDetail(cardId: string, mode?: string) {
 async function actionCard(cardId: string, action: "freeze" | "unfreeze") {
   const public_key = requirePublicKey();
   const payload = { card_id: cardId, action, public_key };
-  const resp = await axios.post(
-    `${BITVCARD_BASE}action/status/`,
+  const resp = await bitvcard.post(
+    "action/status/",
     payload,
     {
       // StroWallet docs require action/card_id/public_key in query params.
       params: payload,
-      timeout: 15000,
     }
   );
   return resp.data;
@@ -130,29 +136,28 @@ async function actionCard(cardId: string, action: "freeze" | "unfreeze") {
 
 async function fundCard(cardId: string, amount: string, mode?: string) {
   const public_key = requirePublicKey();
-  const resp = await axios.post(
-    `${BITVCARD_BASE}fund-card/`,
+  const resp = await bitvcard.post(
+    "fund-card/",
     { card_id: cardId, amount, public_key, mode },
-    { timeout: 15000 }
+    {}
   );
   return resp.data;
 }
 
 async function fetchCardTransactions(cardId: string, mode?: string) {
   const public_key = requirePublicKey();
-  const resp = await axios.post(
-    `${BITVCARD_BASE}card-transactions/`,
+  const resp = await bitvcard.post(
+    "card-transactions/",
     { card_id: cardId, public_key, mode },
-    { timeout: 15000 }
+    {}
   );
   return resp.data;
 }
 
 async function fetchCardHistory(cardId: string, page: number, take: number) {
   const public_key = requirePublicKey();
-  const resp = await axios.get("https://strowallet.com/api/apicard-transactions/", {
+  const resp = await api.get("apicard-transactions/", {
     params: { card_id: cardId, page, take, public_key },
-    timeout: 15000,
   });
   return resp.data;
 }
@@ -985,21 +990,49 @@ router.post("/cards/:cardId/refresh", requireAdmin, async (req, res) => {
     const mode = typeof req.body?.mode === "string" ? req.body.mode : undefined;
     const detail = await fetchCardDetail(cardId, mode);
     const data = detail?.data ?? detail;
-    await Card.findOneAndUpdate(
-      { cardId },
-      {
-        $set: {
-          nameOnCard: data?.name_on_card || data?.name,
-          cardType: data?.card_type || data?.brand,
-          status: data?.status || data?.state,
-          last4: data?.last4 || data?.card_last4 || data?.cardLast4,
-          currency: data?.currency || data?.ccy,
-          balance: data?.balance || data?.available_balance,
-          availableBalance: data?.available_balance,
+    if (isPrismaPersistenceEnabled()) {
+      await prisma.card.upsert({
+        where: { cardId },
+        create: {
+          cardId,
+          nameOnCard: data?.name_on_card || data?.name || null,
+          cardType: data?.card_type || data?.brand || null,
+          status: data?.status || data?.state || null,
+          last4: data?.last4 || data?.card_last4 || data?.cardLast4 || null,
+          currency: data?.currency || data?.ccy || null,
+          balance: data?.balance || data?.available_balance || null,
+          availableBalance: data?.available_balance || null,
+          lastSync: new Date(),
         },
-      },
-      { upsert: true, new: true }
-    );
+        update: {
+          nameOnCard: data?.name_on_card || data?.name || undefined,
+          cardType: data?.card_type || data?.brand || undefined,
+          status: data?.status || data?.state || undefined,
+          last4: data?.last4 || data?.card_last4 || data?.cardLast4 || undefined,
+          currency: data?.currency || data?.ccy || undefined,
+          balance: data?.balance || data?.available_balance || undefined,
+          availableBalance: data?.available_balance || undefined,
+          lastSync: new Date(),
+        },
+      });
+    } else {
+      await Card.findOneAndUpdate(
+        { cardId },
+        {
+          $set: {
+            nameOnCard: data?.name_on_card || data?.name,
+            cardType: data?.card_type || data?.brand,
+            status: data?.status || data?.state,
+            last4: data?.last4 || data?.card_last4 || data?.cardLast4,
+            currency: data?.currency || data?.ccy,
+            balance: data?.balance || data?.available_balance,
+            availableBalance: data?.available_balance,
+            lastSync: new Date(),
+          },
+        },
+        { upsert: true, new: true }
+      );
+    }
     return ok(res, { detail: data });
   } catch (e) {
     const { status, message } = normalizeError(e);

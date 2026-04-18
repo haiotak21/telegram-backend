@@ -4150,9 +4150,7 @@ async function sendMyCards(chatId: number, message?: any) {
       return;
     }
 
-    const remoteDetail = !card?.last4 || !card?.balance || !card?.currency
-      ? await fetchCardDetailSafe(String(card.cardId))
-      : null;
+    const remoteDetail = await fetchCardDetailSafe(String(card.cardId));
 
     if (remoteDetail) {
       card = await prisma.card.update({
@@ -4185,7 +4183,8 @@ async function sendMyCards(chatId: number, message?: any) {
       `Card Type: ${String(card.cardType || "virtual").toLowerCase()}`,
       `Status: ${statusText}`,
       `Card Number: ${formatMaskedCard((remoteDetail?.last4 || card.last4) || undefined)}`,
-      `Card ID: ${String(card.cardId)}`,
+      `Billing: ${remoteDetail?.billing || "None"}`,
+      `Address: ${remoteDetail?.address || "None"}`,
       balanceLabel ? `Balance: ${balanceLabel}` : undefined,
     ].filter(Boolean) as string[];
     const freezeAction = isFrozenStatus(card.status || undefined) ? "CARD_UNFREEZE" : "CARD_FREEZE";
@@ -4260,7 +4259,6 @@ async function sendMyCards(chatId: number, message?: any) {
 
   const last4 = mergedDetail?.last4 || activeCard.last4 || latestRequest?.cardNumber?.slice(-4);
   const cardType = String(mergedDetail?.card_type || activeCard.cardType || latestRequest?.cardType || "virtual").toLowerCase();
-  const cardNumber = (mergedDetail?.card_number || (latestRequest as any)?.cardNumber || "").toString().replace(/\s+/g, "");
   const cvc = (mergedDetail?.cvc || (latestRequest as any)?.cvc || "").toString();
   const statusText = isFrozenStatus(activeCard.status) ? "❄️ Frozen" : "✅ Active";
   const balanceLabel = formatCardMoney(
@@ -4274,7 +4272,7 @@ async function sendMyCards(chatId: number, message?: any) {
     "💳 Your Virtual Card",
     `Card Type: ${cardType}`,
     `Status: ${statusText}`,
-    `Card Number: ${cardNumber || formatMaskedCard(last4)}`,
+    `Card Number: ${formatMaskedCard(last4)}`,
     `CVV: ${cvc || "None"}`,
     expiry ? `Expiry Date: ${expiry}` : undefined,
     balanceLabel ? `Balance: ${balanceLabel}` : undefined,
@@ -4559,20 +4557,56 @@ async function sendCardTransactions(chatId: number, cardId?: string, pageRaw: nu
       });
     }
 
-    const query: any = { userId };
-    if (cardId) query["metadata.cardId"] = cardId;
-    if (daysFilter > 0) {
-      const since = new Date(Date.now() - daysFilter * 24 * 60 * 60 * 1000);
-      query.createdAt = { $gte: since };
+    let txns: any[] = [];
+    let totalCount = 0;
+    let page = 1;
+
+    if (isPrismaPersistenceEnabled()) {
+      const since = daysFilter > 0 ? new Date(Date.now() - daysFilter * 24 * 60 * 60 * 1000) : null;
+      const rows = await prisma.transaction.findMany({
+        where: {
+          userId,
+          transactionType: "card",
+          ...(since ? { createdAt: { gte: since } } : {}),
+        },
+        orderBy: { createdAt: "desc" },
+        take: 500,
+      });
+
+      const filtered = cardId
+        ? (() => {
+            const out: any[] = [];
+            for (const row of rows as any[]) {
+              const metaCardId = String((row as any)?.metadata?.cardId || "");
+              const respCardId = String((row as any)?.responseData?.card_id || (row as any)?.responseData?.cardId || "");
+              if (metaCardId === cardId || respCardId === cardId) out.push(row);
+            }
+            return out;
+          })()
+        : rows;
+
+      totalCount = filtered.length;
+      const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+      page = Math.min(requestedPage, totalPages);
+      txns = filtered.slice((page - 1) * pageSize, page * pageSize);
+    } else {
+      const query: any = { userId };
+      if (cardId) query["metadata.cardId"] = cardId;
+      if (daysFilter > 0) {
+        const since = new Date(Date.now() - daysFilter * 24 * 60 * 60 * 1000);
+        query.createdAt = { $gte: since };
+      }
+      totalCount = await Transaction.countDocuments(query);
+      const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+      page = Math.min(requestedPage, totalPages);
+      txns = await Transaction.find(query)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * pageSize)
+        .limit(pageSize)
+        .lean();
     }
-    const totalCount = await Transaction.countDocuments(query);
+
     const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
-    const page = Math.min(requestedPage, totalPages);
-    const txns = await Transaction.find(query)
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * pageSize)
-      .limit(pageSize)
-      .lean();
 
     if (!txns.length) {
       await bot!.sendMessage(chatId, "No transactions found yet.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
@@ -4606,7 +4640,7 @@ async function sendCardTransactions(chatId: number, cardId?: string, pageRaw: nu
       keyboard.push([
         {
           text: `${label} ${amountLabel}`,
-          callback_data: `TXN_DETAIL::${(t as any)._id}`,
+          callback_data: `TXN_DETAIL::${String((t as any).id || (t as any)._id)}`,
         },
       ]);
     }
@@ -4666,7 +4700,9 @@ async function sendCardTransactionDetail(chatId: number, txnId: string) {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
   }
-  const txn = await Transaction.findById(txnId).lean();
+  const txn = isPrismaPersistenceEnabled()
+    ? await prisma.transaction.findUnique({ where: { id: txnId } })
+    : await Transaction.findById(txnId).lean();
   if (!txn) {
     await bot!.sendMessage(chatId, "Transaction not found.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
     return;
@@ -4690,7 +4726,9 @@ async function sendCardTransactionDetail(chatId: number, txnId: string) {
 
   let cardSuffix = "";
   if (meta.cardId) {
-    const card = await Card.findOne({ cardId: meta.cardId }).lean();
+    const card = isPrismaPersistenceEnabled()
+      ? await prisma.card.findUnique({ where: { cardId: String(meta.cardId) } })
+      : await Card.findOne({ cardId: meta.cardId }).lean();
     if (card?.last4) cardSuffix = `**** ${card.last4}`;
   }
 
