@@ -2412,9 +2412,18 @@
           const data = await safeFetch(
             `/api/wallet/balance/${encodeURIComponent(userId)}`,
           );
+          const source = data.source ? ` (${data.source})` : "";
+          const walletPart =
+            data.walletBalance != null
+              ? ` | Wallet: ${data.walletBalance} ${data.currency || "USDT"}`
+              : "";
+          const cardPart =
+            data.cardBalance != null
+              ? ` | Card: ${data.cardBalance} ${data.currency || "USDT"}`
+              : "";
           els.balanceStatus.textContent = `Balance: ${data.balance} ${
             data.currency || "USDT"
-          }`;
+          }${source}${walletPart}${cardPart}`;
           showToast("Balance fetched", "success");
         } catch (err) {
           els.balanceStatus.textContent = err.message;

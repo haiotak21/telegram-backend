@@ -4174,6 +4174,13 @@ async function sendMyCards(chatId: number, message?: any) {
     }
 
     const statusText = isFrozenStatus(card.status || undefined) ? "❄️ Frozen" : "✅ Active";
+    const cardName = String(remoteDetail?.name_on_card || card.nameOnCard || "").trim();
+    const fullCardNumberRaw = String(remoteDetail?.card_number || "").replace(/\s+/g, "").trim();
+    const fullCardNumber = fullCardNumberRaw.length >= 12
+      ? fullCardNumberRaw.replace(/(.{4})/g, "$1 ").trim()
+      : undefined;
+    const cvc = String(remoteDetail?.cvc || "").trim();
+    const validThru = extractExpiry(remoteDetail || card);
     const balanceLabel = formatCardMoney(
       (remoteDetail?.balance ?? remoteDetail?.available_balance ?? card.balance ?? user?.balance),
       remoteDetail?.currency || card.currency || user?.currency || "USD"
@@ -4182,7 +4189,10 @@ async function sendMyCards(chatId: number, message?: any) {
       "💳 Your Virtual Card",
       `Card Type: ${String(card.cardType || "virtual").toLowerCase()}`,
       `Status: ${statusText}`,
-      `Card Number: ${formatMaskedCard((remoteDetail?.last4 || card.last4) || undefined)}`,
+      cardName ? `Card Name: ${cardName}` : undefined,
+      `Card Number: ${fullCardNumber || formatMaskedCard((remoteDetail?.last4 || card.last4) || undefined)}`,
+      cvc ? `CVV: ${cvc}` : undefined,
+      validThru ? `Valid Thru: ${validThru}` : undefined,
       `Billing: ${remoteDetail?.billing || "None"}`,
       `Address: ${remoteDetail?.address || "None"}`,
       balanceLabel ? `Balance: ${balanceLabel}` : undefined,
@@ -4260,6 +4270,11 @@ async function sendMyCards(chatId: number, message?: any) {
   const last4 = mergedDetail?.last4 || activeCard.last4 || latestRequest?.cardNumber?.slice(-4);
   const cardType = String(mergedDetail?.card_type || activeCard.cardType || latestRequest?.cardType || "virtual").toLowerCase();
   const cvc = (mergedDetail?.cvc || (latestRequest as any)?.cvc || "").toString();
+  const cardName = String(mergedDetail?.name_on_card || (activeCard as any)?.nameOnCard || latestRequest?.nameOnCard || "").trim();
+  const fullCardNumberRaw = String(mergedDetail?.card_number || (latestRequest as any)?.cardNumber || "").replace(/\s+/g, "").trim();
+  const fullCardNumber = fullCardNumberRaw.length >= 12
+    ? fullCardNumberRaw.replace(/(.{4})/g, "$1 ").trim()
+    : undefined;
   const statusText = isFrozenStatus(activeCard.status) ? "❄️ Frozen" : "✅ Active";
   const balanceLabel = formatCardMoney(
     mergedDetail?.balance ?? mergedDetail?.available_balance ?? activeCard.balance ?? user?.balance,
@@ -4272,9 +4287,10 @@ async function sendMyCards(chatId: number, message?: any) {
     "💳 Your Virtual Card",
     `Card Type: ${cardType}`,
     `Status: ${statusText}`,
-    `Card Number: ${formatMaskedCard(last4)}`,
+    cardName ? `Card Name: ${cardName}` : undefined,
+    `Card Number: ${fullCardNumber || formatMaskedCard(last4)}`,
     `CVV: ${cvc || "None"}`,
-    expiry ? `Expiry Date: ${expiry}` : undefined,
+    expiry ? `Valid Thru: ${expiry}` : undefined,
     balanceLabel ? `Balance: ${balanceLabel}` : undefined,
     `Billing: ${billing || "None"}`,
     `Address: ${address || "None"}`,

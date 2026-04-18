@@ -63,6 +63,44 @@ function requireAdmin(req: express.Request, res: express.Response, next: express
   return fail(res, "Unauthorized", 401);
 }
 
+function getBackendBaseCandidates() {
+  const port = process.env.PORT || 3000;
+  const configured = (process.env.BOT_BACKEND_BASE || "").trim();
+  const defaults = [`http://127.0.0.1:${port}`, `http://localhost:${port}`];
+  const all = [...defaults, configured].filter(Boolean).map((v) => String(v).replace(/\/$/, ""));
+  return Array.from(new Set(all));
+}
+
+function isRetryableBackendError(err: any) {
+  const code = String(err?.code || "").toUpperCase();
+  if (["ENOTFOUND", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ECONNRESET"].includes(code)) return true;
+  const message = String(err?.message || "").toLowerCase();
+  if (message.includes("getaddrinfo enotfound") || message.includes("enotfound")) return true;
+  const status = Number(err?.response?.status || 0);
+  return status >= 500;
+}
+
+async function createCardRequestViaBackend(payload: Record<string, any>) {
+  let lastError: any;
+  for (const base of getBackendBaseCandidates()) {
+    try {
+      return await axios.post(`${base}/api/card-requests`, payload, { timeout: 30000 });
+    } catch (err: any) {
+      lastError = err;
+      if (!isRetryableBackendError(err)) {
+        throw err;
+      }
+      console.warn("[wallet] create-card-request backend attempt failed", {
+        base,
+        code: err?.code,
+        status: err?.response?.status,
+        message: err?.response?.data?.error || err?.message,
+      });
+    }
+  }
+  throw lastError;
+}
+
 
 // Admin: list runtime audits
 router.get("/audit", requireAdmin, async (_req, res) => {
@@ -95,10 +133,49 @@ router.get("/balance/:userId", async (req, res) => {
     const params = BalanceParamSchema.parse(req.params);
     if (isPrismaPersistenceEnabled()) {
       const user = await prisma.user.findUnique({ where: { userId: params.userId } });
-      return ok(res, { balance: user?.balance ?? 0, currency: user?.currency ?? "USDT" });
+      const customerEmail = user?.customerEmail || undefined;
+      const card = await prisma.card.findFirst({
+        where: {
+          OR: [{ userId: params.userId }, ...(customerEmail ? [{ customerEmail }] : [])],
+        },
+        orderBy: { updatedAt: "desc" },
+      });
+      const walletBalance = Number(user?.balance ?? 0);
+      const cardBalanceCandidate = Number(card?.balance ?? card?.availableBalance ?? NaN);
+      const hasCardBalance = Number.isFinite(cardBalanceCandidate);
+      const balance = hasCardBalance ? cardBalanceCandidate : (Number.isFinite(walletBalance) ? walletBalance : 0);
+      const currency = (card?.currency || user?.currency || "USDT").toUpperCase();
+      return ok(res, {
+        balance,
+        currency,
+        walletBalance: Number.isFinite(walletBalance) ? walletBalance : 0,
+        cardBalance: hasCardBalance ? cardBalanceCandidate : null,
+        source: hasCardBalance ? "card" : "wallet",
+      });
     }
     const user = await User.findOne({ userId: params.userId }).lean();
-    return ok(res, { balance: user?.balance ?? 0, currency: user?.currency ?? "USDT" });
+    const customer = await Customer.findOne({ userId: params.userId }).lean();
+    const customerEmail = customer?.email || user?.customerEmail;
+    const card = await Card.findOne({
+      $or: [
+        { userId: params.userId },
+        ...(customerEmail ? [{ customerEmail }] : []),
+      ],
+    })
+      .sort({ updatedAt: -1 })
+      .lean();
+    const walletBalance = Number(user?.balance ?? 0);
+    const cardBalanceCandidate = Number((card as any)?.balance ?? (card as any)?.availableBalance ?? NaN);
+    const hasCardBalance = Number.isFinite(cardBalanceCandidate);
+    const balance = hasCardBalance ? cardBalanceCandidate : (Number.isFinite(walletBalance) ? walletBalance : 0);
+    const currency = String((card as any)?.currency || user?.currency || "USDT").toUpperCase();
+    return ok(res, {
+      balance,
+      currency,
+      walletBalance: Number.isFinite(walletBalance) ? walletBalance : 0,
+      cardBalance: hasCardBalance ? cardBalanceCandidate : null,
+      source: hasCardBalance ? "card" : "wallet",
+    });
   } catch (err: any) {
     const message = err?.errors?.[0]?.message || err?.message || "Invalid request";
     return fail(res, message, 400);
@@ -263,11 +340,9 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
         const customerEmail = userRecord.customerEmail;
         if (!customerEmail) return fail(res, "User email is missing for card request", 400);
 
-        const backendBase = process.env.BOT_BACKEND_BASE || `http://127.0.0.1:${process.env.PORT || 3000}`;
         let createResp: any;
         try {
-          createResp = await axios.post(
-            `${backendBase}/api/card-requests`,
+          createResp = await createCardRequestViaBackend(
             {
               userId,
               nameOnCard,
@@ -279,7 +354,6 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
                 transactionId: tx.id,
               },
             },
-            { timeout: 30000 }
           );
         } catch (createErr: any) {
           const msg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
@@ -480,11 +554,9 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
         return fail(res, "User email is missing for card request", 400);
       }
 
-      const backendBase = process.env.BOT_BACKEND_BASE || `http://127.0.0.1:${process.env.PORT || 3000}`;
       let createResp: any;
       try {
-        createResp = await axios.post(
-          `${backendBase}/api/card-requests`,
+        createResp = await createCardRequestViaBackend(
           {
             userId,
             nameOnCard,
@@ -496,7 +568,6 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
               transactionId: String(tx._id),
             },
           },
-          { timeout: 30000 }
         );
       } catch (createErr: any) {
         await session.abortTransaction();
