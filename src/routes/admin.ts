@@ -9,7 +9,7 @@ import Card from "../models/Card";
 import CardRequest from "../models/CardRequest";
 import { TelegramLink } from "../models/TelegramLink";
 import Transaction from "../models/Transaction";
-import { notifyCardStatusChanged } from "../services/botService";
+import { notifyCardLinkedToUser, notifyCardStatusChanged } from "../services/botService";
 import { createBroadcastJob, getBroadcastJobById, getBroadcastTargetCount, listBroadcastJobs } from "../services/broadcastService";
 import { auditCardTransactions, getReconciliationSummary, reconcileAllCards, reconcileCard } from "../services/reconciliationService";
 import { ok, fail } from "../utils/apiResponse";
@@ -670,23 +670,34 @@ router.post("/cards/link", requireAdmin, async (req, res) => {
   try {
     const body = CardLinkSchema.parse(req.body || {});
     const cardId = body.cardId.trim();
-    let userId = body.userId;
-    let customerEmail = body.customerEmail;
+    let userId = body.userId?.trim();
+    let customerEmail = body.customerEmail?.trim();
 
-    if (!userId && customerEmail) {
-      const customer = await Customer.findOne({ email: customerEmail }).lean();
-      if (customer?.userId) userId = customer.userId;
-    }
-    if (!userId && customerEmail) {
-      const user = await User.findOne({ customerEmail }).lean();
-      if (user?.userId) userId = user.userId;
-    }
-    if (userId && !customerEmail) {
-      const customer = await Customer.findOne({ userId }).lean();
-      customerEmail = customer?.email;
-      if (!customerEmail) {
-        const user = await User.findOne({ userId }).lean();
-        customerEmail = user?.customerEmail;
+    if (isPrismaPersistenceEnabled()) {
+      if (userId) {
+        const prismaUser = await prisma.user.findUnique({ where: { userId } });
+        if (!prismaUser) return fail(res, "User not found for provided telegram userId", 404);
+        customerEmail = customerEmail || prismaUser.customerEmail || undefined;
+      } else if (customerEmail) {
+        const prismaUser = await prisma.user.findFirst({ where: { customerEmail } });
+        if (prismaUser?.userId) userId = prismaUser.userId;
+      }
+    } else {
+      if (!userId && customerEmail) {
+        const customer = await Customer.findOne({ email: customerEmail }).lean();
+        if (customer?.userId) userId = customer.userId;
+      }
+      if (!userId && customerEmail) {
+        const user = await User.findOne({ customerEmail }).lean();
+        if (user?.userId) userId = user.userId;
+      }
+      if (userId && !customerEmail) {
+        const customer = await Customer.findOne({ userId }).lean();
+        customerEmail = customer?.email;
+        if (!customerEmail) {
+          const user = await User.findOne({ userId }).lean();
+          customerEmail = user?.customerEmail;
+        }
       }
     }
 
@@ -713,9 +724,40 @@ router.post("/cards/link", requireAdmin, async (req, res) => {
       lastSync: new Date(),
     };
 
-    await Card.findOneAndUpdate({ cardId }, { $set: cardUpdate }, { upsert: true, new: true });
+    if (isPrismaPersistenceEnabled()) {
+      await prisma.card.upsert({
+        where: { cardId },
+        create: {
+          cardId,
+          userId: userId || null,
+          customerEmail: customerEmail || null,
+          nameOnCard: cardUpdate.nameOnCard || null,
+          cardType: cardUpdate.cardType || null,
+          status: cardUpdate.status || null,
+          last4: cardUpdate.last4 || null,
+          currency: cardUpdate.currency || null,
+          balance: cardUpdate.balance || null,
+          availableBalance: cardUpdate.availableBalance || null,
+          lastSync: cardUpdate.lastSync || new Date(),
+        },
+        update: {
+          userId: userId || null,
+          customerEmail: customerEmail || null,
+          nameOnCard: cardUpdate.nameOnCard || undefined,
+          cardType: cardUpdate.cardType || undefined,
+          status: cardUpdate.status || undefined,
+          last4: cardUpdate.last4 || undefined,
+          currency: cardUpdate.currency || undefined,
+          balance: cardUpdate.balance || undefined,
+          availableBalance: cardUpdate.availableBalance || undefined,
+          lastSync: cardUpdate.lastSync || new Date(),
+        },
+      });
+    } else {
+      await Card.findOneAndUpdate({ cardId }, { $set: cardUpdate }, { upsert: true, new: true });
+    }
 
-    if (userId) {
+    if (!isPrismaPersistenceEnabled() && userId) {
       const chatId = Number(userId);
       if (Number.isFinite(chatId)) {
         await TelegramLink.findOneAndUpdate(
@@ -726,7 +768,7 @@ router.post("/cards/link", requireAdmin, async (req, res) => {
       }
     }
 
-    if (customerEmail) {
+    if (!isPrismaPersistenceEnabled() && customerEmail) {
       await TelegramLink.findOneAndUpdate(
         { customerEmail },
         { $addToSet: { cardIds: cardId } },
@@ -735,24 +777,67 @@ router.post("/cards/link", requireAdmin, async (req, res) => {
     }
 
     if (userId || customerEmail) {
-      await CardRequest.findOneAndUpdate(
-        {
-          $or: [
+      if (isPrismaPersistenceEnabled()) {
+        const where: any = {
+          status: { in: ["pending", "approved"] },
+          OR: [
             ...(userId ? [{ userId }] : []),
             ...(customerEmail ? [{ customerEmail }] : []),
           ],
-        },
-        {
-          $set: {
-            cardId,
-            status: "approved",
-            ...(providedCardNumber ? { cardNumber: providedCardNumber } : {}),
-            ...(body.cvc ? { cvc: body.cvc } : {}),
-            ...(body.expiry ? { "metadata.expiry": body.expiry } : {}),
+        };
+        const latestRequest = await prisma.cardRequest.findFirst({
+          where,
+          orderBy: { updatedAt: "desc" },
+        });
+        if (latestRequest) {
+          await prisma.cardRequest.update({
+            where: { id: latestRequest.id },
+            data: {
+              cardId,
+              status: "approved",
+              ...(providedCardNumber ? { cardNumber: providedCardNumber } : {}),
+              ...(body.cvc ? { cvc: body.cvc } : {}),
+              ...(body.expiry
+                ? { metadata: { ...((latestRequest.metadata as any) || {}), expiry: body.expiry } }
+                : {}),
+            },
+          });
+        }
+      } else {
+        await CardRequest.findOneAndUpdate(
+          {
+            $or: [
+              ...(userId ? [{ userId }] : []),
+              ...(customerEmail ? [{ customerEmail }] : []),
+            ],
           },
-        },
-        { new: true, upsert: true }
-      );
+          {
+            $set: {
+              cardId,
+              status: "approved",
+              ...(providedCardNumber ? { cardNumber: providedCardNumber } : {}),
+              ...(body.cvc ? { cvc: body.cvc } : {}),
+              ...(body.expiry ? { "metadata.expiry": body.expiry } : {}),
+            },
+          },
+          { new: true, upsert: true }
+        );
+      }
+    }
+
+    if (userId) {
+      await notifyCardLinkedToUser(userId, {
+        cardId,
+        cardType: cardUpdate.cardType,
+        nameOnCard: cardUpdate.nameOnCard,
+        last4: cardUpdate.last4,
+      }).catch((err) => {
+        console.warn("[admin] failed to send linked-card notification", {
+          userId,
+          cardId,
+          error: (err as any)?.message || String(err),
+        });
+      });
     }
 
     return ok(res, { cardId, userId, customerEmail, linked: true });

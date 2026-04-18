@@ -824,6 +824,32 @@
               <button id="cardSearchBtn" type="button">Search</button>
             </div>
           </div>
+          <hr class="divider" />
+          <div class="row">
+            <label>Assign Manually Created StroWallet Card</label>
+            <div class="row inline">
+              <div>
+                <label>Telegram User ID</label>
+                <input
+                  id="manualLinkUserId"
+                  type="text"
+                  placeholder="e.g. 376939673"
+                />
+              </div>
+              <div>
+                <label>Card ID</label>
+                <input
+                  id="manualLinkCardId"
+                  type="text"
+                  placeholder="StroWallet card_id"
+                />
+              </div>
+            </div>
+            <div class="toolbar">
+              <button id="manualLinkBtn" type="button">Confirm Link</button>
+            </div>
+            <div id="manualLinkStatus" class="status">—</div>
+          </div>
           <div class="data-box" id="cardTable">
             No cards yet. Search to view.
           </div>
@@ -1090,6 +1116,10 @@
         cardSearch: document.getElementById("cardSearch"),
         cardSearchBtn: document.getElementById("cardSearchBtn"),
         cardRefreshAll: document.getElementById("cardRefreshAll"),
+        manualLinkUserId: document.getElementById("manualLinkUserId"),
+        manualLinkCardId: document.getElementById("manualLinkCardId"),
+        manualLinkBtn: document.getElementById("manualLinkBtn"),
+        manualLinkStatus: document.getElementById("manualLinkStatus"),
         cardTable: document.getElementById("cardTable"),
         cardStatusText: document.getElementById("cardStatusText"),
         cardTxnRefresh: document.getElementById("cardTxnRefresh"),
@@ -2099,6 +2129,39 @@
         }
       }
 
+      async function linkManualCardToUser() {
+        if (!hasToken()) {
+          els.manualLinkStatus.textContent = "Missing admin token";
+          return;
+        }
+
+        const userId = (els.manualLinkUserId.value || "").trim();
+        const cardId = (els.manualLinkCardId.value || "").trim();
+        if (!userId || !cardId) {
+          els.manualLinkStatus.textContent =
+            "Telegram User ID and Card ID are required";
+          return;
+        }
+
+        setLoading(els.manualLinkBtn, true);
+        els.manualLinkStatus.textContent = "Linking card...";
+        try {
+          const data = await safeFetch("/api/admin/cards/link", {
+            method: "POST",
+            body: JSON.stringify({ userId, cardId }),
+          });
+          els.manualLinkStatus.textContent = `Linked card ${data.cardId} to user ${data.userId || userId}`;
+          showToast("Card linked to user", "success");
+          await loadCards();
+        } catch (err) {
+          const msg = err?.message || "Failed to link card";
+          els.manualLinkStatus.textContent = msg;
+          showToast(msg, "error");
+        } finally {
+          setLoading(els.manualLinkBtn, false);
+        }
+      }
+
       function setLoading(btn, isLoading) {
         if (!btn) return;
         btn.disabled = isLoading;
@@ -2571,6 +2634,17 @@
             showToast(err?.message || "Refresh failed", "error");
           } finally {
             setLoading(els.cardRefreshAll, false);
+          }
+        });
+      }
+      if (els.manualLinkBtn) {
+        els.manualLinkBtn.addEventListener("click", linkManualCardToUser);
+      }
+      if (els.manualLinkCardId) {
+        els.manualLinkCardId.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            linkManualCardToUser();
           }
         });
       }

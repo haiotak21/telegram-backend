@@ -152,6 +152,42 @@ const STROWALLET_LOW_BALANCE_ALERT_CHAT_ID = (process.env.STROWALLET_LOW_BALANCE
 const STROWALLET_LOW_BALANCE_ALERT_COOLDOWN_MS = Number(process.env.STROWALLET_LOW_BALANCE_ALERT_COOLDOWN_MS || 900000);
 let lastLowBalanceAlertAt = 0;
 
+function isLowBalanceErrorMessage(message?: string) {
+  const m = String(message || "").toLowerCase();
+  return (
+    m.includes("insufficient balance") ||
+    m.includes("not enough balance") ||
+    m.includes("low balance") ||
+    m.includes("insufficient wallet")
+  );
+}
+
+async function notifyAdminLowBalanceIssue(detail?: string) {
+  if (!bot) return;
+  const now = Date.now();
+  if (now - lastLowBalanceAlertAt < STROWALLET_LOW_BALANCE_ALERT_COOLDOWN_MS) return;
+  lastLowBalanceAlertAt = now;
+
+  const lines = [
+    "⚠️ StroWallet balance issue detected",
+    "Users may have delayed card provisioning due to provider balance.",
+    detail ? `Detail: ${detail}` : undefined,
+    `Time: ${new Date().toISOString()}`,
+  ].filter(Boolean) as string[];
+
+  try {
+    const targetChat: any = /^-?\d+$/.test(STROWALLET_LOW_BALANCE_ALERT_CHAT_ID)
+      ? Number(STROWALLET_LOW_BALANCE_ALERT_CHAT_ID)
+      : STROWALLET_LOW_BALANCE_ALERT_CHAT_ID;
+    await bot.sendMessage(targetChat, lines.join("\n"), {
+      disable_web_page_preview: true,
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+  } catch (e) {
+    console.error("[bot] Failed to send admin low balance alert", e);
+  }
+}
+
 // Tracks the last amount a user selected per payment method so we can validate against receipt
 const depositSelections = new Map<number, { method: PaymentMethod; amount: number }>();
 const cardRequestSelections = new Map<number, {
@@ -1527,6 +1563,26 @@ export async function notifyCardRequestApproved(userId: string, payload: { cardI
   await bot.sendMessage(Number(userId), lines.join("\n"), { disable_web_page_preview: true, reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
 }
 
+export async function notifyCardLinkedToUser(userId: string, payload: { cardId?: string; cardType?: string; nameOnCard?: string; last4?: string }) {
+  if (!bot) return;
+  const chatId = Number(userId);
+  if (!Number.isFinite(chatId)) return;
+  const suffix = payload.last4 ? `••••${payload.last4}` : undefined;
+  const lines = [
+    "✅ Virtual card assigned",
+    "A virtual card has been assigned to your account by admin.",
+    payload.cardId ? `Card ID: ${payload.cardId}` : undefined,
+    suffix ? `Card: ${suffix}` : undefined,
+    payload.cardType ? `Type: ${payload.cardType}` : undefined,
+    payload.nameOnCard ? `Name: ${payload.nameOnCard}` : undefined,
+    "Open My Card to view details.",
+  ].filter(Boolean) as string[];
+  await bot.sendMessage(chatId, lines.join("\n"), {
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+  });
+}
+
 export async function notifyCardRequestDeclined(userId: string, reason?: string) {
   if (!bot) return;
   const lines = [
@@ -2730,6 +2786,17 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
       return;
     } catch (e: any) {
       const messageText = e?.response?.data?.error || e?.message || "Your card request could not be approved.";
+      if (isLowBalanceErrorMessage(messageText)) {
+        await notifyAdminLowBalanceIssue(messageText).catch(() => {});
+        await bot!.sendMessage(Number(userId), [
+          "✅ Payment received.",
+          "Your card request is being processed.",
+          "Provisioning may take a little longer than usual.",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+      }
       await bot!.sendMessage(Number(userId), `❌ ${messageText}`, {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
@@ -2760,6 +2827,17 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
     }
   } catch (e: any) {
     const messageText = e?.response?.data?.error || "Your card request could not be approved.";
+    if (isLowBalanceErrorMessage(messageText)) {
+      await notifyAdminLowBalanceIssue(messageText).catch(() => {});
+      await bot!.sendMessage(Number(userId), [
+        "✅ Payment received.",
+        "Your card request is being processed.",
+        "Provisioning may take a little longer than usual.",
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      return;
+    }
     await bot!.sendMessage(Number(userId), `❌ ${messageText}`, {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
@@ -4037,7 +4115,30 @@ async function sendMyCards(chatId: number, message?: any) {
   const userId = String(chatId);
   if (isPrismaOnlyMode()) {
     const user = await prisma.user.findUnique({ where: { userId } });
-    const card = await getPrimaryCardForUser(userId);
+    let card: any = await getPrimaryCardForUser(userId);
+    if (!card) {
+      const recoveredCardId = await resolveCreatedCardId({
+        userId,
+        customerEmail: user?.customerEmail || undefined,
+        attempts: 1,
+      });
+      if (recoveredCardId) {
+        card = await prisma.card.upsert({
+          where: { cardId: recoveredCardId },
+          create: {
+            cardId: recoveredCardId,
+            userId,
+            customerEmail: user?.customerEmail || null,
+            status: "active",
+          },
+          update: {
+            userId,
+            customerEmail: user?.customerEmail || null,
+            status: "active",
+          },
+        });
+      }
+    }
     if (!card) {
       await editOrSend(chatId, message, [
         "💳 Your Virtual Card",
@@ -4048,13 +4149,43 @@ async function sendMyCards(chatId: number, message?: any) {
       });
       return;
     }
+
+    const remoteDetail = !card?.last4 || !card?.balance || !card?.currency
+      ? await fetchCardDetailSafe(String(card.cardId))
+      : null;
+
+    if (remoteDetail) {
+      card = await prisma.card.update({
+        where: { cardId: String(card.cardId) },
+        data: {
+          status: remoteDetail.status || card.status || undefined,
+          last4: remoteDetail.last4 || card.last4 || null,
+          currency: remoteDetail.currency || card.currency || null,
+          balance:
+            remoteDetail.balance != null
+              ? String(remoteDetail.balance)
+              : remoteDetail.available_balance != null
+                ? String(remoteDetail.available_balance)
+                : card.balance,
+          availableBalance:
+            remoteDetail.available_balance != null
+              ? String(remoteDetail.available_balance)
+              : card.availableBalance,
+        },
+      });
+    }
+
     const statusText = isFrozenStatus(card.status || undefined) ? "❄️ Frozen" : "✅ Active";
-    const balanceLabel = formatCardMoney(card.balance ?? user?.balance, card.currency || user?.currency || "USD");
+    const balanceLabel = formatCardMoney(
+      (remoteDetail?.balance ?? remoteDetail?.available_balance ?? card.balance ?? user?.balance),
+      remoteDetail?.currency || card.currency || user?.currency || "USD"
+    );
     const lines = [
       "💳 Your Virtual Card",
       `Card Type: ${String(card.cardType || "virtual").toLowerCase()}`,
       `Status: ${statusText}`,
-      `Card Number: ${formatMaskedCard(card.last4 || undefined)}`,
+      `Card Number: ${formatMaskedCard((remoteDetail?.last4 || card.last4) || undefined)}`,
+      `Card ID: ${String(card.cardId)}`,
       balanceLabel ? `Balance: ${balanceLabel}` : undefined,
     ].filter(Boolean) as string[];
     const freezeAction = isFrozenStatus(card.status || undefined) ? "CARD_UNFREEZE" : "CARD_FREEZE";
