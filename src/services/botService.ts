@@ -27,6 +27,7 @@ type PendingAction =
   | { type: "card" }
   | { type: "verify"; method: PaymentMethod; expectedAmount?: number }
   | { type: "deposit_amount"; method: PaymentMethod }
+  | { type: "deposit_convert_amount" }
   | { type: "card_request_verify"; method: PaymentMethod };
 const pendingActions = new Map<string, PendingAction>();
 
@@ -150,6 +151,8 @@ const TELEGRAM_BOT_USE_DB_LOCK = String(process.env.TELEGRAM_BOT_USE_DB_LOCK ?? 
 const STROWALLET_LOW_BALANCE_THRESHOLD_USD = Number(process.env.STROWALLET_LOW_BALANCE_THRESHOLD_USD || 50);
 const STROWALLET_LOW_BALANCE_ALERT_CHAT_ID = (process.env.STROWALLET_LOW_BALANCE_ALERT_CHAT_ID || "504201714").trim();
 const STROWALLET_LOW_BALANCE_ALERT_COOLDOWN_MS = Number(process.env.STROWALLET_LOW_BALANCE_ALERT_COOLDOWN_MS || 900000);
+const BOT_DEPOSIT_FIXED_FEE_USD = Number(process.env.BOT_DEPOSIT_FIXED_FEE_USD || 1.9);
+const BOT_DEPOSIT_PERCENT_FEE = Number(process.env.BOT_DEPOSIT_PERCENT_FEE || 1.9);
 let lastLowBalanceAlertAt = 0;
 
 function isLowBalanceErrorMessage(message?: string) {
@@ -189,7 +192,15 @@ async function notifyAdminLowBalanceIssue(detail?: string) {
 }
 
 // Tracks the last amount a user selected per payment method so we can validate against receipt
-const depositSelections = new Map<number, { method: PaymentMethod; amount: number }>();
+const depositSelections = new Map<number, {
+  method: PaymentMethod;
+  amountEtb: number;
+  amountUsd: number;
+  feeUsd: number;
+  totalUsd: number;
+  totalEtb: number;
+  rate: number;
+}>();
 const cardRequestSelections = new Map<number, {
   cardAmountUsd: number;
   feeUsd: number;
@@ -867,13 +878,25 @@ export async function initBot() {
       return;
     }
 
+    if (action === "DEPOSIT_CONVERT") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      {
+        const key = chatKey(chatId);
+        if (key) pendingActions.set(key, { type: "deposit_convert_amount" });
+      }
+      await bot!.sendMessage(chatId, "Enter USD amount to convert (example: 5).", {
+        reply_markup: { force_reply: true },
+      });
+      return;
+    }
+
     if (action.startsWith("DEPOSIT_VERIFY::")) {
       const method = action.replace("DEPOSIT_VERIFY::", "") as PaymentMethod;
       if (method !== "telebirr" && method !== "cbe") return;
       await bot!.answerCallbackQuery(query.id).catch(() => { });
 
       const selected = depositSelections.get(chatId);
-      if (!selected || selected.method !== method || !Number.isFinite(selected.amount) || selected.amount < MIN_DEPOSIT_ETB) {
+      if (!selected || selected.method !== method || !Number.isFinite(selected.amountEtb) || selected.amountEtb < MIN_DEPOSIT_ETB) {
         await bot!.sendMessage(chatId, "Please select a deposit amount first, then verify payment.", {
           reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
         });
@@ -1006,7 +1029,7 @@ export async function initBot() {
         const b = result.body as any;
         if (b?.success) {
           const selectedFromPending = Number.isFinite(pending.expectedAmount)
-            ? { method, amount: Number(pending.expectedAmount) }
+            ? { method, amountEtb: Number(pending.expectedAmount), totalEtb: Number(pending.expectedAmount) }
             : undefined;
           const selectedFromSession = depositSelections.get(msg.chat.id);
           const selected = selectedFromPending || selectedFromSession;
@@ -1067,7 +1090,7 @@ export async function initBot() {
             const depositResult = await creditVerifiedDeposit({
               userId: String(msg.chat.id),
               paymentMethod: method,
-              amountEtb: amountNum,
+              amountEtb: Number((selected as any)?.amountEtb || amountNum),
               transactionNumber: verifiedKey,
               referenceNumber: altKey,
               responseData: b.raw ?? b,
@@ -1171,7 +1194,7 @@ export async function initBot() {
               userId: String(msg.chat.id),
               paymentMethod: method,
               transactionNumber: normalizedTxn,
-              expectedAmountEtb: selected?.amount ?? pending.expectedAmount,
+              expectedAmountEtb: selected?.amountEtb ?? pending.expectedAmount,
               reason: b?.message || "Automatic verifier returned failure",
               responseData: b,
             });
@@ -1206,7 +1229,7 @@ export async function initBot() {
             userId: String(msg.chat.id),
             paymentMethod: method,
             transactionNumber: normalizedTxn,
-            expectedAmountEtb: selected?.amount ?? pending.expectedAmount,
+            expectedAmountEtb: selected?.amountEtb ?? pending.expectedAmount,
             reason: e?.message || "Automatic verifier threw an error",
             responseData: { error: e?.message || String(e) },
           });
@@ -1489,6 +1512,10 @@ export async function initBot() {
       }
       clearPendingAction(msg.chat.id);
       await sendDepositSummary(msg.chat.id, method, amount);
+    } else if (pending.type === "deposit_convert_amount") {
+      const usdAmount = Number(text.replace(/,/g, ""));
+      clearPendingAction(msg.chat.id);
+      await sendDepositConversionPreview(msg.chat.id, usdAmount);
     }
   });
 }
@@ -1889,7 +1916,7 @@ async function startVerificationFlow(chatId: number, method: PaymentMethod) {
   const key = chatKey(chatId);
   if (key) {
     const selected = depositSelections.get(chatId);
-    const expectedAmount = selected && selected.method === method ? selected.amount : undefined;
+    const expectedAmount = selected && selected.method === method ? selected.amountEtb : undefined;
     pendingActions.set(key, { type: "verify", method, expectedAmount });
   }
   await bot!.sendMessage(chatId, buildVerificationHint(method), {
@@ -2056,10 +2083,10 @@ function extractReceiptFields(body: any) {
 function validateVerificationResult(params: {
   method: PaymentMethod;
   body: any;
-  selected?: { method: PaymentMethod; amount: number };
+  selected?: { method: PaymentMethod; amountEtb?: number; totalEtb?: number; amount?: number };
 }) {
   const { method, body, selected } = params;
-  const { receiverName, receiverAccount, receiverPhone, payerPhone, amount } = extractReceiptFields(body);
+  const { receiverName, receiverAccount, receiverPhone, payerPhone, amount, totalPaid } = extractReceiptFields(body);
   const errors: string[] = [];
 
   const expectedName = method === "telebirr" ? EXPECTED_TELEBIRR_NAME : EXPECTED_RECEIVER_NAME;
@@ -2095,9 +2122,15 @@ function validateVerificationResult(params: {
   }
 
   if (selected && selected.method === method) {
-    const expectedAmt = selected.amount;
-    if (typeof amount !== "number") errors.push("Payment amount is missing in provider response.");
-    else if (Math.abs(amount - expectedAmt) > 0.01) errors.push("Payment amount does not match the selected deposit amount.");
+    const expectedTotal = Number(selected.totalEtb ?? selected.amountEtb ?? selected.amount ?? NaN);
+    const paid = typeof totalPaid === "number" ? totalPaid : amount;
+    if (!Number.isFinite(expectedTotal)) {
+      errors.push("Expected payment amount could not be determined.");
+    } else if (typeof paid !== "number") {
+      errors.push("Payment total is missing in provider response.");
+    } else if (Math.abs(paid - expectedTotal) > 2) {
+      errors.push("Payment total does not match the expected amount (including service fee).");
+    }
   }
 
   return errors;
@@ -2465,6 +2498,7 @@ function buildDepositMethodKeyboard(): InlineKeyboardButton[][] {
       { text: "Telebirr", callback_data: "DEPOSIT_METHOD::telebirr" },
       { text: "CBE", callback_data: "DEPOSIT_METHOD::cbe" },
     ],
+    [{ text: "🧮 Conversion", callback_data: "DEPOSIT_CONVERT" }],
     [MENU_BUTTON],
   ];
 }
@@ -2486,6 +2520,43 @@ function getCardRequestBaseAmount() {
 
 function roundMoney(value: number) {
   return Math.round(value * 100) / 100;
+}
+
+function computeDepositQuoteByEtb(amountEtb: number, rate: number) {
+  const amountUsd = amountEtb / rate;
+  const feeUsd = BOT_DEPOSIT_FIXED_FEE_USD + (amountUsd * BOT_DEPOSIT_PERCENT_FEE) / 100;
+  const totalUsd = amountUsd + feeUsd;
+  const totalEtb = totalUsd * rate;
+  return {
+    amountUsd: roundMoney(amountUsd),
+    feeUsd: roundMoney(feeUsd),
+    totalUsd: roundMoney(totalUsd),
+    totalEtb: roundMoney(totalEtb),
+  };
+}
+
+async function sendDepositConversionPreview(chatId: number, usdAmount: number) {
+  if (!Number.isFinite(usdAmount) || usdAmount <= 0) {
+    await bot!.sendMessage(chatId, "Please enter a valid USD amount greater than 0.", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+    return;
+  }
+  const config = await loadPricingConfig();
+  const rate = Number(config.usdtRate) > 0 ? Number(config.usdtRate) : 220;
+  const feeUsd = BOT_DEPOSIT_FIXED_FEE_USD + (usdAmount * BOT_DEPOSIT_PERCENT_FEE) / 100;
+  const totalUsd = usdAmount + feeUsd;
+  const totalEtb = totalUsd * rate;
+  const lines = [
+    "🧮 Deposit Converter",
+    `Requested amount: $${usdAmount.toFixed(2)}`,
+    `Service fee: $${BOT_DEPOSIT_FIXED_FEE_USD.toFixed(2)} + ${BOT_DEPOSIT_PERCENT_FEE.toFixed(2)}%`,
+    `Total to pay: $${totalUsd.toFixed(2)} or ${totalEtb.toFixed(2)} ETB`,
+    `Rate: 1 USDT = ${rate.toFixed(2)} ETB`,
+  ];
+  await bot!.sendMessage(chatId, lines.join("\n"), {
+    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+  });
 }
 
 async function sendDepositAmountSelect(chatId: number, method: PaymentMethod) {
@@ -2510,12 +2581,26 @@ async function sendDepositSummary(chatId: number, method: PaymentMethod, amount:
   }
 
   const meta = DEPOSIT_ACCOUNTS[method];
-  depositSelections.set(chatId, { method, amount });
+  const config = await loadPricingConfig();
+  const rate = Number(config.usdtRate) > 0 ? Number(config.usdtRate) : 220;
+  const quote = computeDepositQuoteByEtb(amount, rate);
+  depositSelections.set(chatId, {
+    method,
+    amountEtb: amount,
+    amountUsd: quote.amountUsd,
+    feeUsd: quote.feeUsd,
+    totalUsd: quote.totalUsd,
+    totalEtb: quote.totalEtb,
+    rate,
+  });
   const lines = [
     `${meta.title}:`,
-    `Amount: ${amount} ETB`,
+    `Amount: $${quote.amountUsd.toFixed(2)}`,
+    `Service fee: $${BOT_DEPOSIT_FIXED_FEE_USD.toFixed(2)}+${BOT_DEPOSIT_PERCENT_FEE.toFixed(2)}%`,
     `Account: ${meta.account}`,
     `Name: ${meta.name}`,
+    "",
+    `Total to pay: $${quote.totalUsd.toFixed(2)} or ${quote.totalEtb.toFixed(2)} ETB`,
     "",
     "Tap Copy to copy the account number, pay, then Verify to share your receipt/reference.",
   ];
