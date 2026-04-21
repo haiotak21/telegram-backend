@@ -2551,8 +2551,7 @@ async function sendDepositConversionPreview(chatId: number, usdAmount: number) {
     "🧮 Deposit Converter",
     `Requested amount: $${usdAmount.toFixed(2)}`,
     `Service fee: $${BOT_DEPOSIT_FIXED_FEE_USD.toFixed(2)} + ${BOT_DEPOSIT_PERCENT_FEE.toFixed(2)}%`,
-    `Total to pay: $${totalUsd.toFixed(2)} or ${totalEtb.toFixed(2)} ETB`,
-    `Rate: 1 USDT = ${rate.toFixed(2)} ETB`,
+    `Total to pay: ${totalEtb.toFixed(2)} ETB`,
   ];
   await bot!.sendMessage(chatId, lines.join("\n"), {
     reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -2595,12 +2594,12 @@ async function sendDepositSummary(chatId: number, method: PaymentMethod, amount:
   });
   const lines = [
     `${meta.title}:`,
-    `Amount: $${quote.amountUsd.toFixed(2)}`,
+    `Amount: ${amount} ETB`,
     `Service fee: $${BOT_DEPOSIT_FIXED_FEE_USD.toFixed(2)}+${BOT_DEPOSIT_PERCENT_FEE.toFixed(2)}%`,
     `Account: ${meta.account}`,
     `Name: ${meta.name}`,
     "",
-    `Total to pay: $${quote.totalUsd.toFixed(2)} or ${quote.totalEtb.toFixed(2)} ETB`,
+    `Total to pay: ${quote.totalEtb.toFixed(2)} ETB`,
     "",
     "Tap Copy to copy the account number, pay, then Verify to share your receipt/reference.",
   ];
