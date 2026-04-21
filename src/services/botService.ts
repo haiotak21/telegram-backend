@@ -1108,22 +1108,42 @@ export async function initBot() {
             await bot!.sendMessage(msg.chat.id, lines.join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
             depositSelections.delete(msg.chat.id);
 
-            // Try to show the real, current card balance after credit is posted.
             const primaryCard = await getPrimaryCardForUser(String(msg.chat.id));
+            let autoTopupMessage: string | undefined;
+            if (primaryCard?.cardId && Number(depositResult.creditedUsdt || 0) > 0) {
+              const autoTopup = await autoTopupCardFromWalletCredit({
+                userId: String(msg.chat.id),
+                cardId: String(primaryCard.cardId),
+                amountUsdt: Number(depositResult.creditedUsdt || 0),
+              });
+              if (autoTopup.success) {
+                autoTopupMessage = `Deposited to card: ${Number(depositResult.creditedUsdt).toFixed(2)} USDT`;
+              } else {
+                autoTopupMessage = `Card top-up failed, amount kept in wallet: ${autoTopup.message || "unknown error"}`;
+              }
+            }
+
+            // Show latest card data and wallet after deposit/top-up.
             const liveCardDetail = primaryCard?.cardId ? await fetchCardDetailSafe(String(primaryCard.cardId)) : null;
             const liveCardBalance = liveCardDetail?.available_balance || liveCardDetail?.balance;
             const liveCardCurrency = (liveCardDetail?.currency || primaryCard?.currency || "USD").toUpperCase();
+            const userSnapshot = isPrismaPersistenceEnabled()
+              ? await prisma.user.findUnique({ where: { userId: String(msg.chat.id) } })
+              : await User.findOne({ userId: String(msg.chat.id) }).lean();
+            const walletNow = Number(userSnapshot?.balance || 0);
 
             await bot!.sendMessage(
               msg.chat.id,
               [
                 "✅ Payment Verified",
-                depositResult.creditedUsdt != null ? `Credited to wallet: ${Number(depositResult.creditedUsdt).toFixed(2)} USDT` : undefined,
-                depositResult.newBalance != null ? `Wallet balance: ${Number(depositResult.newBalance).toFixed(2)} USDT` : undefined,
+                autoTopupMessage || (depositResult.creditedUsdt != null ? `Credited to wallet: ${Number(depositResult.creditedUsdt).toFixed(2)} USDT` : undefined),
+                `Wallet balance: ${walletNow.toFixed(2)} USDT`,
                 liveCardBalance != null
                   ? `Card balance: ${Number(liveCardBalance).toFixed(2)} ${liveCardCurrency}`
                   : "Your card balance will update shortly once the credit is posted.",
-                "Note: deposit credits your wallet first. Card balance changes when funds are topped up to the card.",
+                primaryCard?.cardId
+                  ? "Note: this deposit was automatically moved to your card."
+                  : "Note: no active card found, so amount remains in wallet.",
               ].filter(Boolean).join("\n"),
               { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
             );
@@ -5018,6 +5038,104 @@ async function fetchStroWalletUsdBalanceSafe(): Promise<number | null> {
     return extractNumericBalance(resp?.data || resp?.response || resp);
   } catch {
     return null;
+  }
+}
+
+async function autoTopupCardFromWalletCredit(params: { userId: string; cardId: string; amountUsdt: number }) {
+  const userId = String(params.userId);
+  const cardId = String(params.cardId);
+  const amountUsdt = Number(params.amountUsdt || 0);
+  if (!Number.isFinite(amountUsdt) || amountUsdt <= 0) {
+    return { success: false, message: "Invalid top-up amount" };
+  }
+
+  const providerResponse = await callStroWallet("fund-card", "post", {
+    card_id: cardId,
+    amount: amountUsdt.toString(),
+    mode: normalizeMode(getDefaultMode()),
+  });
+
+  const txnNumber = `AUTO-TOPUP-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  if (isPrismaPersistenceEnabled()) {
+    const result = await prisma.$transaction(async (tx: any) => {
+      const user = await tx.user.findUnique({ where: { userId } });
+      const wallet = Number(user?.balance || 0);
+      if (!user || wallet < amountUsdt) {
+        throw new Error("Insufficient wallet balance for automatic card top-up");
+      }
+
+      const updatedUser = await tx.user.update({
+        where: { userId },
+        data: { balance: { decrement: amountUsdt } },
+      });
+
+      await tx.transaction.create({
+        data: {
+          userId,
+          transactionType: "withdrawal",
+          paymentMethod: "system",
+          amount: amountUsdt,
+          amountUsdt,
+          feeUsdt: 0,
+          currency: "USDT",
+          transactionNumber: txnNumber,
+          referenceNumber: txnNumber,
+          status: "completed",
+          verified: true,
+          responseData: providerResponse as any,
+          metadata: { cardId, source: "auto_deposit_topup" } as any,
+        },
+      });
+
+      return { newWalletBalance: updatedUser.balance };
+    });
+
+    return { success: true, newWalletBalance: result.newWalletBalance, providerResponse };
+  }
+
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const updatedUser = await User.findOneAndUpdate(
+      { userId, balance: { $gte: amountUsdt } },
+      { $inc: { balance: -amountUsdt } },
+      { new: true, session }
+    );
+    if (!updatedUser) {
+      throw new Error("Insufficient wallet balance for automatic card top-up");
+    }
+
+    await Transaction.create(
+      [
+        {
+          userId,
+          transactionType: "withdrawal",
+          paymentMethod: "system",
+          amount: amountUsdt,
+          amountUsdt,
+          feeUsdt: 0,
+          currency: "USDT",
+          transactionNumber: txnNumber,
+          referenceNumber: txnNumber,
+          status: "completed",
+          verified: true,
+          responseData: providerResponse,
+          metadata: { cardId, source: "auto_deposit_topup" },
+        },
+      ],
+      { session }
+    );
+
+    await session.commitTransaction();
+    session.endSession();
+    return { success: true, newWalletBalance: updatedUser.balance, providerResponse };
+  } catch (e: any) {
+    try {
+      await session.abortTransaction();
+    } catch {}
+    session.endSession();
+    return { success: false, message: e?.message || "Automatic card top-up failed" };
   }
 }
 
