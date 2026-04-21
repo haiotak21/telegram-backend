@@ -4033,7 +4033,8 @@ async function sendUserInfo(chatId: number, message?: any) {
   const kycLabel = kycStatus === "approved" ? "Approved ✅ (use /kyc to resubmit)" : "/kyc";
   const cardId = primaryCard?.cardId;
   const remoteDetail = cardId ? await fetchCardDetailSafe(cardId) : null;
-  const balance = remoteDetail?.balance ?? baseBalance;
+  const walletBalance = Number(baseBalance);
+  const cardBalance = Number(remoteDetail?.balance ?? remoteDetail?.available_balance ?? NaN);
   const last4 = remoteDetail?.last4 || primaryCard?.last4 || (primaryCard as any)?.cardNumber?.slice(-4);
   const cardStatusRaw = remoteDetail?.status || primaryCard?.status;
   const cardStatus = cardStatusRaw ? String(cardStatusRaw) : undefined;
@@ -4050,7 +4051,10 @@ async function sendUserInfo(chatId: number, message?: any) {
     `👤 User ID: ${chatId}`,
     `✉️ Email: ${email || "/linkemail"}`,
     `KYC: ${kycLabel}`,
-    `Wallet: ${hasReadyProfile ? `${Number(balance).toFixed(2)} ${currency}` : "/card_request"}`,
+    `Wallet: ${hasReadyProfile ? `${Number.isFinite(walletBalance) ? walletBalance.toFixed(2) : "0.00"} ${currency}` : "/card_request"}`,
+    hasReadyProfile && Number.isFinite(cardBalance)
+      ? `Card Balance: ${cardBalance.toFixed(2)} ${(remoteDetail?.currency || primaryCard?.currency || "USD").toUpperCase()}`
+      : undefined,
     `Cards: ${hasReadyProfile ? "1" : "/card_request"}`,
     "💳 Virtual Card",
     `• Status: ${hasReadyProfile ? (cardStatusLabel || "Active") : "No Card"}`,
@@ -4084,15 +4088,18 @@ async function sendWalletSummary(chatId: number, message?: any) {
     getPrimaryCardForUser(String(chatId)),
   ]);
   const baseWalletBalance = user?.balance ?? 0;
-  const currency = user?.currency || "USD";
+  const currency = user?.currency || "USDT";
   const cardId = primaryCard?.cardId || link?.cardIds?.[0];
   const remoteDetail = cardId ? await fetchCardDetailSafe(cardId) : null;
-  const walletBalance = remoteDetail?.balance ?? baseWalletBalance;
+  const walletBalance = Number(baseWalletBalance);
+  const cardBalance = Number(remoteDetail?.balance ?? remoteDetail?.available_balance ?? NaN);
+  const cardCurrency = (remoteDetail?.currency || primaryCard?.currency || "USD").toUpperCase();
   const last4 = remoteDetail?.last4 || primaryCard?.last4 || (primaryCard as any)?.cardNumber?.slice(-4);
 
   const lines = [
     "💼 Your Wallet",
-    `Balance: ${Number(walletBalance).toFixed(2)} ${currency}`,
+    `Balance: ${(Number.isFinite(walletBalance) ? walletBalance : 0).toFixed(2)} ${currency}`,
+    Number.isFinite(cardBalance) ? `Card Balance: ${cardBalance.toFixed(2)} ${cardCurrency}` : undefined,
     `Currency: ${currency}`,
     "Status: Active",
     "",
