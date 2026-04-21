@@ -902,9 +902,9 @@ export async function initBot() {
       const meta = DEPOSIT_ACCOUNTS[method];
       const lines = [
         "💳 Card request payment",
-        `Card amount: $${selection.cardAmountUsd.toFixed(2)}`,
+        `Card amount: ${(selection.cardAmountUsd * selection.rate).toFixed(2)} ETB`,
         `Service fee: $${selection.feeUsd.toFixed(2)}`,
-        `Total to pay: $${selection.totalUsd.toFixed(2)} or ${selection.totalEtb.toFixed(2)} ETB`,
+        `Total to pay: ${selection.totalEtb.toFixed(2)} ETB`,
         `${meta.typeLabel} account: ${meta.account}`,
         `Name: ${meta.name}`,
         "",
@@ -2584,9 +2584,9 @@ async function handleCardRequest(chatId: number, message?: any) {
   });
   const lines = [
     "💳 Card request payment required.",
-    `Card amount: $${cardAmountUsd.toFixed(2)}`,
+    `Card amount: ${(cardAmountUsd * rate).toFixed(2)} ETB`,
     `Service fee: $${feeUsd.toFixed(2)}`,
-    `Total to pay: $${totalUsd.toFixed(2)} or ${totalEtb.toFixed(2)} ETB`,
+    `Total to pay: ${totalEtb.toFixed(2)} ETB`,
     "Choose a payment method:",
   ];
   await bot!.sendMessage(chatId, lines.join("\n"), {
