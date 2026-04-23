@@ -2554,7 +2554,15 @@ async function sendDepositConversionPreview(chatId: number, usdAmount: number) {
     `Total to pay: ${totalEtb.toFixed(2)} ETB`,
   ];
   await bot!.sendMessage(chatId, lines.join("\n"), {
-    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "Telebirr", callback_data: "DEPOSIT_METHOD::telebirr" },
+          { text: "CBE", callback_data: "DEPOSIT_METHOD::cbe" },
+        ],
+        [MENU_BUTTON],
+      ],
+    },
   });
 }
 
@@ -2600,6 +2608,7 @@ async function sendDepositSummary(chatId: number, method: PaymentMethod, amount:
     `Name: ${meta.name}`,
     "",
     `Total to pay: ${quote.totalEtb.toFixed(2)} ETB`,
+    `💵 ${quote.amountUsd.toFixed(2)}$ will be deposited to your card`,
     "",
     "Tap Copy to copy the account number, pay, then Verify to share your receipt/reference.",
   ];
