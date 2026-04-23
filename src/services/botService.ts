@@ -195,7 +195,16 @@ async function notifyAdminLowBalanceIssue(detail?: string) {
 const depositSelections = new Map<number, {
   method: PaymentMethod;
   amountEtb: number;
+  creditAmountEtb: number;
   amountUsd: number;
+  feeUsd: number;
+  totalUsd: number;
+  totalEtb: number;
+  rate: number;
+}>();
+const depositConversionSelections = new Map<number, {
+  requestedUsd: number;
+  creditAmountEtb: number;
   feeUsd: number;
   totalUsd: number;
   totalEtb: number;
@@ -844,6 +853,25 @@ export async function initBot() {
       const method = action.replace("DEPOSIT_METHOD::", "") as PaymentMethod;
       if (method !== "telebirr" && method !== "cbe") return;
       await bot!.answerCallbackQuery(query.id).catch(() => { });
+      const conversion = depositConversionSelections.get(chatId);
+      if (conversion) {
+        await sendDepositSummary(chatId, method, conversion.creditAmountEtb, {
+          payableAmountEtb: conversion.totalEtb,
+          displayAmountEtb: conversion.totalEtb,
+          creditedUsd: conversion.requestedUsd,
+          fromConversion: true,
+        });
+        return;
+      }
+      await sendDepositAmountSelect(chatId, method);
+      return;
+    }
+
+    if (action.startsWith("DEPOSIT_CHANGE::")) {
+      const method = action.replace("DEPOSIT_CHANGE::", "") as PaymentMethod;
+      if (method !== "telebirr" && method !== "cbe") return;
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      depositConversionSelections.delete(chatId);
       await sendDepositAmountSelect(chatId, method);
       return;
     }
@@ -860,6 +888,7 @@ export async function initBot() {
         });
         return;
       }
+      depositConversionSelections.delete(chatId);
       await sendDepositSummary(chatId, method, amount);
       return;
     }
@@ -1090,7 +1119,7 @@ export async function initBot() {
             const depositResult = await creditVerifiedDeposit({
               userId: String(msg.chat.id),
               paymentMethod: method,
-              amountEtb: Number((selected as any)?.amountEtb || amountNum),
+              amountEtb: Number((selected as any)?.creditAmountEtb || amountNum),
               transactionNumber: verifiedKey,
               referenceNumber: altKey,
               responseData: b.raw ?? b,
@@ -2535,6 +2564,13 @@ function computeDepositQuoteByEtb(amountEtb: number, rate: number) {
   };
 }
 
+function normalizePayableEtb(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return value;
+  const hasFraction = Math.abs(value - Math.trunc(value)) > 0.00001;
+  if (!hasFraction) return value;
+  return Math.ceil(value / 50) * 50;
+}
+
 async function sendDepositConversionPreview(chatId: number, usdAmount: number) {
   if (!Number.isFinite(usdAmount) || usdAmount <= 0) {
     await bot!.sendMessage(chatId, "Please enter a valid USD amount greater than 0.", {
@@ -2546,7 +2582,16 @@ async function sendDepositConversionPreview(chatId: number, usdAmount: number) {
   const rate = Number(config.usdtRate) > 0 ? Number(config.usdtRate) : 220;
   const feeUsd = BOT_DEPOSIT_FIXED_FEE_USD + (usdAmount * BOT_DEPOSIT_PERCENT_FEE) / 100;
   const totalUsd = usdAmount + feeUsd;
-  const totalEtb = totalUsd * rate;
+  const creditAmountEtb = usdAmount * rate;
+  const totalEtb = normalizePayableEtb(totalUsd * rate);
+  depositConversionSelections.set(chatId, {
+    requestedUsd: roundMoney(usdAmount),
+    creditAmountEtb: roundMoney(creditAmountEtb),
+    feeUsd: roundMoney(feeUsd),
+    totalUsd: roundMoney(totalUsd),
+    totalEtb: roundMoney(totalEtb),
+    rate,
+  });
   const lines = [
     "🧮 Deposit Converter",
     `Requested amount: $${usdAmount.toFixed(2)}`,
@@ -2579,7 +2624,12 @@ async function sendDepositAmountSelect(chatId: number, method: PaymentMethod) {
   });
 }
 
-async function sendDepositSummary(chatId: number, method: PaymentMethod, amount: number) {
+async function sendDepositSummary(
+  chatId: number,
+  method: PaymentMethod,
+  amount: number,
+  options?: { payableAmountEtb?: number; displayAmountEtb?: number; creditedUsd?: number; fromConversion?: boolean }
+) {
   if (!Number.isFinite(amount) || amount < MIN_DEPOSIT_ETB) {
     await bot!.sendMessage(chatId, `Minimum deposit is ${MIN_DEPOSIT_ETB} ETB.`, {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -2591,24 +2641,34 @@ async function sendDepositSummary(chatId: number, method: PaymentMethod, amount:
   const config = await loadPricingConfig();
   const rate = Number(config.usdtRate) > 0 ? Number(config.usdtRate) : 220;
   const quote = computeDepositQuoteByEtb(amount, rate);
+  const payableEtb = Number.isFinite(options?.payableAmountEtb as number)
+    ? Number(options!.payableAmountEtb)
+    : normalizePayableEtb(quote.totalEtb);
+  const displayAmountEtb = Number.isFinite(options?.displayAmountEtb as number)
+    ? Number(options!.displayAmountEtb)
+    : amount;
+  const creditedUsd = Number.isFinite(options?.creditedUsd as number)
+    ? Number(options!.creditedUsd)
+    : quote.amountUsd;
   depositSelections.set(chatId, {
     method,
-    amountEtb: amount,
-    amountUsd: quote.amountUsd,
+    amountEtb: payableEtb,
+    creditAmountEtb: amount,
+    amountUsd: creditedUsd,
     feeUsd: quote.feeUsd,
     totalUsd: quote.totalUsd,
-    totalEtb: quote.totalEtb,
+    totalEtb: payableEtb,
     rate,
   });
   const lines = [
     `${meta.title}:`,
-    `Amount: ${amount} ETB`,
+    `Amount: ${displayAmountEtb.toFixed(2)} ETB`,
     `Service fee: $${BOT_DEPOSIT_FIXED_FEE_USD.toFixed(2)}+${BOT_DEPOSIT_PERCENT_FEE.toFixed(2)}%`,
     `Account: ${meta.account}`,
     `Name: ${meta.name}`,
     "",
-    `Total to pay: ${quote.totalEtb.toFixed(2)} ETB`,
-    `💵 ${quote.amountUsd.toFixed(2)}$ will be deposited to your card`,
+    `Total to pay: ${payableEtb.toFixed(2)} ETB`,
+    `💵 ${creditedUsd.toFixed(2)}$ will be deposited to your card`,
     "",
     "Tap Copy to copy the account number, pay, then Verify to share your receipt/reference.",
   ];
@@ -2616,7 +2676,7 @@ async function sendDepositSummary(chatId: number, method: PaymentMethod, amount:
   const keyboard: InlineKeyboardButton[][] = [
     [{ text: "📋 Copy account", copy_text: { text: meta.account } }],
     [{ text: "✅ Verify payment", callback_data: `DEPOSIT_VERIFY::${method}` }],
-    [{ text: "💵 Change amount", callback_data: `DEPOSIT_METHOD::${method}` }],
+    [{ text: "💵 Change amount", callback_data: options?.fromConversion ? `DEPOSIT_CHANGE::${method}` : `DEPOSIT_METHOD::${method}` }],
     [{ text: "🔁 Switch method", callback_data: "MENU_DEPOSIT" }],
     [MENU_BUTTON],
   ];
