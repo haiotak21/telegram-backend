@@ -2152,7 +2152,9 @@ function validateVerificationResult(params: {
 
   if (selected && selected.method === method) {
     const expectedTotal = Number(selected.totalEtb ?? selected.amountEtb ?? selected.amount ?? NaN);
-    const paid = typeof totalPaid === "number" ? totalPaid : amount;
+    // Prefer the transferred/settled amount for validation. Some providers include
+    // extra provider-side charges in totalPaidAmount that users don't control.
+    const paid = typeof amount === "number" ? amount : totalPaid;
     if (!Number.isFinite(expectedTotal)) {
       errors.push("Expected payment amount could not be determined.");
     } else if (typeof paid !== "number") {
