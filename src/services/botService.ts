@@ -5204,11 +5204,19 @@ async function autoTopupCardFromWalletCredit(params: { userId: string; cardId: s
     return { success: false, message: "Invalid top-up amount" };
   }
 
-  const providerResponse = await callStroWallet("fund-card", "post", {
-    card_id: cardId,
-    amount: amountUsdt.toString(),
-    mode: normalizeMode(getDefaultMode()),
-  });
+  let providerResponse: any;
+  try {
+    providerResponse = await callStroWallet("fund-card", "post", {
+      card_id: cardId,
+      amount: amountUsdt.toFixed(2),
+      mode: normalizeMode(getDefaultMode()),
+    });
+  } catch (e: any) {
+    return {
+      success: false,
+      message: e?.message || "Automatic card top-up failed at provider",
+    };
+  }
 
   const txnNumber = `AUTO-TOPUP-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
