@@ -16,7 +16,7 @@ import Transaction from "../models/Transaction";
 import User from "../models/User";
 import Customer from "../models/Customer";
 import type { PaymentMethod } from "./paymentVerification";
-import { loadPricingConfig } from "./pricingService";
+import { loadPricingConfig, quoteDeposit } from "./pricingService";
 import { creditVerifiedDeposit } from "./depositService";
 import prisma from "../utils/prisma";
 import { isPrismaPersistenceEnabled } from "../utils/persistence";
@@ -1116,20 +1116,116 @@ export async function initBot() {
               return;
             }
 
-            const depositResult = await creditVerifiedDeposit({
-              userId: String(msg.chat.id),
-              paymentMethod: method,
-              amountEtb: Number((selected as any)?.creditAmountEtb || amountNum),
-              transactionNumber: verifiedKey,
-              referenceNumber: altKey,
-              responseData: b.raw ?? b,
-            });
-            if (!depositResult.success) {
-              await bot!.sendMessage(msg.chat.id, `❌ Deposit error: ${depositResult.message || "Deposit failed"}`, {
-                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-              });
+            const amountEtb = Number((selected as any)?.creditAmountEtb || amountNum);
+            const pricing = await loadPricingConfig();
+            const quote = quoteDeposit(amountEtb, pricing);
+            const primaryCard = await getPrimaryCardForUser(String(msg.chat.id));
+            if (!primaryCard?.cardId) {
+              await bot!.sendMessage(
+                msg.chat.id,
+                "❌ No active card found. Deposit was verified but cannot be applied to a card. Please create a card or contact support.",
+                { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+              );
               clearPendingAction(msg.chat.id);
               return;
+            }
+
+            let providerResponse: any;
+            try {
+              providerResponse = await callStroWallet("fund-card", "post", {
+                card_id: String(primaryCard.cardId),
+                amount: toStroAmountString(quote.creditedUsdt),
+                mode: normalizeMode(getDefaultMode()),
+              });
+            } catch (fundErr: any) {
+              const reason = fundErr?.message || "Card funding is not available right now.";
+              if (isPrismaPersistenceEnabled()) {
+                await prisma.transaction.create({
+                  data: {
+                    userId: String(msg.chat.id),
+                    transactionType: "deposit",
+                    paymentMethod: method,
+                    amount: quote.creditedUsdt,
+                    amountEtb,
+                    amountUsdt: quote.creditedUsdt,
+                    feeEtb: quote.feeEtb,
+                    currency: "USDT",
+                    rateSnapshot: quote.rate,
+                    transactionNumber: verifiedKey,
+                    referenceNumber: altKey,
+                    status: "failed",
+                    verified: true,
+                    responseData: { verification: b.raw ?? b, fundError: reason } as any,
+                    metadata: { cardId: String(primaryCard.cardId), destination: "card" } as any,
+                  },
+                });
+              } else {
+                await Transaction.create({
+                  userId: String(msg.chat.id),
+                  transactionType: "deposit",
+                  paymentMethod: method,
+                  amount: quote.creditedUsdt,
+                  amountEtb,
+                  amountUsdt: quote.creditedUsdt,
+                  feeEtb: quote.feeEtb,
+                  currency: "USDT",
+                  rateSnapshot: quote.rate,
+                  transactionNumber: verifiedKey,
+                  referenceNumber: altKey,
+                  status: "failed",
+                  verified: true,
+                  responseData: { verification: b.raw ?? b, fundError: reason },
+                  metadata: { cardId: String(primaryCard.cardId), destination: "card" },
+                });
+              }
+
+              await bot!.sendMessage(
+                msg.chat.id,
+                `❌ Card top-up failed: ${reason}. Your wallet balance was not credited. Please contact support.`,
+                { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+              );
+              clearPendingAction(msg.chat.id);
+              return;
+            }
+
+            if (isPrismaPersistenceEnabled()) {
+              await prisma.transaction.create({
+                data: {
+                  userId: String(msg.chat.id),
+                  transactionType: "deposit",
+                  paymentMethod: method,
+                  amount: quote.creditedUsdt,
+                  amountEtb,
+                  amountUsdt: quote.creditedUsdt,
+                  feeEtb: quote.feeEtb,
+                  currency: "USDT",
+                  rateSnapshot: quote.rate,
+                  transactionNumber: verifiedKey,
+                  referenceNumber: altKey,
+                  status: "completed",
+                  verified: true,
+                  responseData: { verification: b.raw ?? b, fundResponse: providerResponse } as any,
+                  metadata: { cardId: String(primaryCard.cardId), destination: "card" } as any,
+                },
+              });
+            } else {
+              await Transaction.create({
+                userId: String(msg.chat.id),
+                transactionType: "deposit",
+                paymentMethod: method,
+                amount: quote.creditedUsdt,
+                amountEtb,
+                amountUsdt: quote.creditedUsdt,
+                feeEtb: quote.feeEtb,
+                currency: "USDT",
+                rateSnapshot: quote.rate,
+                transactionNumber: verifiedKey,
+                referenceNumber: altKey,
+                status: "completed",
+                verified: true,
+                responseData: { verification: b.raw ?? b, fundResponse: providerResponse },
+                metadata: { cardId: String(primaryCard.cardId), destination: "card" },
+              });
             }
 
             if (isPrismaPersistenceEnabled()) {
@@ -1160,42 +1256,21 @@ export async function initBot() {
             await bot!.sendMessage(msg.chat.id, lines.join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
             depositSelections.delete(msg.chat.id);
 
-            const primaryCard = await getPrimaryCardForUser(String(msg.chat.id));
-            let autoTopupMessage: string | undefined;
-            if (primaryCard?.cardId && Number(depositResult.creditedUsdt || 0) > 0) {
-              const autoTopup = await autoTopupCardFromWalletCredit({
-                userId: String(msg.chat.id),
-                cardId: String(primaryCard.cardId),
-                amountUsdt: Number(depositResult.creditedUsdt || 0),
-              });
-              if (autoTopup.success) {
-                autoTopupMessage = `Deposited to card: ${Number(depositResult.creditedUsdt).toFixed(2)} USDT`;
-              } else {
-                autoTopupMessage = `Card top-up failed, amount kept in wallet: ${autoTopup.message || "unknown error"}`;
-              }
-            }
+            const autoTopupMessage = `Deposited to card: ${quote.creditedUsdt.toFixed(2)} USDT`;
 
             // Show latest card data and wallet after deposit/top-up.
             const liveCardDetail = primaryCard?.cardId ? await fetchCardDetailSafe(String(primaryCard.cardId)) : null;
             const liveCardBalance = liveCardDetail?.available_balance || liveCardDetail?.balance;
             const liveCardCurrency = (liveCardDetail?.currency || primaryCard?.currency || "USD").toUpperCase();
-            const userSnapshot = isPrismaPersistenceEnabled()
-              ? await prisma.user.findUnique({ where: { userId: String(msg.chat.id) } })
-              : await User.findOne({ userId: String(msg.chat.id) }).lean();
-            const walletNow = Number(userSnapshot?.balance || 0);
-
             await bot!.sendMessage(
               msg.chat.id,
               [
                 "✅ Payment Verified",
-                autoTopupMessage || (depositResult.creditedUsdt != null ? `Credited to wallet: ${Number(depositResult.creditedUsdt).toFixed(2)} USDT` : undefined),
-                `Wallet balance: ${walletNow.toFixed(2)} USDT`,
+                autoTopupMessage,
                 liveCardBalance != null
                   ? `Card balance: ${Number(liveCardBalance).toFixed(2)} ${liveCardCurrency}`
                   : "Your card balance will update shortly once the credit is posted.",
-                primaryCard?.cardId
-                  ? "Note: this deposit was automatically moved to your card."
-                  : "Note: no active card found, so amount remains in wallet.",
+                "Note: this deposit was applied directly to your card.",
               ].filter(Boolean).join("\n"),
               { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
             );
@@ -1203,7 +1278,7 @@ export async function initBot() {
             await notifyLowStroWalletBalanceIfNeeded({
               userId: String(msg.chat.id),
               paymentMethod: method,
-              creditedUsdt: Number(depositResult.creditedUsdt || 0),
+              creditedUsdt: Number(quote.creditedUsdt || 0),
             });
           } catch (createErr: any) {
             if (createErr?.code === 11000) {
