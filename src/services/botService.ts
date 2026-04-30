@@ -116,7 +116,7 @@ const KYC_STATIC_CITY = process.env.KYC_STATIC_CITY || "Accra";
 const KYC_STATIC_IDTYPE = (process.env.KYC_STATIC_IDTYPE || "PASSPORT") as KycIdType;
 
 const WALLET_URL = process.env.WALLET_URL || "https://strowallet.com/app";
-const SUPPORT_URL = process.env.SUPPORT_URL || "https://t.me/hailetak12";
+const SUPPORT_URL = process.env.SUPPORT_URL || "https://t.me/Bunacardsupport";
 const NEWS_URL = process.env.NEWS_URL || "https://t.me/paytelegram082";
 const API_BASE = process.env.BOT_API_BASE || "http://localhost:3000/api/strowallet/";
 const BACKEND_BASE = process.env.BOT_BACKEND_BASE || "http://localhost:3000";
@@ -5196,6 +5196,12 @@ async function fetchStroWalletUsdBalanceSafe(): Promise<number | null> {
   }
 }
 
+function toStroAmountString(amount: number): string {
+  if (!Number.isFinite(amount) || amount <= 0) return "0";
+  const rounded = Math.round(amount * 100) / 100;
+  return Number.isInteger(rounded) ? String(Math.trunc(rounded)) : rounded.toFixed(2).replace(/\.0+$/, "").replace(/(\.\d*[1-9])0+$/, "$1");
+}
+
 async function autoTopupCardFromWalletCredit(params: { userId: string; cardId: string; amountUsdt: number }) {
   const userId = String(params.userId);
   const cardId = String(params.cardId);
@@ -5203,62 +5209,91 @@ async function autoTopupCardFromWalletCredit(params: { userId: string; cardId: s
   if (!Number.isFinite(amountUsdt) || amountUsdt <= 0) {
     return { success: false, message: "Invalid top-up amount" };
   }
-
-  let providerResponse: any;
-  try {
-    providerResponse = await callStroWallet("fund-card", "post", {
-      card_id: cardId,
-      amount: amountUsdt.toFixed(2),
-      mode: normalizeMode(getDefaultMode()),
-    });
-  } catch (e: any) {
-    return {
-      success: false,
-      message: e?.message || "Automatic card top-up failed at provider",
-    };
-  }
-
   const txnNumber = `AUTO-TOPUP-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const amountString = toStroAmountString(amountUsdt);
+  const mode = normalizeMode(getDefaultMode());
+  const providerPayload = {
+    card_id: cardId,
+    amount: amountString,
+    ...(mode ? { mode } : {}),
+  };
 
   if (isPrismaPersistenceEnabled()) {
-    const result = await prisma.$transaction(async (tx: any) => {
-      const user = await tx.user.findUnique({ where: { userId } });
-      const wallet = Number(user?.balance || 0);
-      if (!user || wallet < amountUsdt) {
-        throw new Error("Insufficient wallet balance for automatic card top-up");
-      }
+    let pendingTxId: string | null = null;
+    let walletAfterReserve = 0;
+    try {
+      const reserve = await prisma.$transaction(async (tx: any) => {
+        const user = await tx.user.findUnique({ where: { userId } });
+        if (!user) {
+          throw new Error("User not found");
+        }
 
-      const updatedUser = await tx.user.update({
-        where: { userId },
-        data: { balance: { decrement: amountUsdt } },
+        const decremented = await tx.user.updateMany({
+          where: { userId, balance: { gte: amountUsdt } },
+          data: { balance: { decrement: amountUsdt } },
+        });
+        if (!decremented?.count) {
+          throw new Error("Insufficient wallet balance for automatic card top-up");
+        }
+
+        const updatedUser = await tx.user.findUnique({ where: { userId } });
+        const pendingTx = await tx.transaction.create({
+          data: {
+            userId,
+            transactionType: "withdrawal",
+            paymentMethod: "system",
+            amount: amountUsdt,
+            amountUsdt,
+            feeUsdt: 0,
+            currency: "USDT",
+            transactionNumber: txnNumber,
+            referenceNumber: txnNumber,
+            status: "pending",
+            verified: true,
+            metadata: { cardId, source: "auto_deposit_topup" } as any,
+          },
+        });
+
+        return {
+          walletAfterReserve: Number(updatedUser?.balance || 0),
+          pendingTxId: String(pendingTx.id),
+        };
       });
 
-      await tx.transaction.create({
-        data: {
-          userId,
-          transactionType: "withdrawal",
-          paymentMethod: "system",
-          amount: amountUsdt,
-          amountUsdt,
-          feeUsdt: 0,
-          currency: "USDT",
-          transactionNumber: txnNumber,
-          referenceNumber: txnNumber,
-          status: "completed",
-          verified: true,
-          responseData: providerResponse as any,
-          metadata: { cardId, source: "auto_deposit_topup" } as any,
-        },
+      walletAfterReserve = reserve.walletAfterReserve;
+      pendingTxId = reserve.pendingTxId;
+    } catch (e: any) {
+      return { success: false, message: e?.message || "Automatic card top-up failed" };
+    }
+
+    try {
+      const providerResponse = await callStroWallet("fund-card", "post", providerPayload);
+      await prisma.transaction.update({
+        where: { id: pendingTxId! },
+        data: { status: "completed", responseData: providerResponse as any },
       });
-
-      return { newWalletBalance: updatedUser.balance };
-    });
-
-    return { success: true, newWalletBalance: result.newWalletBalance, providerResponse };
+      return { success: true, newWalletBalance: walletAfterReserve, providerResponse };
+    } catch (e: any) {
+      const message = e?.message || "Automatic card top-up failed at provider";
+      await prisma.$transaction(async (tx: any) => {
+        await tx.user.update({ where: { userId }, data: { balance: { increment: amountUsdt } } });
+        await tx.transaction.update({
+          where: { id: pendingTxId! },
+          data: {
+            status: "failed",
+            responseData: { error: message } as any,
+            metadata: { cardId, source: "auto_deposit_topup", refunded: true, failureReason: message } as any,
+          },
+        });
+      });
+      return { success: false, message };
+    }
   }
 
   const session = await mongoose.startSession();
   session.startTransaction();
+  let pendingTxId: any;
+  let walletAfterReserve = 0;
   try {
     const updatedUser = await User.findOneAndUpdate(
       { userId, balance: { $gte: amountUsdt } },
@@ -5269,7 +5304,7 @@ async function autoTopupCardFromWalletCredit(params: { userId: string; cardId: s
       throw new Error("Insufficient wallet balance for automatic card top-up");
     }
 
-    await Transaction.create(
+    const created = await Transaction.create(
       [
         {
           userId,
@@ -5281,24 +5316,58 @@ async function autoTopupCardFromWalletCredit(params: { userId: string; cardId: s
           currency: "USDT",
           transactionNumber: txnNumber,
           referenceNumber: txnNumber,
-          status: "completed",
+          status: "pending",
           verified: true,
-          responseData: providerResponse,
           metadata: { cardId, source: "auto_deposit_topup" },
         },
       ],
       { session }
     );
+    pendingTxId = created?.[0]?._id;
+    walletAfterReserve = Number(updatedUser.balance || 0);
 
     await session.commitTransaction();
     session.endSession();
-    return { success: true, newWalletBalance: updatedUser.balance, providerResponse };
   } catch (e: any) {
     try {
       await session.abortTransaction();
     } catch {}
     session.endSession();
     return { success: false, message: e?.message || "Automatic card top-up failed" };
+  }
+
+  try {
+    const providerResponse = await callStroWallet("fund-card", "post", providerPayload);
+    await Transaction.updateOne({ _id: pendingTxId }, { $set: { status: "completed", responseData: providerResponse } });
+    return { success: true, newWalletBalance: walletAfterReserve, providerResponse };
+  } catch (e: any) {
+    const message = e?.message || "Automatic card top-up failed at provider";
+    const refundSession = await mongoose.startSession();
+    refundSession.startTransaction();
+    try {
+      await User.updateOne({ userId }, { $inc: { balance: amountUsdt } }, { session: refundSession });
+      await Transaction.updateOne(
+        { _id: pendingTxId },
+        {
+          $set: {
+            status: "failed",
+            responseData: { error: message },
+            metadata: { cardId, source: "auto_deposit_topup", refunded: true, failureReason: message },
+          },
+        },
+        { session: refundSession }
+      );
+      await refundSession.commitTransaction();
+    } catch (rollbackErr) {
+      try {
+        await refundSession.abortTransaction();
+      } catch {}
+      console.error("[bot] failed to rollback wallet after top-up provider error", rollbackErr);
+    } finally {
+      refundSession.endSession();
+    }
+
+    return { success: false, message };
   }
 }
 
