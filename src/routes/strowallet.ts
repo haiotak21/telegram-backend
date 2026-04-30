@@ -90,6 +90,17 @@ function normalizeError(e: any) {
   return { status, message: String(msg) };
 }
 
+function shouldDebugStroWallet() {
+  return String(process.env.STROWALLET_DEBUG_LOGS || "").toLowerCase() === "true";
+}
+
+function maskValue(value: string, showStart = 4, showEnd = 2) {
+  if (!value) return "";
+  const str = String(value);
+  if (str.length <= showStart + showEnd) return str;
+  return `${str.slice(0, showStart)}***${str.slice(-showEnd)}`;
+}
+
 // 1) Create Customer
 const internationalPhone = z.string().regex(/^[1-9]\d{10,14}$/); // e.g., 2348012345678 (no '+')
 const mmddyyyy = z.string().regex(/^\d{2}\/\d{2}\/\d{4}$/);
@@ -330,10 +341,48 @@ router.post("/fund-card", async (req, res) => {
     const body = applyDefaultMode(FundCardSchema.parse(req.body || {}));
     const public_key = requirePublicKey();
     const payload = { ...body, public_key };
-    const resp = await bitvcard.post("fund-card/", payload);
-    return ok(res, resp.data, 200);
+    if (shouldDebugStroWallet()) {
+      console.log("[strowallet] fund-card request", {
+        card_id: maskValue(String(body.card_id), 3, 3),
+        amount: String(body.amount),
+        mode: body.mode,
+        public_key: maskValue(public_key, 4, 4),
+      });
+    }
+    try {
+      const resp = await bitvcard.post("fund-card/", payload, {
+        headers: { "Content-Type": "application/json" },
+      });
+      if (shouldDebugStroWallet()) {
+        console.log("[strowallet] fund-card response", resp.data);
+      }
+      return ok(res, resp.data, 200);
+    } catch (firstError: any) {
+      // Fallback for provider deployments that only parse URL query params.
+      const queryParams: Record<string, string> = {
+        public_key,
+        card_id: body.card_id,
+        amount: String(body.amount),
+      };
+      if (body.mode) queryParams.mode = body.mode;
+      const fallbackResp = await bitvcard.post("fund-card/", payload, {
+        headers: { "Content-Type": "application/json" },
+        params: queryParams,
+      });
+      if (shouldDebugStroWallet()) {
+        console.log("[strowallet] fund-card fallback response", fallbackResp.data);
+      }
+      console.warn("[strowallet] fund-card primary attempt failed, fallback succeeded", {
+        firstStatus: firstError?.response?.status,
+        firstMessage: firstError?.response?.data?.message || firstError?.response?.data?.error || firstError?.message,
+      });
+      return ok(res, fallbackResp.data, 200);
+    }
   } catch (e) {
     const { status, message } = normalizeError(e);
+    if (shouldDebugStroWallet()) {
+      console.warn("[strowallet] fund-card error", { status, message });
+    }
     return fail(res, message, status);
   }
 });
