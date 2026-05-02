@@ -286,6 +286,18 @@ export async function verifyPayment(input: VerificationInput): Promise<Verificat
     return { status: 400, body: { success: false, message: "transactionNumber is required" } };
   }
 
+  const enableTestVerification = String(process.env.ENABLE_TEST_VERIFICATION || "false").toLowerCase() === "true";
+  const testTransactionId = (process.env.TEST_TRANSACTION_ID || "").trim();
+  if (enableTestVerification && paymentMethod === "telebirr" && testTransactionId) {
+    if (normalizedTxn.toUpperCase() === testTransactionId.toUpperCase()) {
+      const rawAmount = process.env.TEST_TRANSACTION_AMOUNT_ETB || process.env.PAYMENT_VALIDATION_FAKE_AMOUNT;
+      const testAmount = rawAmount != null ? Number(rawAmount) : undefined;
+      const result = manualValidation("telebirr", normalizedTxn, Number.isFinite(testAmount) ? testAmount : undefined);
+      result.body.message = "Verified (test id)";
+      return result;
+    }
+  }
+
   const enableFakeValidation = String(process.env.PAYMENT_VALIDATION_FAKE || "false").toLowerCase() === "true";
   const fakeDefaultAmount = process.env.PAYMENT_VALIDATION_FAKE_AMOUNT ? Number(process.env.PAYMENT_VALIDATION_FAKE_AMOUNT) : undefined;
   if (enableFakeValidation) {
