@@ -2121,6 +2121,16 @@ function namesMatch(expectedRaw: string, actualRaw: string) {
 }
 
 async function findUsedPaymentReference(paymentMethod: PaymentMethod, normalizedTxn: string) {
+  const enableTestVerification = String(process.env.ENABLE_TEST_VERIFICATION || "false").toLowerCase() === "true";
+  const testTransactionId = (process.env.TEST_TRANSACTION_ID || "").trim();
+  if (
+    enableTestVerification &&
+    paymentMethod === "telebirr" &&
+    testTransactionId &&
+    normalizedTxn.toUpperCase() === testTransactionId.toUpperCase()
+  ) {
+    return null;
+  }
   if (isPrismaPersistenceEnabled()) {
     return prisma.transaction.findFirst({
       where: {
