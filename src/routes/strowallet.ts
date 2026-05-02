@@ -105,6 +105,48 @@ function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseRetryAfterMs(headers: any): number | null {
+  if (!headers) return null;
+  const raw = headers["retry-after"] || headers["Retry-After"];
+  if (!raw) return null;
+  const asNumber = Number(raw);
+  if (Number.isFinite(asNumber) && asNumber >= 0) {
+    return Math.round(asNumber * 1000);
+  }
+  const asDate = new Date(String(raw));
+  if (Number.isFinite(asDate.getTime())) {
+    const diff = asDate.getTime() - Date.now();
+    return diff > 0 ? diff : 0;
+  }
+  return null;
+}
+
+async function postWithRetry(url: string, payload: any, config: any) {
+  const maxRetries = 4;
+  for (let attempt = 0; attempt < maxRetries; attempt += 1) {
+    try {
+      return await bitvcard.post(url, payload, config);
+    } catch (err: any) {
+      const status = err?.response?.status;
+      if (status !== 429 || attempt === maxRetries - 1) throw err;
+      const retryAfterMs = parseRetryAfterMs(err?.response?.headers);
+      const backoffMs = retryAfterMs ?? 2000 * Math.pow(2, attempt);
+      await delay(backoffMs);
+    }
+  }
+  throw new Error("fund-card retry attempts exhausted");
+}
+
+let fundCardQueue = Promise.resolve();
+function enqueueFundCard<T>(task: () => Promise<T>) {
+  const run = fundCardQueue.then(task, task);
+  fundCardQueue = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
 // 1) Create Customer
 const internationalPhone = z.string().regex(/^[1-9]\d{10,14}$/); // e.g., 2348012345678 (no '+')
 const mmddyyyy = z.string().regex(/^\d{2}\/\d{2}\/\d{4}$/);
@@ -353,63 +395,40 @@ router.post("/fund-card", async (req, res) => {
         public_key: maskValue(public_key, 4, 4),
       });
     }
-    try {
-      let lastError: any;
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        try {
-          const resp = await bitvcard.post("fund-card/", payload, {
-            headers: { "Content-Type": "application/json" },
-          });
-          if (shouldDebugStroWallet()) {
-            console.log("[strowallet] fund-card response", resp.data);
-          }
-          return ok(res, resp.data, 200);
-        } catch (err: any) {
-          lastError = err;
-          const status = err?.response?.status;
-          if (status === 429 && attempt === 0) {
-            await delay(1200);
-            continue;
-          }
-          throw err;
+
+    const result = await enqueueFundCard(async () => {
+      try {
+        const resp = await postWithRetry("fund-card/", payload, {
+          headers: { "Content-Type": "application/json" },
+        });
+        if (shouldDebugStroWallet()) {
+          console.log("[strowallet] fund-card response", resp.data);
         }
-      }
-      throw lastError;
-    } catch (firstError: any) {
-      // Fallback for provider deployments that only parse URL query params.
-      const queryParams: Record<string, string> = {
-        public_key,
-        card_id: body.card_id,
-        amount: String(body.amount),
-      };
-      if (body.mode) queryParams.mode = body.mode;
-      let lastFallbackError: any;
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        try {
-          const fallbackResp = await bitvcard.post("fund-card/", payload, {
-            headers: { "Content-Type": "application/json" },
-            params: queryParams,
-          });
-          if (shouldDebugStroWallet()) {
-            console.log("[strowallet] fund-card fallback response", fallbackResp.data);
-          }
-          console.warn("[strowallet] fund-card primary attempt failed, fallback succeeded", {
-            firstStatus: firstError?.response?.status,
-            firstMessage: firstError?.response?.data?.message || firstError?.response?.data?.error || firstError?.message,
-          });
-          return ok(res, fallbackResp.data, 200);
-        } catch (fallbackErr: any) {
-          lastFallbackError = fallbackErr;
-          const status = fallbackErr?.response?.status;
-          if (status === 429 && attempt === 0) {
-            await delay(1200);
-            continue;
-          }
-          break;
+        return ok(res, resp.data, 200);
+      } catch (firstError: any) {
+        // Fallback for provider deployments that only parse URL query params.
+        const queryParams: Record<string, string> = {
+          public_key,
+          card_id: body.card_id,
+          amount: String(body.amount),
+        };
+        if (body.mode) queryParams.mode = body.mode;
+        const fallbackResp = await postWithRetry("fund-card/", payload, {
+          headers: { "Content-Type": "application/json" },
+          params: queryParams,
+        });
+        if (shouldDebugStroWallet()) {
+          console.log("[strowallet] fund-card fallback response", fallbackResp.data);
         }
+        console.warn("[strowallet] fund-card primary attempt failed, fallback succeeded", {
+          firstStatus: firstError?.response?.status,
+          firstMessage: firstError?.response?.data?.message || firstError?.response?.data?.error || firstError?.message,
+        });
+        return ok(res, fallbackResp.data, 200);
       }
-      throw lastFallbackError || firstError;
-    }
+    });
+
+    return result;
   } catch (e) {
     const { status, message } = normalizeError(e);
     if (shouldDebugStroWallet()) {
