@@ -101,6 +101,10 @@ function maskValue(value: string, showStart = 4, showEnd = 2) {
   return `${str.slice(0, showStart)}***${str.slice(-showEnd)}`;
 }
 
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // 1) Create Customer
 const internationalPhone = z.string().regex(/^[1-9]\d{10,14}$/); // e.g., 2348012345678 (no '+')
 const mmddyyyy = z.string().regex(/^\d{2}\/\d{2}\/\d{4}$/);
@@ -350,13 +354,27 @@ router.post("/fund-card", async (req, res) => {
       });
     }
     try {
-      const resp = await bitvcard.post("fund-card/", payload, {
-        headers: { "Content-Type": "application/json" },
-      });
-      if (shouldDebugStroWallet()) {
-        console.log("[strowallet] fund-card response", resp.data);
+      let lastError: any;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const resp = await bitvcard.post("fund-card/", payload, {
+            headers: { "Content-Type": "application/json" },
+          });
+          if (shouldDebugStroWallet()) {
+            console.log("[strowallet] fund-card response", resp.data);
+          }
+          return ok(res, resp.data, 200);
+        } catch (err: any) {
+          lastError = err;
+          const status = err?.response?.status;
+          if (status === 429 && attempt === 0) {
+            await delay(1200);
+            continue;
+          }
+          throw err;
+        }
       }
-      return ok(res, resp.data, 200);
+      throw lastError;
     } catch (firstError: any) {
       // Fallback for provider deployments that only parse URL query params.
       const queryParams: Record<string, string> = {
@@ -365,18 +383,32 @@ router.post("/fund-card", async (req, res) => {
         amount: String(body.amount),
       };
       if (body.mode) queryParams.mode = body.mode;
-      const fallbackResp = await bitvcard.post("fund-card/", payload, {
-        headers: { "Content-Type": "application/json" },
-        params: queryParams,
-      });
-      if (shouldDebugStroWallet()) {
-        console.log("[strowallet] fund-card fallback response", fallbackResp.data);
+      let lastFallbackError: any;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const fallbackResp = await bitvcard.post("fund-card/", payload, {
+            headers: { "Content-Type": "application/json" },
+            params: queryParams,
+          });
+          if (shouldDebugStroWallet()) {
+            console.log("[strowallet] fund-card fallback response", fallbackResp.data);
+          }
+          console.warn("[strowallet] fund-card primary attempt failed, fallback succeeded", {
+            firstStatus: firstError?.response?.status,
+            firstMessage: firstError?.response?.data?.message || firstError?.response?.data?.error || firstError?.message,
+          });
+          return ok(res, fallbackResp.data, 200);
+        } catch (fallbackErr: any) {
+          lastFallbackError = fallbackErr;
+          const status = fallbackErr?.response?.status;
+          if (status === 429 && attempt === 0) {
+            await delay(1200);
+            continue;
+          }
+          break;
+        }
       }
-      console.warn("[strowallet] fund-card primary attempt failed, fallback succeeded", {
-        firstStatus: firstError?.response?.status,
-        firstMessage: firstError?.response?.data?.message || firstError?.response?.data?.error || firstError?.message,
-      });
-      return ok(res, fallbackResp.data, 200);
+      throw lastFallbackError || firstError;
     }
   } catch (e) {
     const { status, message } = normalizeError(e);
