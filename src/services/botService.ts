@@ -2190,17 +2190,25 @@ function validateVerificationResult(params: {
   selected?: { method: PaymentMethod; amountEtb?: number; totalEtb?: number; amount?: number };
 }) {
   const { method, body, selected } = params;
+  const enableTestVerification = String(process.env.ENABLE_TEST_VERIFICATION || "false").toLowerCase() === "true";
+  const testTransactionId = (process.env.TEST_TRANSACTION_ID || "").trim();
+  const normalizedTxn = String(body?.transactionNumber || body?.reference || body?.raw?.data?.receiptNo || body?.raw?.receiptNo || "").trim();
+  const isTestTelebirr =
+    enableTestVerification &&
+    method === "telebirr" &&
+    testTransactionId &&
+    normalizedTxn.toUpperCase() === testTransactionId.toUpperCase();
   const { receiverName, receiverAccount, receiverPhone, payerPhone, amount, totalPaid } = extractReceiptFields(body);
   const errors: string[] = [];
 
   const expectedName = method === "telebirr" ? EXPECTED_TELEBIRR_NAME : EXPECTED_RECEIVER_NAME;
   const strictNameCheck = method === "telebirr" ? TELEBIRR_STRICT_RECEIVER : CBE_STRICT_RECEIVER;
-  if (strictNameCheck && expectedName) {
+  if (!isTestTelebirr && strictNameCheck && expectedName) {
     if (!receiverName) errors.push("Receiver name missing on receipt");
     else if (!namesMatch(expectedName, receiverName)) errors.push("Receiver name does not match the expected payment account.");
   }
 
-  if (method === "telebirr" && EXPECTED_TELEBIRR_PHONE) {
+  if (!isTestTelebirr && method === "telebirr" && EXPECTED_TELEBIRR_PHONE) {
     const expectedPhone = EXPECTED_TELEBIRR_PHONE;
     const masked = receiverPhone && receiverPhone.includes("*");
     const phoneToCheck = receiverPhone || payerPhone;
