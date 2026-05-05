@@ -1108,6 +1108,14 @@ export async function initBot() {
             const rawData = (b.raw?.data ?? b.raw ?? {}) as any;
             const verifiedKey = normalizeTxnRef(String(b.transactionNumber || normalizedTxn), method);
             const altKey = normalizeTxnRef(String(rawData?.reference || normalizedTxn), method);
+            const enableTestVerification = String(process.env.ENABLE_TEST_VERIFICATION || "false").toLowerCase() === "true";
+            const testTransactionId = (process.env.TEST_TRANSACTION_ID || "").trim();
+            const isTestTelebirr =
+              enableTestVerification &&
+              method === "telebirr" &&
+              testTransactionId &&
+              verifiedKey.toUpperCase() === testTransactionId.toUpperCase();
+            const transactionKey = isTestTelebirr ? `${verifiedKey}-TEST-${Date.now()}` : verifiedKey;
             if (typeof amountNum !== "number" || amountNum <= 0) {
               await bot!.sendMessage(msg.chat.id, "❌ Verification succeeded but amount is missing from receipt.", {
                 reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -1151,7 +1159,7 @@ export async function initBot() {
                     feeEtb: quote.feeEtb,
                     currency: "USDT",
                     rateSnapshot: quote.rate,
-                    transactionNumber: verifiedKey,
+                    transactionNumber: transactionKey,
                     referenceNumber: altKey,
                     status: "failed",
                     verified: true,
@@ -1170,7 +1178,7 @@ export async function initBot() {
                   feeEtb: quote.feeEtb,
                   currency: "USDT",
                   rateSnapshot: quote.rate,
-                  transactionNumber: verifiedKey,
+                  transactionNumber: transactionKey,
                   referenceNumber: altKey,
                   status: "failed",
                   verified: true,
@@ -1200,7 +1208,7 @@ export async function initBot() {
                   feeEtb: quote.feeEtb,
                   currency: "USDT",
                   rateSnapshot: quote.rate,
-                  transactionNumber: verifiedKey,
+                  transactionNumber: transactionKey,
                   referenceNumber: altKey,
                   status: "completed",
                   verified: true,
@@ -1219,7 +1227,7 @@ export async function initBot() {
                 feeEtb: quote.feeEtb,
                 currency: "USDT",
                 rateSnapshot: quote.rate,
-                transactionNumber: verifiedKey,
+                transactionNumber: transactionKey,
                 referenceNumber: altKey,
                 status: "completed",
                 verified: true,
