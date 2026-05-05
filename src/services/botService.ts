@@ -1137,6 +1137,15 @@ export async function initBot() {
               clearPendingAction(msg.chat.id);
               return;
             }
+            if (primaryCard.cardType && String(primaryCard.cardType).toLowerCase() !== "nfc") {
+              await bot!.sendMessage(
+                msg.chat.id,
+                "❌ Your saved card is not NFC-compatible. Please create a new NFC card and try again.",
+                { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+              );
+              clearPendingAction(msg.chat.id);
+              return;
+            }
 
             let providerResponse: any;
             try {
@@ -1147,29 +1156,106 @@ export async function initBot() {
               });
             } catch (fundErr: any) {
               const reason = fundErr?.message || "Card funding is not available right now.";
+              const userId = String(msg.chat.id);
+              const baseTxData = {
+                userId,
+                transactionType: "deposit" as const,
+                paymentMethod: method,
+                amount: quote.creditedUsdt,
+                amountEtb,
+                amountUsdt: quote.creditedUsdt,
+                feeEtb: quote.feeEtb,
+                currency: "USDT",
+                rateSnapshot: quote.rate,
+                transactionNumber: transactionKey,
+                referenceNumber: altKey,
+                verified: true,
+                metadata: { cardId: String(primaryCard.cardId), destination: "card" } as any,
+              };
               if (isPrismaPersistenceEnabled()) {
-                await prisma.transaction.create({
-                  data: {
-                    userId: String(msg.chat.id),
-                    transactionType: "deposit",
-                    paymentMethod: method,
-                    amount: quote.creditedUsdt,
-                    amountEtb,
-                    amountUsdt: quote.creditedUsdt,
-                    feeEtb: quote.feeEtb,
-                    currency: "USDT",
-                    rateSnapshot: quote.rate,
-                    transactionNumber: transactionKey,
-                    referenceNumber: altKey,
+                const hasReference = Boolean(altKey);
+                await prisma.transaction.upsert({
+                  where: hasReference
+                    ? {
+                        transactionType_referenceNumber_userId: {
+                          transactionType: "deposit",
+                          referenceNumber: altKey,
+                          userId,
+                        },
+                      }
+                    : {
+                        transactionType_transactionNumber_userId: {
+                          transactionType: "deposit",
+                          transactionNumber: transactionKey,
+                          userId,
+                        },
+                      },
+                  create: {
+                    ...baseTxData,
                     status: "failed",
-                    verified: true,
                     responseData: { verification: b.raw ?? b, fundError: reason } as any,
-                    metadata: { cardId: String(primaryCard.cardId), destination: "card" } as any,
+                  },
+                  update: {
+                    ...baseTxData,
+                    status: "failed",
+                    responseData: { verification: b.raw ?? b, fundError: reason } as any,
                   },
                 });
               } else {
-                await Transaction.create({
-                  userId: String(msg.chat.id),
+                await Transaction.findOneAndUpdate(
+                  {
+                    userId,
+                    transactionType: "deposit",
+                    $or: [
+                      { transactionNumber: transactionKey },
+                      ...(altKey ? [{ referenceNumber: altKey }] : []),
+                    ],
+                  },
+                  {
+                    $set: {
+                      ...baseTxData,
+                      status: "failed",
+                      responseData: { verification: b.raw ?? b, fundError: reason },
+                    },
+                  },
+                  { upsert: true, new: true }
+                );
+              }
+
+              const friendlyReason = reason.includes("was not found")
+                ? "Card not found on provider. Please create a new NFC card and try again."
+                : reason;
+
+              await bot!.sendMessage(
+                msg.chat.id,
+                `❌ Card top-up failed: ${friendlyReason}. Your wallet balance was not credited. Please contact support.`,
+                { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+              );
+              clearPendingAction(msg.chat.id);
+              return;
+            }
+
+            if (isPrismaPersistenceEnabled()) {
+              const userId = String(msg.chat.id);
+              const hasReference = Boolean(altKey);
+              await prisma.transaction.upsert({
+                where: hasReference
+                  ? {
+                      transactionType_referenceNumber_userId: {
+                        transactionType: "deposit",
+                        referenceNumber: altKey,
+                        userId,
+                      },
+                    }
+                  : {
+                      transactionType_transactionNumber_userId: {
+                        transactionType: "deposit",
+                        transactionNumber: transactionKey,
+                        userId,
+                      },
+                    },
+                create: {
+                  userId,
                   transactionType: "deposit",
                   paymentMethod: method,
                   amount: quote.creditedUsdt,
@@ -1180,27 +1266,12 @@ export async function initBot() {
                   rateSnapshot: quote.rate,
                   transactionNumber: transactionKey,
                   referenceNumber: altKey,
-                  status: "failed",
+                  status: "completed",
                   verified: true,
-                  responseData: { verification: b.raw ?? b, fundError: reason },
-                  metadata: { cardId: String(primaryCard.cardId), destination: "card" },
-                });
-              }
-
-              await bot!.sendMessage(
-                msg.chat.id,
-                `❌ Card top-up failed: ${reason}. Your wallet balance was not credited. Please contact support.`,
-                { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
-              );
-              clearPendingAction(msg.chat.id);
-              return;
-            }
-
-            if (isPrismaPersistenceEnabled()) {
-              await prisma.transaction.create({
-                data: {
-                  userId: String(msg.chat.id),
-                  transactionType: "deposit",
+                  responseData: { verification: b.raw ?? b, fundResponse: providerResponse } as any,
+                  metadata: { cardId: String(primaryCard.cardId), destination: "card" } as any,
+                },
+                update: {
                   paymentMethod: method,
                   amount: quote.creditedUsdt,
                   amountEtb,
@@ -1217,23 +1288,34 @@ export async function initBot() {
                 },
               });
             } else {
-              await Transaction.create({
-                userId: String(msg.chat.id),
-                transactionType: "deposit",
-                paymentMethod: method,
-                amount: quote.creditedUsdt,
-                amountEtb,
-                amountUsdt: quote.creditedUsdt,
-                feeEtb: quote.feeEtb,
-                currency: "USDT",
-                rateSnapshot: quote.rate,
-                transactionNumber: transactionKey,
-                referenceNumber: altKey,
-                status: "completed",
-                verified: true,
-                responseData: { verification: b.raw ?? b, fundResponse: providerResponse },
-                metadata: { cardId: String(primaryCard.cardId), destination: "card" },
-              });
+              await Transaction.findOneAndUpdate(
+                {
+                  userId: String(msg.chat.id),
+                  transactionType: "deposit",
+                  $or: [
+                    { transactionNumber: transactionKey },
+                    ...(altKey ? [{ referenceNumber: altKey }] : []),
+                  ],
+                },
+                {
+                  $set: {
+                    paymentMethod: method,
+                    amount: quote.creditedUsdt,
+                    amountEtb,
+                    amountUsdt: quote.creditedUsdt,
+                    feeEtb: quote.feeEtb,
+                    currency: "USDT",
+                    rateSnapshot: quote.rate,
+                    transactionNumber: transactionKey,
+                    referenceNumber: altKey,
+                    status: "completed",
+                    verified: true,
+                    responseData: { verification: b.raw ?? b, fundResponse: providerResponse },
+                    metadata: { cardId: String(primaryCard.cardId), destination: "card" },
+                  },
+                },
+                { upsert: true, new: true }
+              );
             }
 
             if (isPrismaPersistenceEnabled()) {
