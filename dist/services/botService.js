@@ -4268,7 +4268,7 @@ async function sendMyCards(chatId, message) {
             "💳 Your Virtual Card",
             `Card Type: ${String(card.cardType || "virtual").toLowerCase()}`,
             `Status: ${statusText}`,
-            cardName ? `Card Name: ${cardName}` : undefined,
+            cardName ? `Name: ${cardName}` : undefined,
             `Card Number: ${fullCardNumber || formatMaskedCard((remoteDetail?.last4 || card.last4) || undefined)}`,
             cvc ? `CVV: ${cvc}` : undefined,
             validThru ? `Valid Thru: ${validThru}` : undefined,
@@ -4338,7 +4338,7 @@ async function sendMyCards(chatId, message) {
         currency: user?.currency || "USD",
         balance: user?.balance,
     };
-    const remoteDetail = !card?.last4 || !card?.balance || !card?.currency ? await fetchCardDetailSafe(activeCard.cardId) : null;
+    const remoteDetail = await fetchCardDetailSafe(activeCard.cardId);
     const mergedDetail = remoteDetail || null;
     const last4 = mergedDetail?.last4 || activeCard.last4 || latestRequest?.cardNumber?.slice(-4);
     const cardType = String(mergedDetail?.card_type || activeCard.cardType || latestRequest?.cardType || "virtual").toLowerCase();
@@ -4357,13 +4357,13 @@ async function sendMyCards(chatId, message) {
         "💳 Your Virtual Card",
         `Card Type: ${cardType}`,
         `Status: ${statusText}`,
-        cardName ? `Card Name: ${cardName}` : undefined,
+        cardName ? `Name: ${cardName}` : undefined,
         `Card Number: ${fullCardNumber || formatMaskedCard(last4)}`,
         `CVV: ${cvc || "None"}`,
-        expiry ? `Valid Thru: ${expiry}` : undefined,
-        balanceLabel ? `Balance: ${balanceLabel}` : undefined,
         `Billing: ${billing || "None"}`,
         `Address: ${address || "None"}`,
+        expiry ? `Valid Thru: ${expiry}` : undefined,
+        balanceLabel ? `Balance: ${balanceLabel}` : undefined,
     ].filter(Boolean);
     const freezeAction = isFrozenStatus(activeCard.status) ? "CARD_UNFREEZE" : "CARD_FREEZE";
     const freezeLabel = isFrozenStatus(activeCard.status) ? "🔥 Unfreeze Card" : "❄️ Freeze Card";
