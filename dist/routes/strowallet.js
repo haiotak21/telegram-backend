@@ -86,6 +86,60 @@ function normalizeError(e) {
     const msg = e?.message ?? "Request error";
     return { status, message: String(msg) };
 }
+function shouldDebugStroWallet() {
+    return String(process.env.STROWALLET_DEBUG_LOGS || "").toLowerCase() === "true";
+}
+function maskValue(value, showStart = 4, showEnd = 2) {
+    if (!value)
+        return "";
+    const str = String(value);
+    if (str.length <= showStart + showEnd)
+        return str;
+    return `${str.slice(0, showStart)}***${str.slice(-showEnd)}`;
+}
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function parseRetryAfterMs(headers) {
+    if (!headers)
+        return null;
+    const raw = headers["retry-after"] || headers["Retry-After"];
+    if (!raw)
+        return null;
+    const asNumber = Number(raw);
+    if (Number.isFinite(asNumber) && asNumber >= 0) {
+        return Math.round(asNumber * 1000);
+    }
+    const asDate = new Date(String(raw));
+    if (Number.isFinite(asDate.getTime())) {
+        const diff = asDate.getTime() - Date.now();
+        return diff > 0 ? diff : 0;
+    }
+    return null;
+}
+async function postWithRetry(url, payload, config) {
+    const maxRetries = 4;
+    for (let attempt = 0; attempt < maxRetries; attempt += 1) {
+        try {
+            return await bitvcard.post(url, payload, config);
+        }
+        catch (err) {
+            const status = err?.response?.status;
+            if (status !== 429 || attempt === maxRetries - 1)
+                throw err;
+            const retryAfterMs = parseRetryAfterMs(err?.response?.headers);
+            const backoffMs = retryAfterMs ?? 2000 * Math.pow(2, attempt);
+            await delay(backoffMs);
+        }
+    }
+    throw new Error("fund-card retry attempts exhausted");
+}
+let fundCardQueue = Promise.resolve();
+function enqueueFundCard(task) {
+    const run = fundCardQueue.then(task, task);
+    fundCardQueue = run.then(() => undefined, () => undefined);
+    return run;
+}
 // 1) Create Customer
 const internationalPhone = zod_1.z.string().regex(/^[1-9]\d{10,14}$/); // e.g., 2348012345678 (no '+')
 const mmddyyyy = zod_1.z.string().regex(/^\d{2}\/\d{2}\/\d{4}$/);
@@ -286,23 +340,30 @@ router.patch("/updateCardCustomer", async (req, res) => {
         return (0, apiResponse_1.fail)(res, message, status);
     }
 });
-// 4) Create Card
-// Allow any non-empty string for card_type (not limited to visa/mastercard)
-const CardTypeSchema = zod_1.z.string().min(1);
-const CreateCardSchema = zod_1.z.object({
-    name_on_card: zod_1.z.string().min(1),
-    card_type: CardTypeSchema,
-    amount: amountString,
-    customerEmail: zod_1.z.string().email(),
+// 4) Create NFC Card
+const CreateNfcCardSchema = zod_1.z.object({
+    name: zod_1.z.string().min(1),
+    first_name: zod_1.z.string().min(1),
+    last_name: zod_1.z.string().min(1),
+    dob: mmddyyyy,
+    id_type: zod_1.z.enum(["national_id", "passport", "drivers_license"]),
+    id_number: zod_1.z.string().min(1),
+    email: zod_1.z.string().email(),
+    line1: zod_1.z.string().min(1),
+    city: zod_1.z.string().min(1),
+    state: zod_1.z.string().min(1),
+    postal_code: zod_1.z.string().min(1),
+    country: zod_1.z.string().min(3).max(3),
+    amount_usd: amountString,
+    phone: zod_1.z.string().min(5),
     mode: zod_1.z.string().optional(),
-    developer_code: zod_1.z.string().optional(),
 });
 router.post("/create-card", async (req, res) => {
     try {
-        const body = applyDefaultMode(CreateCardSchema.parse(req.body || {}));
+        const body = applyDefaultMode(CreateNfcCardSchema.parse(req.body || {}));
         const public_key = requirePublicKey();
-        const payload = { ...body, public_key };
-        const resp = await bitvcard.post("create-card/", payload);
+        const params = { ...body, public_key };
+        const resp = await bitvcard.post("create-nfc-card/", undefined, { params });
         return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
     catch (e) {
@@ -310,7 +371,7 @@ router.post("/create-card", async (req, res) => {
         return (0, apiResponse_1.fail)(res, message, status);
     }
 });
-// 5) Fund Card
+// 5) Fund NFC Card
 const FundCardSchema = zod_1.z.object({
     card_id: CardIdSchema,
     amount: amountString,
@@ -320,16 +381,61 @@ router.post("/fund-card", async (req, res) => {
     try {
         const body = applyDefaultMode(FundCardSchema.parse(req.body || {}));
         const public_key = requirePublicKey();
-        const payload = { ...body, public_key };
-        const resp = await bitvcard.post("fund-card/", payload);
-        return (0, apiResponse_1.ok)(res, resp.data, 200);
+        const payload = { ...body, public_key, type: "fund" };
+        if (shouldDebugStroWallet()) {
+            console.log("[strowallet] fund-card request", {
+                card_id: maskValue(String(body.card_id), 3, 3),
+                amount: String(body.amount),
+                mode: body.mode,
+                public_key: maskValue(public_key, 4, 4),
+            });
+        }
+        const result = await enqueueFundCard(async () => {
+            try {
+                const resp = await postWithRetry("fund-withdraw-nfccard/", payload, {
+                    headers: { "Content-Type": "application/json" },
+                    params: payload,
+                });
+                if (shouldDebugStroWallet()) {
+                    console.log("[strowallet] fund-card response", resp.data);
+                }
+                return (0, apiResponse_1.ok)(res, resp.data, 200);
+            }
+            catch (firstError) {
+                // Fallback for provider deployments that only parse URL query params.
+                const queryParams = {
+                    public_key,
+                    card_id: body.card_id,
+                    amount: String(body.amount),
+                    type: "fund",
+                };
+                if (body.mode)
+                    queryParams.mode = body.mode;
+                const fallbackResp = await postWithRetry("fund-withdraw-nfccard/", payload, {
+                    headers: { "Content-Type": "application/json" },
+                    params: queryParams,
+                });
+                if (shouldDebugStroWallet()) {
+                    console.log("[strowallet] fund-card fallback response", fallbackResp.data);
+                }
+                console.warn("[strowallet] fund-card primary attempt failed, fallback succeeded", {
+                    firstStatus: firstError?.response?.status,
+                    firstMessage: firstError?.response?.data?.message || firstError?.response?.data?.error || firstError?.message,
+                });
+                return (0, apiResponse_1.ok)(res, fallbackResp.data, 200);
+            }
+        });
+        return result;
     }
     catch (e) {
         const { status, message } = normalizeError(e);
+        if (shouldDebugStroWallet()) {
+            console.warn("[strowallet] fund-card error", { status, message });
+        }
         return (0, apiResponse_1.fail)(res, message, status);
     }
 });
-// 6) Get Card Details
+// 6) Get NFC Card Details
 const FetchCardDetailSchema = zod_1.z.object({
     card_id: CardIdSchema,
     mode: zod_1.z.string().optional(),
@@ -338,8 +444,8 @@ router.post("/fetch-card-detail", async (req, res) => {
     try {
         const body = applyDefaultMode(FetchCardDetailSchema.parse(req.body || {}));
         const public_key = requirePublicKey();
-        const payload = { ...body, public_key };
-        const resp = await bitvcard.post("fetch-card-detail/", payload);
+        const params = { ...body, public_key };
+        const resp = await bitvcard.get("fetch-nfccard-detail/", { params });
         return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
     catch (e) {
@@ -347,7 +453,7 @@ router.post("/fetch-card-detail", async (req, res) => {
         return (0, apiResponse_1.fail)(res, message, status);
     }
 });
-// 7) Card Transactions (recent)
+// 7) NFC Card Transactions (recent)
 const CardTransactionsSchema = zod_1.z.object({
     card_id: CardIdSchema,
     mode: zod_1.z.string().optional(),
@@ -356,8 +462,8 @@ router.post("/card-transactions", async (req, res) => {
     try {
         const body = applyDefaultMode(CardTransactionsSchema.parse(req.body || {}));
         const public_key = requirePublicKey();
-        const payload = { ...body, public_key };
-        const resp = await bitvcard.post("card-transactions/", payload);
+        const params = { ...body, public_key };
+        const resp = await bitvcard.get("nfc-card-transactions/", { params });
         return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
     catch (e) {
@@ -365,7 +471,7 @@ router.post("/card-transactions", async (req, res) => {
         return (0, apiResponse_1.fail)(res, message, status);
     }
 });
-// 8) Freeze / Unfreeze Card
+// 8) Freeze / Unfreeze NFC Card
 const ActionStatusSchema = zod_1.z.object({
     action: zod_1.z.enum(["freeze", "unfreeze"]),
     card_id: CardIdSchema,
@@ -374,11 +480,12 @@ router.post("/action/status", async (req, res) => {
     try {
         const body = ActionStatusSchema.parse(req.body || {});
         const public_key = requirePublicKey();
-        const payload = { ...body, public_key };
-        const resp = await bitvcard.post("action/status/", payload, {
-            // StroWallet docs require these fields as query params for this endpoint.
-            params: payload,
-        });
+        const status = body.action === "freeze" ? "frozen" : "active";
+        const params = { card_id: body.card_id, status, public_key };
+        const mode = normalizeMode(getDefaultMode());
+        if (mode)
+            params.mode = mode;
+        const resp = await bitvcard.post("nfc-cards/status/", undefined, { params });
         return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
     catch (e) {

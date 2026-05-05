@@ -21,7 +21,7 @@ const apiResponse_1 = require("../utils/apiResponse");
 const prisma_1 = __importDefault(require("../utils/prisma"));
 const persistence_1 = require("../utils/persistence");
 const router = express_1.default.Router();
-const AmountEtbSchema = zod_1.z.object({ amountEtb: zod_1.z.number().min(1000, "Minimum deposit amount is 1000 ETB") });
+const AmountEtbSchema = zod_1.z.object({ amountEtb: zod_1.z.number().positive("amountEtb must be greater than 0") });
 const AmountUsdtSchema = zod_1.z.object({ amountUsdt: zod_1.z.number().positive() });
 const BalanceParamSchema = zod_1.z.object({ userId: zod_1.z.string().min(1) });
 const PricingSchema = zod_1.z.object({
@@ -62,6 +62,44 @@ function requireAdmin(req, res, next) {
         return next();
     return (0, apiResponse_1.fail)(res, "Unauthorized", 401);
 }
+function getBackendBaseCandidates() {
+    const port = process.env.PORT || 3000;
+    const configured = (process.env.BOT_BACKEND_BASE || "").trim();
+    const defaults = [`http://127.0.0.1:${port}`, `http://localhost:${port}`];
+    const all = [...defaults, configured].filter(Boolean).map((v) => String(v).replace(/\/$/, ""));
+    return Array.from(new Set(all));
+}
+function isRetryableBackendError(err) {
+    const code = String(err?.code || "").toUpperCase();
+    if (["ENOTFOUND", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ECONNRESET"].includes(code))
+        return true;
+    const message = String(err?.message || "").toLowerCase();
+    if (message.includes("getaddrinfo enotfound") || message.includes("enotfound"))
+        return true;
+    const status = Number(err?.response?.status || 0);
+    return status >= 500;
+}
+async function createCardRequestViaBackend(payload) {
+    let lastError;
+    for (const base of getBackendBaseCandidates()) {
+        try {
+            return await axios_1.default.post(`${base}/api/card-requests`, payload, { timeout: 30000 });
+        }
+        catch (err) {
+            lastError = err;
+            if (!isRetryableBackendError(err)) {
+                throw err;
+            }
+            console.warn("[wallet] create-card-request backend attempt failed", {
+                base,
+                code: err?.code,
+                status: err?.response?.status,
+                message: err?.response?.data?.error || err?.message,
+            });
+        }
+    }
+    throw lastError;
+}
 // Admin: list runtime audits
 router.get("/audit", requireAdmin, async (_req, res) => {
     try {
@@ -92,10 +130,49 @@ router.get("/balance/:userId", async (req, res) => {
         const params = BalanceParamSchema.parse(req.params);
         if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
             const user = await prisma_1.default.user.findUnique({ where: { userId: params.userId } });
-            return (0, apiResponse_1.ok)(res, { balance: user?.balance ?? 0, currency: user?.currency ?? "USDT" });
+            const customerEmail = user?.customerEmail || undefined;
+            const card = await prisma_1.default.card.findFirst({
+                where: {
+                    OR: [{ userId: params.userId }, ...(customerEmail ? [{ customerEmail }] : [])],
+                },
+                orderBy: { updatedAt: "desc" },
+            });
+            const walletBalance = Number(user?.balance ?? 0);
+            const cardBalanceCandidate = Number(card?.balance ?? card?.availableBalance ?? NaN);
+            const hasCardBalance = Number.isFinite(cardBalanceCandidate);
+            const balance = hasCardBalance ? cardBalanceCandidate : (Number.isFinite(walletBalance) ? walletBalance : 0);
+            const currency = (card?.currency || user?.currency || "USDT").toUpperCase();
+            return (0, apiResponse_1.ok)(res, {
+                balance,
+                currency,
+                walletBalance: Number.isFinite(walletBalance) ? walletBalance : 0,
+                cardBalance: hasCardBalance ? cardBalanceCandidate : null,
+                source: hasCardBalance ? "card" : "wallet",
+            });
         }
         const user = await User_1.default.findOne({ userId: params.userId }).lean();
-        return (0, apiResponse_1.ok)(res, { balance: user?.balance ?? 0, currency: user?.currency ?? "USDT" });
+        const customer = await Customer_1.default.findOne({ userId: params.userId }).lean();
+        const customerEmail = customer?.email || user?.customerEmail;
+        const card = await Card_1.default.findOne({
+            $or: [
+                { userId: params.userId },
+                ...(customerEmail ? [{ customerEmail }] : []),
+            ],
+        })
+            .sort({ updatedAt: -1 })
+            .lean();
+        const walletBalance = Number(user?.balance ?? 0);
+        const cardBalanceCandidate = Number(card?.balance ?? card?.availableBalance ?? NaN);
+        const hasCardBalance = Number.isFinite(cardBalanceCandidate);
+        const balance = hasCardBalance ? cardBalanceCandidate : (Number.isFinite(walletBalance) ? walletBalance : 0);
+        const currency = String(card?.currency || user?.currency || "USDT").toUpperCase();
+        return (0, apiResponse_1.ok)(res, {
+            balance,
+            currency,
+            walletBalance: Number.isFinite(walletBalance) ? walletBalance : 0,
+            cardBalance: hasCardBalance ? cardBalanceCandidate : null,
+            source: hasCardBalance ? "card" : "wallet",
+        });
     }
     catch (err) {
         const message = err?.errors?.[0]?.message || err?.message || "Invalid request";
@@ -152,6 +229,14 @@ router.get("/transactions/recent", requireAdmin, async (req, res) => {
     try {
         const limitRaw = Number(req.query.limit ?? 20);
         const limit = Number.isFinite(limitRaw) && limitRaw > 0 && limitRaw <= 200 ? limitRaw : 20;
+        if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+            const rows = await prisma_1.default.transaction.findMany({
+                where: { transactionType: "deposit" },
+                orderBy: { createdAt: "desc" },
+                take: limit,
+            });
+            return (0, apiResponse_1.ok)(res, { items: rows.map((r) => ({ ...r, cardId: null })) });
+        }
         const items = await Transaction_1.default.find({ transactionType: "deposit" })
             .sort({ createdAt: -1 })
             .limit(limit)
@@ -175,6 +260,178 @@ router.get("/transactions/recent", requireAdmin, async (req, res) => {
     }
 });
 router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
+    if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+        try {
+            const id = String(req.params.id || "").trim();
+            if (!id)
+                return (0, apiResponse_1.fail)(res, "Transaction id is required", 400);
+            const { action, reason } = TransactionDecisionSchema.parse(req.body || {});
+            const tx = await prisma_1.default.transaction.findFirst({
+                where: {
+                    OR: [{ id }, { transactionNumber: id }, { referenceNumber: id }],
+                },
+            });
+            if (!tx)
+                return (0, apiResponse_1.fail)(res, "Transaction not found", 404);
+            if (tx.transactionType !== "deposit")
+                return (0, apiResponse_1.fail)(res, "Only deposit transactions can be reviewed manually", 400);
+            if (tx.status === "completed") {
+                return (0, apiResponse_1.ok)(res, {
+                    id: tx.id,
+                    status: tx.status,
+                    message: "Transaction already completed",
+                });
+            }
+            if (tx.status !== "pending") {
+                return (0, apiResponse_1.fail)(res, `Only pending transactions can be reviewed (current: ${tx.status})`, 400);
+            }
+            const txMetadata = tx.metadata && typeof tx.metadata === "object" && !Array.isArray(tx.metadata) ? tx.metadata : {};
+            if (action === "decline") {
+                await prisma_1.default.transaction.update({
+                    where: { id: tx.id },
+                    data: {
+                        status: "failed",
+                        verified: false,
+                        metadata: {
+                            ...txMetadata,
+                            manualReviewRequired: false,
+                            manualReview: {
+                                status: "declined",
+                                reviewedAt: new Date(),
+                                reviewedBy: "admin",
+                                reason: reason || "Declined by admin",
+                            },
+                        },
+                    },
+                });
+                await (0, botService_1.notifyDepositReviewDeclined)(String(tx.userId), reason).catch((notifyErr) => {
+                    console.warn("Failed to notify declined deposit review", {
+                        userId: String(tx.userId),
+                        txId: tx.id,
+                        error: notifyErr?.message || String(notifyErr),
+                    });
+                });
+                return (0, apiResponse_1.ok)(res, { id: tx.id, status: "failed", action });
+            }
+            const isCardRequestManual = txMetadata?.kind === "card_request_manual";
+            if (isCardRequestManual) {
+                const userId = String(tx.userId);
+                const userRecord = await prisma_1.default.user.findUnique({ where: { userId } });
+                if (!userRecord)
+                    return (0, apiResponse_1.fail)(res, "User not found", 404);
+                if ((userRecord.kycStatus || "").toLowerCase() !== "approved") {
+                    return (0, apiResponse_1.fail)(res, "User KYC is not approved for card creation", 400);
+                }
+                const cardAmountUsdRaw = txMetadata?.cardAmountUsd;
+                const cardAmountUsd = Number(cardAmountUsdRaw);
+                const amount = Number.isFinite(cardAmountUsd) && cardAmountUsd >= 3 ? cardAmountUsd : 3;
+                const nameOnCard = [userRecord.firstName, userRecord.lastName].filter(Boolean).join(" ") || "StroWallet User";
+                const customerEmail = userRecord.customerEmail;
+                if (!customerEmail)
+                    return (0, apiResponse_1.fail)(res, "User email is missing for card request", 400);
+                let createResp;
+                try {
+                    createResp = await createCardRequestViaBackend({
+                        userId,
+                        nameOnCard,
+                        cardType: "visa",
+                        amount: String(amount),
+                        customerEmail,
+                        metadata: {
+                            source: "admin_manual_review",
+                            transactionId: tx.id,
+                        },
+                    });
+                }
+                catch (createErr) {
+                    const msg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
+                    return (0, apiResponse_1.fail)(res, msg, 400);
+                }
+                const cardId = createResp?.data?.data?.cardId;
+                await prisma_1.default.transaction.update({
+                    where: { id: tx.id },
+                    data: {
+                        status: "completed",
+                        verified: true,
+                        metadata: {
+                            ...txMetadata,
+                            manualReviewRequired: false,
+                            manualReview: {
+                                status: "approved",
+                                reviewedAt: new Date(),
+                                reviewedBy: "admin",
+                                reason: reason || "Approved by admin",
+                            },
+                            cardRequest: {
+                                approvedAt: new Date(),
+                                cardId: cardId || null,
+                            },
+                        },
+                    },
+                });
+                return (0, apiResponse_1.ok)(res, { id: tx.id, status: "completed", action, cardId: cardId || null });
+            }
+            const amountEtbRaw = tx.amountEtb ?? txMetadata?.expectedAmountEtb ?? tx.amount;
+            const amountEtb = Number(amountEtbRaw);
+            if (!Number.isFinite(amountEtb) || amountEtb <= 0) {
+                return (0, apiResponse_1.fail)(res, "Cannot approve transaction without a valid ETB amount", 400);
+            }
+            const pricing = await (0, pricingService_1.loadPricingConfig)();
+            const quote = (0, pricingService_1.quoteDeposit)(amountEtb, pricing);
+            if (quote.creditedUsdt <= 0)
+                return (0, apiResponse_1.fail)(res, "Deposit amount is too low after fees", 400);
+            const user = await prisma_1.default.user.findUnique({ where: { userId: String(tx.userId) } });
+            if (!user)
+                return (0, apiResponse_1.fail)(res, "User not found", 404);
+            const updatedUser = await prisma_1.default.user.update({
+                where: { userId: String(tx.userId) },
+                data: { balance: (user.balance || 0) + quote.creditedUsdt },
+            });
+            await prisma_1.default.transaction.update({
+                where: { id: tx.id },
+                data: {
+                    status: "completed",
+                    verified: true,
+                    amountEtb,
+                    amountUsdt: quote.creditedUsdt,
+                    amount: quote.creditedUsdt,
+                    currency: "USDT",
+                    feeEtb: quote.feeEtb,
+                    rateSnapshot: quote.rate,
+                    metadata: {
+                        ...txMetadata,
+                        manualReviewRequired: false,
+                        manualReview: {
+                            status: "approved",
+                            reviewedAt: new Date(),
+                            reviewedBy: "admin",
+                            reason: reason || "Approved by admin",
+                        },
+                    },
+                },
+            });
+            await (0, botService_1.notifyDepositCredited)(String(tx.userId), quote.creditedUsdt, updatedUser.balance).catch((notifyErr) => {
+                console.warn("Failed to notify approved deposit review", {
+                    userId: String(tx.userId),
+                    txId: tx.id,
+                    error: notifyErr?.message || String(notifyErr),
+                });
+            });
+            return (0, apiResponse_1.ok)(res, {
+                id: tx.id,
+                status: "completed",
+                action,
+                creditedUsdt: quote.creditedUsdt,
+                newBalance: updatedUser.balance,
+                feeEtb: quote.feeEtb,
+                rate: quote.rate,
+            });
+        }
+        catch (err) {
+            const message = err?.errors?.[0]?.message || err?.message || "Failed to process decision";
+            return (0, apiResponse_1.fail)(res, message, 400);
+        }
+    }
     const session = await mongoose_1.default.startSession();
     session.startTransaction();
     try {
@@ -268,10 +525,9 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
                 session.endSession();
                 return (0, apiResponse_1.fail)(res, "User email is missing for card request", 400);
             }
-            const backendBase = process.env.BOT_BACKEND_BASE || `http://127.0.0.1:${process.env.PORT || 3000}`;
             let createResp;
             try {
-                createResp = await axios_1.default.post(`${backendBase}/api/card-requests`, {
+                createResp = await createCardRequestViaBackend({
                     userId,
                     nameOnCard,
                     cardType: "visa",
@@ -281,7 +537,7 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
                         source: "admin_manual_review",
                         transactionId: String(tx._id),
                     },
-                }, { timeout: 30000 });
+                });
             }
             catch (createErr) {
                 await session.abortTransaction();
@@ -390,6 +646,78 @@ router.post("/reset-users", requireAdmin, async (req, res) => {
         const body = ResetUsersSchema.parse(req.body || {});
         if (body.scope === "single" && !body.userId) {
             return (0, apiResponse_1.fail)(res, "userId is required for single-user reset", 400);
+        }
+        if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+            const removeTransactions = Boolean(body.removeTransactions);
+            if (body.scope === "single") {
+                const userId = String(body.userId);
+                const [userRes, cardsRes, requestsRes, transactionsCancelledRes] = await Promise.all([
+                    prisma_1.default.user.updateMany({ where: { userId }, data: { balance: 0, currency: "USDT" } }),
+                    prisma_1.default.card.updateMany({ where: { userId }, data: { userId: null } }),
+                    prisma_1.default.cardRequest.updateMany({
+                        where: { userId, NOT: { status: "declined" } },
+                        data: { status: "declined", decisionReason: "Reset by admin" },
+                    }),
+                    prisma_1.default.transaction.updateMany({
+                        where: { userId, NOT: { status: "cancelled" } },
+                        data: {
+                            status: "cancelled",
+                            metadata: {
+                                archivedBy: "admin_reset",
+                                archivedAt: new Date(),
+                                reason: body.reason || undefined,
+                            },
+                        },
+                    }),
+                ]);
+                const transactionsDeletedRes = removeTransactions
+                    ? await prisma_1.default.transaction.deleteMany({ where: { userId } })
+                    : { count: 0 };
+                return (0, apiResponse_1.ok)(res, {
+                    message: "User reset completed",
+                    scope: body.scope,
+                    userId,
+                    usersZeroed: userRes.count,
+                    linksCleared: 0,
+                    cardsUnlinked: cardsRes.count,
+                    requestsDeclined: requestsRes.count,
+                    transactionsArchived: transactionsCancelledRes.count,
+                    transactionsDeleted: transactionsDeletedRes.count,
+                });
+            }
+            const [usersRes, cardsRes, requestsRes, transactionsCancelledRes] = await Promise.all([
+                prisma_1.default.user.updateMany({ data: { balance: 0, currency: "USDT" } }),
+                prisma_1.default.card.updateMany({ data: { userId: null } }),
+                prisma_1.default.cardRequest.updateMany({
+                    where: { NOT: { status: "declined" } },
+                    data: { status: "declined", decisionReason: "Reset by admin" },
+                }),
+                prisma_1.default.transaction.updateMany({
+                    where: { NOT: { status: "cancelled" } },
+                    data: {
+                        status: "cancelled",
+                        metadata: {
+                            archivedBy: "admin_reset",
+                            archivedAt: new Date(),
+                            reason: body.reason || undefined,
+                        },
+                    },
+                }),
+            ]);
+            const transactionsDeletedRes = removeTransactions
+                ? await prisma_1.default.transaction.deleteMany({})
+                : { count: 0 };
+            return (0, apiResponse_1.ok)(res, {
+                message: "All users reset completed",
+                scope: body.scope,
+                userId: null,
+                usersZeroed: usersRes.count,
+                linksCleared: 0,
+                cardsUnlinked: cardsRes.count,
+                requestsDeclined: requestsRes.count,
+                transactionsArchived: transactionsCancelledRes.count,
+                transactionsDeleted: transactionsDeletedRes.count,
+            });
         }
         const removeTransactions = Boolean(body.removeTransactions);
         const now = new Date();

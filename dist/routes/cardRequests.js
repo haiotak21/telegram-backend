@@ -14,6 +14,8 @@ const Customer_1 = __importDefault(require("../models/Customer"));
 const Card_1 = __importDefault(require("../models/Card"));
 const botService_1 = require("../services/botService");
 const apiResponse_1 = require("../utils/apiResponse");
+const prisma_1 = __importDefault(require("../utils/prisma"));
+const persistence_1 = require("../utils/persistence");
 const router = express_1.default.Router();
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
 const STROWALLET_PREFER_IPV4 = String(process.env.STROWALLET_PREFER_IPV4 || "true").toLowerCase() !== "false";
@@ -33,12 +35,12 @@ function normalizeMode(mode) {
 function normalizeKycStatus(value) {
     if (!value)
         return "not_started";
-    const v = String(value).toLowerCase();
-    if (["approved", "verified", "success", "active", "high kyc", "high_kyc", "high-kyc"].includes(v))
+    const compact = String(value).toLowerCase().replace(/[\s_-]+/g, "");
+    if (["approved", "verified", "success", "active", "highkyc"].includes(compact))
         return "approved";
-    if (["pending", "processing", "review", "unreview kyc", "unreview_kyc", "unreview-kyc"].includes(v))
+    if (["pending", "processing", "review", "unreviewkyc"].includes(compact))
         return "pending";
-    if (["declined", "rejected", "failed", "low kyc", "low_kyc", "low-kyc"].includes(v))
+    if (["declined", "rejected", "failed", "lowkyc"].includes(compact))
         return "rejected";
     return "pending";
 }
@@ -270,6 +272,47 @@ router.get("/", requireAdmin, async (req, res) => {
         const status = typeof req.query.status === "string" ? req.query.status : "pending";
         const limitRaw = Number(req.query.limit ?? 50);
         const limit = Number.isFinite(limitRaw) && limitRaw > 0 && limitRaw <= 200 ? limitRaw : 50;
+        if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+            const requests = await prisma_1.default.cardRequest.findMany({
+                where: status ? { status } : undefined,
+                orderBy: { createdAt: "desc" },
+                take: limit,
+            });
+            const userIds = Array.from(new Set(requests.map((r) => r.userId).filter(Boolean)));
+            const [users, cards] = await Promise.all([
+                userIds.length ? prisma_1.default.user.findMany({ where: { userId: { in: userIds } } }) : Promise.resolve([]),
+                userIds.length
+                    ? prisma_1.default.card.findMany({
+                        where: {
+                            userId: { in: userIds },
+                            status: { in: ["active", "ACTIVE", "frozen", "FROZEN"] },
+                        },
+                    })
+                    : Promise.resolve([]),
+            ]);
+            const userMap = new Map(users.map((u) => [u.userId, u]));
+            const activeCardMap = new Map();
+            for (const c of cards) {
+                if (c.userId && !activeCardMap.has(c.userId))
+                    activeCardMap.set(c.userId, c);
+            }
+            const enriched = requests.map((r) => {
+                const user = r.userId ? userMap.get(r.userId) : undefined;
+                const activeCard = r.userId ? activeCardMap.get(r.userId) : undefined;
+                const fullName = [user?.firstName, user?.lastName].filter(Boolean).join(" ") || undefined;
+                const last4 = r.cardNumber ? r.cardNumber.slice(-4) : undefined;
+                return {
+                    ...r,
+                    userName: fullName,
+                    customerEmail: r.customerEmail || user?.customerEmail,
+                    hasActiveCard: Boolean(activeCard),
+                    activeCardId: activeCard?.cardId,
+                    activeCardLast4: activeCard?.last4,
+                    last4,
+                };
+            });
+            return (0, apiResponse_1.ok)(res, { requests: enriched });
+        }
         const requests = await CardRequest_1.default.find(status ? { status } : {})
             .sort({ createdAt: -1 })
             .limit(limit)

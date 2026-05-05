@@ -51,10 +51,18 @@ async function main() {
       formatVersion: 1,
     },
     data: {
-      users: await backupTable("users", () => prisma.user.findMany({ orderBy: { createdAt: "asc" } })),
-      cards: await backupTable("cards", () => prisma.card.findMany({ orderBy: { createdAt: "asc" } })),
-      cardRequests: await backupTable("cardRequests", () => prisma.cardRequest.findMany({ orderBy: { createdAt: "asc" } })),
-      transactions: await backupTable("transactions", () => prisma.transaction.findMany({ orderBy: { createdAt: "asc" } })),
+      users: await backupTable("users", () =>
+        prisma.user.findMany({ orderBy: { createdAt: "asc" } }),
+      ),
+      cards: await backupTable("cards", () =>
+        prisma.card.findMany({ orderBy: { createdAt: "asc" } }),
+      ),
+      cardRequests: await backupTable("cardRequests", () =>
+        prisma.cardRequest.findMany({ orderBy: { createdAt: "asc" } }),
+      ),
+      transactions: await backupTable("transactions", () =>
+        prisma.transaction.findMany({ orderBy: { createdAt: "asc" } }),
+      ),
     },
   };
 

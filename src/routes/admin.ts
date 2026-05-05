@@ -112,45 +112,35 @@ function extractField(obj: any, keys: string[]): string | undefined {
 
 async function fetchCardDetail(cardId: string, mode?: string) {
   const public_key = requirePublicKey();
-  const resp = await bitvcard.post(
-    "fetch-card-detail/",
-    { card_id: cardId, public_key, mode },
-    {}
-  );
+  const params: any = { card_id: cardId, public_key };
+  if (mode) params.mode = mode;
+  const resp = await bitvcard.get("fetch-nfccard-detail/", { params });
   return resp.data;
 }
 
 async function actionCard(cardId: string, action: "freeze" | "unfreeze") {
   const public_key = requirePublicKey();
-  const payload = { card_id: cardId, action, public_key };
-  const resp = await bitvcard.post(
-    "action/status/",
-    payload,
-    {
-      // StroWallet docs require action/card_id/public_key in query params.
-      params: payload,
-    }
-  );
+  const status = action === "freeze" ? "frozen" : "active";
+  const params: any = { card_id: cardId, status, public_key };
+  const mode = normalizeMode(getDefaultMode());
+  if (mode) params.mode = mode;
+  const resp = await bitvcard.post("nfc-cards/status/", undefined, { params });
   return resp.data;
 }
 
 async function fundCard(cardId: string, amount: string, mode?: string) {
   const public_key = requirePublicKey();
-  const resp = await bitvcard.post(
-    "fund-card/",
-    { card_id: cardId, amount, public_key, mode },
-    {}
-  );
+  const params: any = { card_id: cardId, amount, public_key, type: "fund" };
+  if (mode) params.mode = mode;
+  const resp = await bitvcard.post("fund-withdraw-nfccard/", undefined, { params });
   return resp.data;
 }
 
 async function fetchCardTransactions(cardId: string, mode?: string) {
   const public_key = requirePublicKey();
-  const resp = await bitvcard.post(
-    "card-transactions/",
-    { card_id: cardId, public_key, mode },
-    {}
-  );
+  const params: any = { card_id: cardId, public_key };
+  if (mode) params.mode = mode;
+  const resp = await bitvcard.get("nfc-card-transactions/", { params });
   return resp.data;
 }
 

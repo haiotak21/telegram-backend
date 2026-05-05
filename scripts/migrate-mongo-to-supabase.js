@@ -217,10 +217,18 @@ async function migrateCardRequests(filter = {}) {
 
 async function truncatePrismaTables() {
   console.log("Truncating Supabase tables before migration...");
-  await prisma.$executeRawUnsafe('TRUNCATE TABLE "Transaction" RESTART IDENTITY CASCADE');
-  await prisma.$executeRawUnsafe('TRUNCATE TABLE "CardRequest" RESTART IDENTITY CASCADE');
-  await prisma.$executeRawUnsafe('TRUNCATE TABLE "Card" RESTART IDENTITY CASCADE');
-  await prisma.$executeRawUnsafe('TRUNCATE TABLE "User" RESTART IDENTITY CASCADE');
+  await prisma.$executeRawUnsafe(
+    'TRUNCATE TABLE "Transaction" RESTART IDENTITY CASCADE',
+  );
+  await prisma.$executeRawUnsafe(
+    'TRUNCATE TABLE "CardRequest" RESTART IDENTITY CASCADE',
+  );
+  await prisma.$executeRawUnsafe(
+    'TRUNCATE TABLE "Card" RESTART IDENTITY CASCADE',
+  );
+  await prisma.$executeRawUnsafe(
+    'TRUNCATE TABLE "User" RESTART IDENTITY CASCADE',
+  );
 }
 
 async function clearTargetUser(userId, customerEmail) {
@@ -241,7 +249,11 @@ async function clearTargetUser(userId, customerEmail) {
 
 async function resolveTargetUserFilter(targetUserId) {
   const users = await User.find({
-    $or: [{ userId: targetUserId }, { telegramId: targetUserId }, { chatId: targetUserId }],
+    $or: [
+      { userId: targetUserId },
+      { telegramId: targetUserId },
+      { chatId: targetUserId },
+    ],
   })
     .lean()
     .limit(1);
@@ -264,10 +276,16 @@ async function resolveTargetUserFilter(targetUserId) {
   return {
     userFilter: { userId: resolvedUserId },
     cardFilter: {
-      $or: [{ userId: resolvedUserId }, ...(customerEmail ? [{ customerEmail }] : [])],
+      $or: [
+        { userId: resolvedUserId },
+        ...(customerEmail ? [{ customerEmail }] : []),
+      ],
     },
     cardRequestFilter: {
-      $or: [{ userId: resolvedUserId }, ...(customerEmail ? [{ customerEmail }] : [])],
+      $or: [
+        { userId: resolvedUserId },
+        ...(customerEmail ? [{ customerEmail }] : []),
+      ],
     },
     transactionFilter: { userId: resolvedUserId },
     resolvedUserId,
@@ -307,9 +325,13 @@ async function main() {
   if (targetUserId) {
     const scope = await resolveTargetUserFilter(targetUserId);
     if (!scope.found) {
-      console.warn(`Target user ${targetUserId} not found in Mongo by userId/telegramId/chatId.`);
+      console.warn(
+        `Target user ${targetUserId} not found in Mongo by userId/telegramId/chatId.`,
+      );
     } else {
-      console.log(`Targeted restore for userId=${scope.resolvedUserId}${scope.customerEmail ? ` email=${scope.customerEmail}` : ""}`);
+      console.log(
+        `Targeted restore for userId=${scope.resolvedUserId}${scope.customerEmail ? ` email=${scope.customerEmail}` : ""}`,
+      );
     }
     if (wipeUser) {
       await clearTargetUser(scope.resolvedUserId, scope.customerEmail);

@@ -31,8 +31,26 @@ async function fundCard(cardId: string, amount: number, mode?: string) {
   const public_key = requirePublicKey();
   const resolvedMode = normalizeMode(mode ?? getDefaultMode());
   const payload = { card_id: cardId, amount: amount.toString(), public_key, mode: resolvedMode };
-  const resp = await axios.post(`${BITVCARD_BASE}fund-card/`, payload, { timeout: 20000 });
-  return resp.data;
+  try {
+    const resp = await axios.post(`${BITVCARD_BASE}fund-card/`, payload, { timeout: 20000 });
+    return resp.data;
+  } catch (firstError: any) {
+    const params: Record<string, string> = {
+      public_key,
+      card_id: cardId,
+      amount: amount.toString(),
+    };
+    if (resolvedMode) params.mode = resolvedMode;
+    const fallbackResp = await axios.post(`${BITVCARD_BASE}fund-card/`, payload, {
+      timeout: 20000,
+      params,
+    });
+    console.warn("[topup] fund-card primary attempt failed, fallback succeeded", {
+      firstStatus: firstError?.response?.status,
+      firstMessage: firstError?.response?.data?.message || firstError?.response?.data?.error || firstError?.message,
+    });
+    return fallbackResp.data;
+  }
 }
 
 export async function topUpCard(params: { userId: string; cardId: string; amountUsdt: number; mode?: string }) {

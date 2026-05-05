@@ -68,7 +68,7 @@ interface CreateCardSession {
   step: CreateCardStep;
   data: {
     nameOnCard?: string;
-    cardType?: "visa" | "mastercard";
+    cardType?: "visa" | "mastercard" | "nfc";
     amount?: string;
   };
 }
@@ -717,13 +717,13 @@ export async function initBot() {
     }
 
     if (action.startsWith("CARD_TYPE::")) {
-      const cardType = action.replace("CARD_TYPE::", "") as "visa" | "mastercard";
+      const cardType = action.replace("CARD_TYPE::", "") as "visa" | "mastercard" | "nfc";
       const session = createCardSessions.get(chatId);
       if (!session || session.step !== "type") {
         await bot!.answerCallbackQuery(query.id, { text: "Card session not active" }).catch(() => { });
         return;
       }
-      if (cardType !== "visa" && cardType !== "mastercard") return;
+      if (cardType !== "visa" && cardType !== "mastercard" && cardType !== "nfc") return;
       session.data.cardType = cardType;
       session.step = "amount";
       createCardSessions.set(chatId, session);
@@ -2971,11 +2971,27 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
 
   if (isPrismaPersistenceEnabled()) {
     try {
+      const idNumber = decryptKycIdNumber(customer?.idNumberEncrypted || user?.idNumberEncrypted);
+      const idType = mapIdTypeToNfc(customer?.idType || user?.idType || KYC_STATIC_IDTYPE);
+      const country = normalizeCountryCode(customer?.country || user?.country || KYC_STATIC_COUNTRY);
+      if (!idNumber || !idType || !country) {
+        throw new Error("Missing KYC fields required for NFC card (id number, id type, country). Please resubmit KYC.");
+      }
       const payload = {
-        name_on_card: nameOnCard,
-        card_type: "visa",
-        amount,
-        customerEmail,
+        name: nameOnCard,
+        first_name: customer?.firstName || user?.firstName || nameOnCard.split(" ")[0] || "User",
+        last_name: customer?.lastName || user?.lastName || nameOnCard.split(" ").slice(1).join(" ") || "",
+        dob: customer?.dateOfBirth || user?.dateOfBirth,
+        id_type: idType,
+        id_number: idNumber,
+        email: customerEmail,
+        line1: customer?.line1 || user?.line1 || "",
+        city: customer?.city || user?.city || KYC_STATIC_CITY,
+        state: customer?.state || user?.state || KYC_STATIC_STATE,
+        postal_code: customer?.zipCode || user?.zipCode || "00000",
+        country,
+        amount_usd: amount,
+        phone: customer?.phoneNumber || user?.phoneNumber || "",
       };
       const resp = await callStroWallet("create-card", "post", payload);
       const data: any = resp?.data ?? resp;
@@ -2990,7 +3006,7 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
           data: {
             userId,
             nameOnCard,
-            cardType: "visa",
+            cardType: "nfc",
             amount,
             customerEmail,
             mode: normalizeMode(getDefaultMode()) || null,
@@ -3013,7 +3029,7 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
         data: {
           userId,
           nameOnCard,
-          cardType: "visa",
+          cardType: "nfc",
           amount,
           customerEmail,
           mode: normalizeMode(getDefaultMode()) || null,
@@ -3032,7 +3048,7 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
           userId,
           customerEmail,
           nameOnCard,
-          cardType: "visa",
+          cardType: "nfc",
           status: data?.status || data?.state || "active",
           last4: data?.last4 || data?.card_last4 || (data?.card_number ? String(data.card_number).slice(-4) : null),
           currency: data?.currency || data?.ccy || null,
@@ -3043,7 +3059,7 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
           userId,
           customerEmail,
           nameOnCard,
-          cardType: "visa",
+          cardType: "nfc",
           status: data?.status || data?.state || "active",
           last4: data?.last4 || data?.card_last4 || (data?.card_number ? String(data.card_number).slice(-4) : null),
           currency: data?.currency || data?.ccy || null,
@@ -3084,7 +3100,7 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
     const resp = await axios.post(`${BACKEND_BASE}/api/card-requests`, {
       userId,
       nameOnCard,
-      cardType: "visa",
+      cardType: "nfc",
       amount,
       customerEmail,
     });
@@ -3180,7 +3196,7 @@ async function handleCreateCardMessage(msg: any, session: CreateCardSession) {
 async function promptCreateCardStep(chatId: number, session: CreateCardSession) {
   switch (session.step) {
     case "type":
-      session.data.cardType = "visa";
+      session.data.cardType = "nfc";
       session.step = "amount";
       createCardSessions.set(chatId, session);
       await promptCreateCardStep(chatId, session);
@@ -3222,6 +3238,8 @@ function buildCreateCardSummary(data: CreateCardSession["data"]) {
 async function submitCreateCard(chatId: number, session: CreateCardSession) {
   const userId = String(chatId);
   const { user, customer } = await getUserAndCustomerContext(userId);
+  const userRecord = user as any;
+  const customerRecord = customer as any;
   if (!customer || customer.kycStatus !== "approved") {
     createCardSessions.delete(chatId);
     await bot!.sendMessage(chatId, "❌ You must complete and pass KYC before creating a card.", {
@@ -3238,11 +3256,27 @@ async function submitCreateCard(chatId: number, session: CreateCardSession) {
     return;
   }
   try {
+    const idNumber = decryptKycIdNumber(customerRecord?.idNumberEncrypted || userRecord?.idNumberEncrypted);
+    const idType = mapIdTypeToNfc(customerRecord?.idType || userRecord?.idType || KYC_STATIC_IDTYPE);
+    const country = normalizeCountryCode(customerRecord?.country || userRecord?.country || KYC_STATIC_COUNTRY);
+    if (!idNumber || !idType || !country) {
+      throw new Error("Missing KYC fields required for NFC card (id number, id type, country). Please resubmit KYC.");
+    }
     const payload = {
-      name_on_card: session.data.nameOnCard || "Virtual Card",
-      card_type: session.data.cardType || "visa",
-      amount: session.data.amount || "3",
-      customerEmail,
+      name: session.data.nameOnCard || "Virtual Card",
+      first_name: customerRecord?.firstName || userRecord?.firstName || (session.data.nameOnCard || "User").split(" ")[0],
+      last_name: customerRecord?.lastName || userRecord?.lastName || (session.data.nameOnCard || "").split(" ").slice(1).join(" "),
+      dob: customerRecord?.dateOfBirth || userRecord?.dateOfBirth,
+      id_type: idType,
+      id_number: idNumber,
+      email: customerEmail,
+      line1: customerRecord?.line1 || userRecord?.line1 || "",
+      city: customerRecord?.city || userRecord?.city || KYC_STATIC_CITY,
+      state: customerRecord?.state || userRecord?.state || KYC_STATIC_STATE,
+      postal_code: customerRecord?.zipCode || userRecord?.zipCode || "00000",
+      country,
+      amount_usd: session.data.amount || "3",
+      phone: customerRecord?.phoneNumber || userRecord?.phoneNumber || "",
     };
     const resp = await callStroWallet("create-card", "post", payload);
     const data = resp?.data ?? resp;
@@ -3266,8 +3300,8 @@ async function submitCreateCard(chatId: number, session: CreateCardSession) {
             cardId,
             userId,
             customerEmail,
-            nameOnCard: payload.name_on_card,
-            cardType: payload.card_type,
+            nameOnCard: payload.name,
+            cardType: "nfc",
             status: data?.status || data?.state || "active",
             currency: data?.currency || data?.ccy || null,
             balance: (data?.balance || data?.available_balance || null) != null ? String(data?.balance || data?.available_balance) : null,
@@ -3277,8 +3311,8 @@ async function submitCreateCard(chatId: number, session: CreateCardSession) {
           update: {
             userId,
             customerEmail,
-            nameOnCard: payload.name_on_card,
-            cardType: payload.card_type,
+            nameOnCard: payload.name,
+            cardType: "nfc",
             status: data?.status || data?.state || "active",
             currency: data?.currency || data?.ccy || null,
             balance: (data?.balance || data?.available_balance || null) != null ? String(data?.balance || data?.available_balance) : null,
@@ -3294,8 +3328,8 @@ async function submitCreateCard(chatId: number, session: CreateCardSession) {
               cardId,
               userId,
               customerEmail,
-              nameOnCard: payload.name_on_card,
-              cardType: payload.card_type,
+              nameOnCard: payload.name,
+              cardType: "nfc",
               status: data?.status || data?.state || "active",
               currency: data?.currency || data?.ccy,
               balance: data?.balance || data?.available_balance,
@@ -3757,6 +3791,50 @@ function encryptKycIdNumber(idNumber: string) {
   const ciphertext = Buffer.concat([cipher.update(idNumber, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
   return `v1:${iv.toString("base64")}:${tag.toString("base64")}:${ciphertext.toString("base64")}`;
+}
+
+function decryptKycIdNumber(encrypted?: string) {
+  if (!encrypted) return undefined;
+  if (!encrypted.startsWith("v1:")) return undefined;
+  const key = getKycEncryptionKey();
+  if (!key) return undefined;
+  const parts = encrypted.split(":");
+  if (parts.length !== 4) return undefined;
+  const iv = Buffer.from(parts[1], "base64");
+  const tag = Buffer.from(parts[2], "base64");
+  const ciphertext = Buffer.from(parts[3], "base64");
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAuthTag(tag);
+  const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  return plaintext.toString("utf8");
+}
+
+function normalizeCountryCode(value?: string) {
+  const raw = String(value || "").trim();
+  if (!raw) return undefined;
+  if (raw.length === 3) return raw.toUpperCase();
+  const normalized = raw.toLowerCase();
+  const map: Record<string, string> = {
+    ghana: "GHA",
+    nigeria: "NGA",
+    ethiopia: "ETH",
+    kenya: "KEN",
+    uganda: "UGA",
+    tanzania: "TZA",
+    rwanda: "RWA",
+    burundi: "BDI",
+    sudan: "SDN",
+    "south sudan": "SSD",
+  };
+  return map[normalized];
+}
+
+function mapIdTypeToNfc(value?: string) {
+  const v = String(value || "").toLowerCase();
+  if (v === "nin" || v === "national_id" || v === "nationalid") return "national_id";
+  if (v === "passport") return "passport";
+  if (v === "driving_license" || v === "drivers_license" || v === "drivinglicense") return "drivers_license";
+  return undefined;
 }
 
 function extractCustomerId(payload: any) {

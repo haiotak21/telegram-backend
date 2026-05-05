@@ -1,0 +1,11 @@
+{
+  "key": "default",
+  "usdtRate": 1,
+  "depositPercentFee": 0,
+  "depositFlatFee": 0,
+  "topupPercentFee": 0,
+  "topupFlatFee": 0,
+  "cardRequestFeeEtb": 0,
+  "firstCardAmountUsd": 5,
+  "firstCardFeeUsd": 0
+}
