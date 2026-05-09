@@ -218,6 +218,25 @@ router.post("/create-user", async (req, res) => {
       country: body.country,
       idType: body.idType,
     } as Record<string, string>;
+
+    const tryCardUserFallback = async () => {
+      try {
+        const altResp = await bitvcard.post("card-user/", payload, {
+          headers: { "Content-Type": "application/json" },
+          params: queryParams,
+        });
+        return altResp.data;
+      } catch {
+        const altResp = await bitvcard.get("card-user/", { params: queryParams });
+        return altResp.data;
+      }
+    };
+
+    const tryCreateUserGet = async () => {
+      const resp = await bitvcard.get("create-user/", { params: queryParams });
+      return resp.data;
+    };
+
     let data: any;
     try {
       const resp = await bitvcard.post("create-user/", payload, {
@@ -226,36 +245,32 @@ router.post("/create-user", async (req, res) => {
       data = resp.data;
       const msg = String(data?.message || data?.error || "");
       if (data?.success === false && /register card user failed/i.test(msg)) {
-        const altResp = await bitvcard.post("card-user/", payload, {
-          headers: { "Content-Type": "application/json" },
-          params: queryParams,
-        });
-        data = altResp.data;
+        data = await tryCardUserFallback();
       }
     } catch (firstError: any) {
-      // Fallback for provider deployments that only parse URL query params.
-      try {
-        const fallbackResp = await bitvcard.post("create-user/", payload, {
-          headers: { "Content-Type": "application/json" },
-          params: queryParams,
-        });
-        data = fallbackResp.data;
-        console.warn("[strowallet] create-user primary attempt failed, fallback succeeded", {
-          firstStatus: firstError?.response?.status,
-          firstMessage: firstError?.response?.data?.message || firstError?.response?.data?.error || firstError?.message,
-        });
-      } catch (secondError: any) {
-        const altResp = await bitvcard.post("card-user/", payload, {
-          headers: { "Content-Type": "application/json" },
-          params: queryParams,
-        });
-        data = altResp.data;
-        console.warn("[strowallet] create-user attempts failed; card-user fallback used", {
-          firstStatus: firstError?.response?.status,
-          firstMessage: firstError?.response?.data?.message || firstError?.response?.data?.error || firstError?.message,
-          secondStatus: secondError?.response?.status,
-          secondMessage: secondError?.response?.data?.message || secondError?.response?.data?.error || secondError?.message,
-        });
+      if (firstError?.response?.status === 405) {
+        data = await tryCreateUserGet();
+      } else {
+        // Fallback for provider deployments that only parse URL query params.
+        try {
+          const fallbackResp = await bitvcard.post("create-user/", payload, {
+            headers: { "Content-Type": "application/json" },
+            params: queryParams,
+          });
+          data = fallbackResp.data;
+          console.warn("[strowallet] create-user primary attempt failed, fallback succeeded", {
+            firstStatus: firstError?.response?.status,
+            firstMessage: firstError?.response?.data?.message || firstError?.response?.data?.error || firstError?.message,
+          });
+        } catch (secondError: any) {
+          data = await tryCardUserFallback();
+          console.warn("[strowallet] create-user attempts failed; card-user fallback used", {
+            firstStatus: firstError?.response?.status,
+            firstMessage: firstError?.response?.data?.message || firstError?.response?.data?.error || firstError?.message,
+            secondStatus: secondError?.response?.status,
+            secondMessage: secondError?.response?.data?.message || secondError?.response?.data?.error || secondError?.message,
+          });
+        }
       }
     }
     const customerId =
