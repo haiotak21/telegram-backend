@@ -4012,6 +4012,7 @@ async function submitKyc(chatId: number, session: KycSession) {
   const userPhotoForApi = await embedTelegramMedia(data.userPhoto);
   const idImagePayload = await normalizeKycImagePayload(idImageForApi);
   const userPhotoPayload = await normalizeKycImagePayload(userPhotoForApi);
+  const emailForApi = String(data.customerEmail || "").trim().toLowerCase();
   const countryForApi = KYC_STATIC_COUNTRY;
   const stateForApi = KYC_STATIC_STATE;
   const cityForApi = KYC_STATIC_CITY;
@@ -4021,7 +4022,7 @@ async function submitKyc(chatId: number, session: KycSession) {
     lastName: data.lastName,
     dateOfBirth: data.dateOfBirth,
     phoneNumber: data.phoneNumber,
-    customerEmail: data.customerEmail,
+    customerEmail: emailForApi,
     line1: data.line1,
     city: cityForApi,
     state: stateForApi,
@@ -4085,7 +4086,7 @@ async function submitKyc(chatId: number, session: KycSession) {
           const lookup = await callStroWallet(
             "getcardholder",
             "get",
-            { customerEmail: data.customerEmail },
+            { customerEmail: emailForApi },
             { silentOnStatus: [404] }
           );
           customerId = extractCustomerId(lookup);
@@ -4100,7 +4101,7 @@ async function submitKyc(chatId: number, session: KycSession) {
       // Keep KYC pending and let later status sync resolve customerId by email.
       console.warn("[bot] KYC create-user succeeded without immediate customerId", {
         chatId,
-        email: data.customerEmail,
+        email: emailForApi,
       });
     }
     const idNumberEncrypted = encryptKycIdNumber(data.idNumber);
@@ -4122,7 +4123,7 @@ async function submitKyc(chatId: number, session: KycSession) {
           lastName: data.lastName,
           dateOfBirth: data.dateOfBirth,
           phoneNumber: data.phoneNumber,
-          customerEmail: data.customerEmail,
+          customerEmail: emailForApi,
           line1: data.line1,
           city: data.city,
           state: data.state,
@@ -4146,7 +4147,7 @@ async function submitKyc(chatId: number, session: KycSession) {
           lastName: data.lastName,
           dateOfBirth: data.dateOfBirth,
           phoneNumber: data.phoneNumber,
-          customerEmail: data.customerEmail,
+          customerEmail: emailForApi,
           line1: data.line1,
           city: data.city,
           state: data.state,
@@ -4201,7 +4202,7 @@ async function submitKyc(chatId: number, session: KycSession) {
         {
           $set: {
             customerId: customerId || undefined,
-            email: data.customerEmail,
+            email: emailForApi,
             telegramId: user?.telegramId || userId,
             chatId: user?.chatId || userId,
             username: user?.username,
