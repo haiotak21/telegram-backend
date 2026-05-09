@@ -4012,10 +4012,10 @@ async function submitKyc(chatId: number, session: KycSession) {
   const userPhotoForApi = await embedTelegramMedia(data.userPhoto);
   const idImagePayload = await normalizeKycImagePayload(idImageForApi);
   const userPhotoPayload = await normalizeKycImagePayload(userPhotoForApi);
-  const countryForApi = data.country || KYC_STATIC_COUNTRY;
-  const stateForApi = data.state || KYC_STATIC_STATE;
-  const cityForApi = data.city || KYC_STATIC_CITY;
-  const idTypeForApi = data.idType || KYC_STATIC_IDTYPE;
+  const countryForApi = KYC_STATIC_COUNTRY;
+  const stateForApi = KYC_STATIC_STATE;
+  const cityForApi = KYC_STATIC_CITY;
+  const idTypeForApi = KYC_STATIC_IDTYPE;
   const createPayload = {
     firstName: data.firstName,
     lastName: data.lastName,
