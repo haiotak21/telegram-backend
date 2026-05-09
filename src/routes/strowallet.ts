@@ -10,12 +10,13 @@ const router = express.Router();
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
 const API_BASE = "https://strowallet.com/api/"; // for apicard-transactions
 const STROWALLET_PREFER_IPV4 = String(process.env.STROWALLET_PREFER_IPV4 || "true").toLowerCase() !== "false";
+const STROWALLET_HTTP_TIMEOUT_MS = Number(process.env.STROWALLET_HTTP_TIMEOUT_MS || 30000);
 const httpAgent = STROWALLET_PREFER_IPV4 ? new http.Agent({ keepAlive: true, family: 4 } as any) : undefined;
 const httpsAgent = STROWALLET_PREFER_IPV4 ? new https.Agent({ keepAlive: true, family: 4 } as any) : undefined;
 
 const bitvcard = axios.create({
   baseURL: BITVCARD_BASE,
-  timeout: 15000,
+  timeout: STROWALLET_HTTP_TIMEOUT_MS,
   httpAgent,
   httpsAgent,
   headers: {
@@ -58,7 +59,7 @@ function pickCardId(req: express.Request) {
 
 const api = axios.create({
   baseURL: API_BASE,
-  timeout: 15000,
+  timeout: STROWALLET_HTTP_TIMEOUT_MS,
   httpAgent,
   httpsAgent,
   headers: {
@@ -368,10 +369,42 @@ const CreateNfcCardSchema = z.object({
   mode: z.string().optional(),
 });
 
+const LegacyCreateCardSchema = z.object({
+  name_on_card: z.string().min(1),
+  card_type: z.string().min(1),
+  amount: amountString,
+  customerEmail: z.string().email().optional(),
+  customer_email: z.string().email().optional(),
+  mode: z.string().optional(),
+});
+
 router.post("/create-card", async (req, res) => {
   try {
-    const body = applyDefaultMode(CreateNfcCardSchema.parse(req.body || {}));
+    const rawBody = req.body || {};
+    const useLegacy =
+      rawBody?.name_on_card ||
+      rawBody?.card_type ||
+      rawBody?.amount ||
+      rawBody?.customerEmail ||
+      rawBody?.customer_email;
     const public_key = requirePublicKey();
+
+    if (useLegacy) {
+      const parsed = applyDefaultMode(LegacyCreateCardSchema.parse(rawBody));
+      const payload = {
+        ...parsed,
+        customerEmail: parsed.customerEmail || parsed.customer_email,
+        public_key,
+      } as Record<string, any>;
+      delete payload.customer_email;
+      const resp = await bitvcard.post("create-card/", payload, {
+        headers: { "Content-Type": "application/json" },
+        params: payload,
+      });
+      return ok(res, resp.data, 200);
+    }
+
+    const body = applyDefaultMode(CreateNfcCardSchema.parse(rawBody));
     const params = { ...body, public_key };
     const resp = await bitvcard.post("create-nfc-card/", undefined, { params });
     return ok(res, resp.data, 200);

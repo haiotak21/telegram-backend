@@ -3775,6 +3775,15 @@ async function toDataUriFromUrl(url: string) {
   return `data:${contentType};base64,${base64}`;
 }
 
+async function normalizeKycImagePayload(value?: string) {
+  if (!value) return value;
+  if (value.startsWith("data:")) return value;
+  if (isHttpUrl(value)) {
+    return await toDataUriFromUrl(value);
+  }
+  return value;
+}
+
 let cloudinaryReady: boolean | null = null;
 
 function ensureCloudinary() {
@@ -4001,6 +4010,8 @@ async function submitKyc(chatId: number, session: KycSession) {
   const idImageSource = data.idImagePdf || data.idImageFront || data.idImage || data.idImageBack;
   const idImageForApi = await embedTelegramMedia(idImageSource);
   const userPhotoForApi = await embedTelegramMedia(data.userPhoto);
+  const idImagePayload = await normalizeKycImagePayload(idImageForApi);
+  const userPhotoPayload = await normalizeKycImagePayload(userPhotoForApi);
   const countryForApi = KYC_STATIC_COUNTRY;
   const stateForApi = KYC_STATIC_STATE;
   const cityForApi = KYC_STATIC_CITY;
@@ -4019,16 +4030,16 @@ async function submitKyc(chatId: number, session: KycSession) {
     houseNumber: data.houseNumber,
     idType: idTypeForApi,
     idNumber: data.idNumber,
-    idImage: idImageForApi,
-    userPhoto: userPhotoForApi,
+    idImage: idImagePayload,
+    userPhoto: userPhotoPayload,
   };
 
   const updatePayload = {
     customerId: undefined as string | undefined,
     firstName: data.firstName,
     lastName: data.lastName,
-    idImage: idImageForApi,
-    userPhoto: userPhotoForApi,
+    idImage: idImagePayload,
+    userPhoto: userPhotoPayload,
     phoneNumber: data.phoneNumber,
     country: countryForApi,
     city: cityForApi,
@@ -4053,14 +4064,15 @@ async function submitKyc(chatId: number, session: KycSession) {
       resp = await callStroWallet("create-user", "post", createPayload);
     }
 
+    const respData = (resp as any)?.data ?? resp;
     console.log("[bot] KYC provider response", {
       chatId,
       mode: session.mode,
       hasCustomerId: Boolean(extractCustomerId(resp)),
-      success: (resp as any)?.success,
-      status: (resp as any)?.status,
-      message: (resp as any)?.message,
-      error: (resp as any)?.error,
+      success: respData?.success,
+      status: respData?.status,
+      message: respData?.message,
+      error: respData?.error,
     });
 
     ensureProviderAcceptedKyc(resp);

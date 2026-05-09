@@ -1196,6 +1196,7 @@
 
       let lastConfig = null;
       const READ_ONLY = true;
+      const ALLOW_CARD_TOGGLE = true;
       let broadcastImageUrl = "";
       let broadcastPolling = null;
       let activeBroadcastId = null;
@@ -1834,6 +1835,9 @@
             const status = c.status || "unknown";
             const statusLabel = status === "frozen" ? "blocked" : status;
             const maskedId = c.last4 ? `•••• ${c.last4}` : c.cardId;
+            const toggleDisabled = ALLOW_CARD_TOGGLE
+              ? ""
+              : "disabled title=\"Read-only\"";
             return `
               <div class="req-card" data-id="${c.cardId}">
                 <div class="mono req-line">Card ID: ${maskedId}</div>
@@ -1845,7 +1849,7 @@
                 <div class="req-line">Updated: ${updated}</div>
                 <div class="toolbar" style="margin-top:6px">
                   <button class="secondary" data-action="refresh" data-id="${c.cardId}">Refresh</button>
-                  <button class="secondary" data-action="toggle" data-status="${status}" data-id="${c.cardId}" disabled title="Read-only">${status === "frozen" ? "Unblock" : "Block"}</button>
+                  <button class="secondary" data-action="toggle" data-status="${status}" data-id="${c.cardId}" ${toggleDisabled}>${status === "frozen" ? "Unblock" : "Block"}</button>
                   <button class="secondary" data-action="fund" data-id="${c.cardId}" disabled title="Read-only">Fund</button>
                   <button class="secondary" data-action="txns" data-id="${c.cardId}">Transactions</button>
                 </div>
@@ -2758,8 +2762,15 @@
           const id = target?.dataset?.id;
           if (!action || !id) return;
           if (
-            (action === "toggle" || action === "fund") &&
+            action === "toggle" &&
+            !ALLOW_CARD_TOGGLE &&
             blockIfReadOnly("Card actions are disabled in read-only mode")
+          ) {
+            return;
+          }
+          if (
+            action === "fund" &&
+            blockIfReadOnly("Card funding is disabled in read-only mode")
           ) {
             return;
           }

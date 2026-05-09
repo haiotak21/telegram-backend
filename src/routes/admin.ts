@@ -1034,7 +1034,9 @@ router.post("/cards/:cardId/action", requireAdmin, async (req, res) => {
   try {
     const cardId = String(req.params.cardId);
     const action = req.body?.action === "freeze" ? "freeze" : "unfreeze";
-    const card = await Card.findOne({ cardId });
+    const card = isPrismaPersistenceEnabled()
+      ? await prisma.card.findUnique({ where: { cardId } })
+      : await Card.findOne({ cardId });
     if (!card) return fail(res, "Card not found", 404);
     const currentStatus = String(card.status || "").toLowerCase();
     if (action === "freeze" && currentStatus === "frozen") {
@@ -1044,12 +1046,20 @@ router.post("/cards/:cardId/action", requireAdmin, async (req, res) => {
       return fail(res, "Card already active", 400);
     }
     const result = await actionCard(cardId, action);
-    await Card.findOneAndUpdate(
-      { cardId },
-      { $set: { status: action === "freeze" ? "frozen" : "active", lastSync: new Date() } },
-      { new: true }
-    );
-    await notifyCardStatusChanged(cardId, action === "freeze" ? "frozen" : "active");
+    const nextStatus = action === "freeze" ? "frozen" : "active";
+    if (isPrismaPersistenceEnabled()) {
+      await prisma.card.update({
+        where: { cardId },
+        data: { status: nextStatus, lastSync: new Date() },
+      });
+    } else {
+      await Card.findOneAndUpdate(
+        { cardId },
+        { $set: { status: nextStatus, lastSync: new Date() } },
+        { new: true }
+      );
+    }
+    await notifyCardStatusChanged(cardId, nextStatus);
     return ok(res, { result });
   } catch (e) {
     const { status, message } = normalizeError(e);

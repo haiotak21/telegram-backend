@@ -8,12 +8,13 @@ import request from 'supertest';
 import strowalletRouter from '../src/routes/strowallet';
 
 const publicKey = process.env.STROWALLET_PUBLIC_KEY;
+const runLiveTests = String(process.env.STROWALLET_RUN_LIVE_TESTS || "").toLowerCase() === "true";
 
 describe('StroWallet proxy destructive live checks', () => {
   let app: express.Express;
   beforeAll(() => {
-    if (!publicKey) {
-      console.warn('Skipping destructive live checks: STROWALLET_PUBLIC_KEY not set');
+    if (!publicKey || !runLiveTests) {
+      console.warn('Skipping destructive live checks: STROWALLET_RUN_LIVE_TESTS not enabled or STROWALLET_PUBLIC_KEY missing');
     }
     app = express();
     app.use(express.json());
@@ -21,7 +22,7 @@ describe('StroWallet proxy destructive live checks', () => {
   });
 
   it('create user -> create card -> fund card -> fetch details', async () => {
-    if (!publicKey) return;
+    if (!publicKey || !runLiveTests) return;
 
     // 1) Create a test user
     const email = `live-test-${Date.now()}@example.com`;
