@@ -280,17 +280,23 @@ router.post("/create-user", async (req, res) => {
       data?.customer_id;
     if (!customerId && body.customerEmail) {
       try {
-        const lookup = await bitvcard.get("getcardholder/", {
-          params: { public_key, customerEmail: body.customerEmail },
-        });
-        const lookupData = lookup.data;
-        const lookupId =
-          lookupData?.data?.customerId ||
-          lookupData?.data?.customer_id ||
-          lookupData?.customerId ||
-          lookupData?.customer_id;
-        if (lookupId) {
-          data.response = { ...(data.response || {}), customerId: lookupId };
+        const maxAttempts = Number(process.env.STROWALLET_LOOKUP_ATTEMPTS || (process.env.NODE_ENV === "test" ? 1 : 6));
+        const delayMs = Number(process.env.STROWALLET_LOOKUP_DELAY_MS || 1200);
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+          if (attempt > 0) await delay(delayMs);
+          const lookup = await bitvcard.get("getcardholder/", {
+            params: { public_key, customerEmail: body.customerEmail },
+          });
+          const lookupData = lookup.data;
+          const lookupId =
+            lookupData?.data?.customerId ||
+            lookupData?.data?.customer_id ||
+            lookupData?.customerId ||
+            lookupData?.customer_id;
+          if (lookupId) {
+            data.response = { ...(data.response || {}), customerId: lookupId };
+            break;
+          }
         }
       } catch {
         // ignore lookup failures
