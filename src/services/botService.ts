@@ -3818,6 +3818,9 @@ async function sendMyCards(chatId: number, message?: any) {
       (remoteDetail?.balance ?? remoteDetail?.available_balance ?? card.balance ?? user?.balance),
       remoteDetail?.currency || card.currency || user?.currency || "USD"
     );
+    const profileFallback = buildProfileAddressFallback(user, null);
+    const billing = remoteDetail?.billing || profileFallback.billing;
+    const address = remoteDetail?.address || profileFallback.address;
     const lines = [
       "💳 Your Virtual Card",
       `Card Type: ${String(card.cardType || "virtual").toLowerCase()}`,
@@ -3826,8 +3829,8 @@ async function sendMyCards(chatId: number, message?: any) {
       `Card Number: ${fullCardNumber || formatMaskedCard((remoteDetail?.last4 || card.last4) || undefined)}`,
       cvc ? `CVV: ${cvc}` : undefined,
       validThru ? `Valid Thru: ${validThru}` : undefined,
-      `Billing: ${remoteDetail?.billing || "None"}`,
-      `Address: ${remoteDetail?.address || "None"}`,
+      `Billing: ${billing || "None"}`,
+      `Address: ${address || "None"}`,
       balanceLabel ? `Balance: ${balanceLabel}` : undefined,
     ].filter(Boolean) as string[];
     const freezeAction = isFrozenStatus(card.status || undefined) ? "CARD_UNFREEZE" : "CARD_FREEZE";
@@ -3914,8 +3917,9 @@ async function sendMyCards(chatId: number, message?: any) {
     mergedDetail?.currency || activeCard.currency || user?.currency || "USD"
   );
   const expiry = extractExpiry(mergedDetail) || extractExpiry(latestRequest?.responseData || latestRequest?.metadata || {});
-  const billing = mergedDetail?.billing || latestRequest?.metadata?.billing;
-  const address = mergedDetail?.address || latestRequest?.metadata?.address;
+  const profileFallback = buildProfileAddressFallback(user, customer);
+  const billing = mergedDetail?.billing || latestRequest?.metadata?.billing || profileFallback.billing;
+  const address = mergedDetail?.address || latestRequest?.metadata?.address || profileFallback.address;
   const lines = [
     "💳 Your Virtual Card",
     `Card Type: ${cardType}`,
@@ -4160,6 +4164,7 @@ async function sendCardSensitiveDetails(chatId: number, cardId: string) {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
   }
+  const { user, customer } = await getUserAndCustomerContext(String(chatId));
   const local = await CardRequest.findOne({ cardId, status: "approved" }).lean();
   const localExpiry = extractExpiry(local?.responseData || local?.metadata || {});
   const localBilling = local?.metadata?.billing;
@@ -4168,8 +4173,9 @@ async function sendCardSensitiveDetails(chatId: number, cardId: string) {
   const cardNumber = local?.cardNumber || remote?.card_number;
   const cvc = local?.cvc || remote?.cvc;
   const expiry = localExpiry || extractExpiry(remote);
-  const billing = localBilling || remote?.billing;
-  const address = localAddress || remote?.address;
+  const profileFallback = buildProfileAddressFallback(user, customer);
+  const billing = localBilling || remote?.billing || profileFallback.billing;
+  const address = localAddress || remote?.address || profileFallback.address;
 
   if (!cardNumber || !cvc) {
     await bot!.sendMessage(chatId, "Full card details are not available. Please try again later or contact support.", {
@@ -4212,10 +4218,11 @@ async function sendCardTransactions(chatId: number, cardId?: string, pageRaw: nu
 
     if (isPrismaPersistenceEnabled()) {
       const since = daysFilter > 0 ? new Date(Date.now() - daysFilter * 24 * 60 * 60 * 1000) : null;
+      const transactionTypes = ["card", "deposit", "withdrawal"] as const;
       const rows = await prisma.transaction.findMany({
         where: {
           userId,
-          transactionType: "card",
+          transactionType: { in: [...transactionTypes] },
           ...(since ? { createdAt: { gte: since } } : {}),
         },
         orderBy: { createdAt: "desc" },
@@ -4226,6 +4233,11 @@ async function sendCardTransactions(chatId: number, cardId?: string, pageRaw: nu
         ? (() => {
             const out: any[] = [];
             for (const row of rows as any[]) {
+              const type = String((row as any).transactionType || "");
+              if (type === "deposit") {
+                out.push(row);
+                continue;
+              }
               const metaCardId = String((row as any)?.metadata?.cardId || "");
               const respCardId = String((row as any)?.responseData?.card_id || (row as any)?.responseData?.cardId || "");
               if (metaCardId === cardId || respCardId === cardId) out.push(row);
@@ -4239,8 +4251,16 @@ async function sendCardTransactions(chatId: number, cardId?: string, pageRaw: nu
       page = Math.min(requestedPage, totalPages);
       txns = filtered.slice((page - 1) * pageSize, page * pageSize);
     } else {
-      const query: any = { userId };
-      if (cardId) query["metadata.cardId"] = cardId;
+      const transactionTypes = ["card", "deposit", "withdrawal"] as const;
+      const query: any = { userId, transactionType: { $in: transactionTypes } };
+      if (cardId) {
+        query.$or = [
+          { transactionType: "deposit" },
+          { "metadata.cardId": cardId },
+          { "responseData.card_id": cardId },
+          { "responseData.cardId": cardId },
+        ];
+      }
       if (daysFilter > 0) {
         const since = new Date(Date.now() - daysFilter * 24 * 60 * 60 * 1000);
         query.createdAt = { $gte: since };
@@ -4598,6 +4618,26 @@ function buildCardDetailMessage(detail: any, cardId: string) {
   ].filter(Boolean) as string[];
 
   return lines.join("\n");
+}
+
+function buildProfileAddressFallback(user?: any, customer?: any) {
+  const line1 = String(user?.line1 || customer?.line1 || "").trim();
+  const city = String(user?.city || customer?.city || PROFILE_STATIC_CITY || "").trim();
+  const zipCode = String(user?.zipCode || customer?.zipCode || "").trim();
+  const country = String(user?.country || customer?.country || PROFILE_STATIC_COUNTRY || "").trim();
+
+  const billingParts: string[] = [];
+  if (line1) billingParts.push(line1);
+  if (line1 && city) billingParts.push(city);
+
+  const addressParts: string[] = [];
+  if (zipCode) addressParts.push(zipCode);
+  if (zipCode && country) addressParts.push(country);
+
+  return {
+    billing: billingParts.length ? billingParts.join(", ") : undefined,
+    address: addressParts.length ? addressParts.join(", ") : undefined,
+  };
 }
 
 async function fetchCardDetailSafe(cardId: string) {

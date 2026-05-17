@@ -13,11 +13,12 @@ const router = express_1.default.Router();
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
 const API_BASE = "https://strowallet.com/api/"; // for apicard-transactions
 const STROWALLET_PREFER_IPV4 = String(process.env.STROWALLET_PREFER_IPV4 || "true").toLowerCase() !== "false";
+const STROWALLET_HTTP_TIMEOUT_MS = Number(process.env.STROWALLET_HTTP_TIMEOUT_MS || 30000);
 const httpAgent = STROWALLET_PREFER_IPV4 ? new http_1.default.Agent({ keepAlive: true, family: 4 }) : undefined;
 const httpsAgent = STROWALLET_PREFER_IPV4 ? new https_1.default.Agent({ keepAlive: true, family: 4 }) : undefined;
 const bitvcard = axios_1.default.create({
     baseURL: BITVCARD_BASE,
-    timeout: 15000,
+    timeout: STROWALLET_HTTP_TIMEOUT_MS,
     httpAgent,
     httpsAgent,
     headers: {
@@ -57,7 +58,7 @@ function pickCardId(req) {
 }
 const api = axios_1.default.create({
     baseURL: API_BASE,
-    timeout: 15000,
+    timeout: STROWALLET_HTTP_TIMEOUT_MS,
     httpAgent,
     httpsAgent,
     headers: {
@@ -194,40 +195,77 @@ router.post("/create-user", async (req, res) => {
         const body = CreateCustomerSchema.parse(req.body || {});
         const public_key = requirePublicKey();
         const payload = { ...body, public_key };
+        const queryParams = {
+            public_key,
+            houseNumber: body.houseNumber,
+            firstName: body.firstName,
+            lastName: body.lastName,
+            idNumber: body.idNumber,
+            customerEmail: body.customerEmail,
+            phoneNumber: body.phoneNumber,
+            dateOfBirth: body.dateOfBirth,
+            line1: body.line1,
+            state: body.state,
+            zipCode: body.zipCode,
+            city: body.city,
+            country: body.country,
+            idType: body.idType,
+        };
+        const tryCardUserFallback = async () => {
+            try {
+                const altResp = await bitvcard.post("card-user/", payload, {
+                    headers: { "Content-Type": "application/json" },
+                    params: queryParams,
+                });
+                return altResp.data;
+            }
+            catch {
+                const altResp = await bitvcard.get("card-user/", { params: queryParams });
+                return altResp.data;
+            }
+        };
+        const tryCreateUserGet = async () => {
+            const resp = await bitvcard.get("create-user/", { params: queryParams });
+            return resp.data;
+        };
         let data;
         try {
             const resp = await bitvcard.post("create-user/", payload, {
                 headers: { "Content-Type": "application/json" },
             });
             data = resp.data;
+            const msg = String(data?.message || data?.error || "");
+            if (data?.success === false && /register card user failed/i.test(msg)) {
+                data = await tryCardUserFallback();
+            }
         }
         catch (firstError) {
-            // Fallback for provider deployments that only parse URL query params.
-            const queryParams = {
-                public_key,
-                houseNumber: body.houseNumber,
-                firstName: body.firstName,
-                lastName: body.lastName,
-                idNumber: body.idNumber,
-                customerEmail: body.customerEmail,
-                phoneNumber: body.phoneNumber,
-                dateOfBirth: body.dateOfBirth,
-                line1: body.line1,
-                state: body.state,
-                zipCode: body.zipCode,
-                city: body.city,
-                country: body.country,
-                idType: body.idType,
-            };
-            const fallbackResp = await bitvcard.post("create-user/", payload, {
-                headers: { "Content-Type": "application/json" },
-                params: queryParams,
-            });
-            data = fallbackResp.data;
-            console.warn("[strowallet] create-user primary attempt failed, fallback succeeded", {
-                firstStatus: firstError?.response?.status,
-                firstMessage: firstError?.response?.data?.message || firstError?.response?.data?.error || firstError?.message,
-            });
+            if (firstError?.response?.status === 405) {
+                data = await tryCreateUserGet();
+            }
+            else {
+                // Fallback for provider deployments that only parse URL query params.
+                try {
+                    const fallbackResp = await bitvcard.post("create-user/", payload, {
+                        headers: { "Content-Type": "application/json" },
+                        params: queryParams,
+                    });
+                    data = fallbackResp.data;
+                    console.warn("[strowallet] create-user primary attempt failed, fallback succeeded", {
+                        firstStatus: firstError?.response?.status,
+                        firstMessage: firstError?.response?.data?.message || firstError?.response?.data?.error || firstError?.message,
+                    });
+                }
+                catch (secondError) {
+                    data = await tryCardUserFallback();
+                    console.warn("[strowallet] create-user attempts failed; card-user fallback used", {
+                        firstStatus: firstError?.response?.status,
+                        firstMessage: firstError?.response?.data?.message || firstError?.response?.data?.error || firstError?.message,
+                        secondStatus: secondError?.response?.status,
+                        secondMessage: secondError?.response?.data?.message || secondError?.response?.data?.error || secondError?.message,
+                    });
+                }
+            }
         }
         const customerId = data?.response?.customerId ||
             data?.response?.customer_id ||
@@ -235,16 +273,23 @@ router.post("/create-user", async (req, res) => {
             data?.customer_id;
         if (!customerId && body.customerEmail) {
             try {
-                const lookup = await bitvcard.get("getcardholder/", {
-                    params: { public_key, customerEmail: body.customerEmail },
-                });
-                const lookupData = lookup.data;
-                const lookupId = lookupData?.data?.customerId ||
-                    lookupData?.data?.customer_id ||
-                    lookupData?.customerId ||
-                    lookupData?.customer_id;
-                if (lookupId) {
-                    data.response = { ...(data.response || {}), customerId: lookupId };
+                const maxAttempts = Number(process.env.STROWALLET_LOOKUP_ATTEMPTS || (process.env.NODE_ENV === "test" ? 1 : 6));
+                const delayMs = Number(process.env.STROWALLET_LOOKUP_DELAY_MS || 1200);
+                for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+                    if (attempt > 0)
+                        await delay(delayMs);
+                    const lookup = await bitvcard.get("getcardholder/", {
+                        params: { public_key, customerEmail: body.customerEmail },
+                    });
+                    const lookupData = lookup.data;
+                    const lookupId = lookupData?.data?.customerId ||
+                        lookupData?.data?.customer_id ||
+                        lookupData?.customerId ||
+                        lookupData?.customer_id;
+                    if (lookupId) {
+                        data.response = { ...(data.response || {}), customerId: lookupId };
+                        break;
+                    }
                 }
             }
             catch {
@@ -358,10 +403,38 @@ const CreateNfcCardSchema = zod_1.z.object({
     phone: zod_1.z.string().min(5),
     mode: zod_1.z.string().optional(),
 });
+const LegacyCreateCardSchema = zod_1.z.object({
+    name_on_card: zod_1.z.string().min(1),
+    card_type: zod_1.z.string().min(1),
+    amount: amountString,
+    customerEmail: zod_1.z.string().email().optional(),
+    customer_email: zod_1.z.string().email().optional(),
+    mode: zod_1.z.string().optional(),
+});
 router.post("/create-card", async (req, res) => {
     try {
-        const body = applyDefaultMode(CreateNfcCardSchema.parse(req.body || {}));
+        const rawBody = req.body || {};
+        const useLegacy = rawBody?.name_on_card ||
+            rawBody?.card_type ||
+            rawBody?.amount ||
+            rawBody?.customerEmail ||
+            rawBody?.customer_email;
         const public_key = requirePublicKey();
+        if (useLegacy) {
+            const parsed = applyDefaultMode(LegacyCreateCardSchema.parse(rawBody));
+            const payload = {
+                ...parsed,
+                customerEmail: parsed.customerEmail || parsed.customer_email,
+                public_key,
+            };
+            delete payload.customer_email;
+            const resp = await bitvcard.post("create-card/", payload, {
+                headers: { "Content-Type": "application/json" },
+                params: payload,
+            });
+            return (0, apiResponse_1.ok)(res, resp.data, 200);
+        }
+        const body = applyDefaultMode(CreateNfcCardSchema.parse(rawBody));
         const params = { ...body, public_key };
         const resp = await bitvcard.post("create-nfc-card/", undefined, { params });
         return (0, apiResponse_1.ok)(res, resp.data, 200);

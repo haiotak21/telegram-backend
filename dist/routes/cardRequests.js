@@ -32,18 +32,6 @@ function normalizeMode(mode) {
         return undefined;
     return m;
 }
-function normalizeKycStatus(value) {
-    if (!value)
-        return "not_started";
-    const compact = String(value).toLowerCase().replace(/[\s_-]+/g, "");
-    if (["approved", "verified", "success", "active", "highkyc"].includes(compact))
-        return "approved";
-    if (["pending", "processing", "review", "unreviewkyc"].includes(compact))
-        return "pending";
-    if (["declined", "rejected", "failed", "lowkyc"].includes(compact))
-        return "rejected";
-    return "pending";
-}
 function asString(val) {
     if (val === undefined || val === null)
         return undefined;
@@ -153,10 +141,6 @@ router.post("/", async (req, res) => {
         const existing = await CardRequest_1.default.findOne({ userId, status: { $in: ["pending", "approved"] } }).lean();
         if (existing) {
             return (0, apiResponse_1.fail)(res, "You already have an active or approved card request", 400);
-        }
-        const kycStatus = normalizeKycStatus(customer?.kycStatus || user?.kycStatus);
-        if (kycStatus !== "approved") {
-            return (0, apiResponse_1.fail)(res, "You must complete KYC before requesting a card", 400);
         }
         // Enforce minimum amount of 3
         let reqAmount = Number(body.amount);

@@ -319,9 +319,6 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
                 const userRecord = await prisma_1.default.user.findUnique({ where: { userId } });
                 if (!userRecord)
                     return (0, apiResponse_1.fail)(res, "User not found", 404);
-                if ((userRecord.kycStatus || "").toLowerCase() !== "approved") {
-                    return (0, apiResponse_1.fail)(res, "User KYC is not approved for card creation", 400);
-                }
                 const cardAmountUsdRaw = txMetadata?.cardAmountUsd;
                 const cardAmountUsd = Number(cardAmountUsdRaw);
                 const amount = Number.isFinite(cardAmountUsd) && cardAmountUsd >= 3 ? cardAmountUsd : 3;
@@ -510,16 +507,11 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
                 session.endSession();
                 return (0, apiResponse_1.fail)(res, "User not found", 404);
             }
-            if (!customer || customer.kycStatus !== "approved") {
-                await session.abortTransaction();
-                session.endSession();
-                return (0, apiResponse_1.fail)(res, "User KYC is not approved for card creation", 400);
-            }
             const cardAmountUsdRaw = tx.metadata?.cardAmountUsd;
             const cardAmountUsd = Number(cardAmountUsdRaw);
             const amount = Number.isFinite(cardAmountUsd) && cardAmountUsd >= 3 ? cardAmountUsd : 3;
             const nameOnCard = [userRecord.firstName, userRecord.lastName].filter(Boolean).join(" ") || "StroWallet User";
-            const customerEmail = customer.email || userRecord.customerEmail;
+            const customerEmail = customer?.email || userRecord.customerEmail;
             if (!customerEmail) {
                 await session.abortTransaction();
                 session.endSession();

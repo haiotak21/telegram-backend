@@ -31,24 +31,6 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 (0, db_1.connectDB)().catch((e) => console.error("DB init failed:", e));
 (0, botService_1.initBot)().catch((e) => console.error("Bot init failed:", e));
 (0, broadcastService_1.startBroadcastWorker)();
-const kycPollIntervalMs = Number(process.env.KYC_POLL_INTERVAL_MS || 60000);
-let kycPollRunning = false;
-if (Number.isFinite(kycPollIntervalMs) && kycPollIntervalMs > 0) {
-    setInterval(async () => {
-        if (kycPollRunning)
-            return;
-        kycPollRunning = true;
-        try {
-            await (0, botService_1.pollPendingKycUpdates)();
-        }
-        catch (e) {
-            console.warn("KYC poll failed", e);
-        }
-        finally {
-            kycPollRunning = false;
-        }
-    }, kycPollIntervalMs);
-}
 const reconciliationIntervalMs = Number(process.env.RECONCILIATION_INTERVAL_MS || 0);
 let reconciliationRunning = false;
 if (Number.isFinite(reconciliationIntervalMs) && reconciliationIntervalMs > 0) {
@@ -115,7 +97,7 @@ app.use("/", paymentLegacy_1.default);
 // Admin dashboard static assets
 const adminDir = path_1.default.resolve(process.cwd(), "public", "admin");
 app.use("/admin", express_1.default.static(adminDir));
-// Uploaded KYC images
+// Uploaded images
 const uploadsDir = path_1.default.resolve(process.cwd(), "public", "uploads");
 app.use("/uploads", express_1.default.static(uploadsDir));
 // Express 5 path-to-regexp requires a parameter name for wildcard; use regex for catch-all
