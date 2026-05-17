@@ -165,9 +165,9 @@ async function notifyAdminLowBalanceIssue(detail?: string) {
 }
 
 // Tracks the last amount a user selected per payment method so we can validate against receipt
-      ? undefined
+const depositSelections = new Map<number, {
   method: PaymentMethod;
-    const customerId = user?.strowalletCustomerId || existingCustomer?.customerId || null;
+  amountEtb: number;
   creditAmountEtb: number;
   amountUsd: number;
   feeUsd: number;
@@ -3553,6 +3553,10 @@ function mapIdTypeToNfc(value?: string) {
   if (v === "passport") return "passport";
   if (v === "driving_license" || v === "drivers_license" || v === "drivinglicense") return "drivers_license";
   return undefined;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function formatMaskedCard(last4?: string) {

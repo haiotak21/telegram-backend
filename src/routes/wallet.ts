@@ -537,7 +537,7 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
       const cardAmountUsd = Number(cardAmountUsdRaw);
       const amount = Number.isFinite(cardAmountUsd) && cardAmountUsd >= 3 ? cardAmountUsd : 3;
       const nameOnCard = [userRecord.firstName, userRecord.lastName].filter(Boolean).join(" ") || "StroWallet User";
-      const customerEmail = customer.email || userRecord.customerEmail;
+      const customerEmail = customer?.email || userRecord.customerEmail;
       if (!customerEmail) {
         await session.abortTransaction();
         session.endSession();
