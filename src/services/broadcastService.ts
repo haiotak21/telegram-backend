@@ -1,5 +1,4 @@
 import User from "../models/User";
-import Customer from "../models/Customer";
 import BroadcastJob, { BroadcastFilter } from "../models/BroadcastJob";
 import { sendBroadcastToUser } from "./botService";
 import prisma from "../utils/prisma";
@@ -109,14 +108,6 @@ export async function getBroadcastTargetUserIds(filter: BroadcastFilter): Promis
       return users.map((u: any) => String(u.userId)).filter((id: string) => isNumericUserId(id));
     }
 
-    if (filter === "kyc_approved") {
-      const users = await prisma.user.findMany({
-        where: { kycStatus: "approved" },
-        select: { userId: true },
-      });
-      return users.map((u: any) => String(u.userId)).filter((id: string) => isNumericUserId(id));
-    }
-
     const users = await prisma.user.findMany({ select: { userId: true } });
     return users.map((u: any) => String(u.userId)).filter((id: string) => isNumericUserId(id));
   }
@@ -126,18 +117,6 @@ export async function getBroadcastTargetUserIds(filter: BroadcastFilter): Promis
       .select({ userId: 1 })
       .lean();
     return users.map((u) => String(u.userId));
-  }
-
-  if (filter === "kyc_approved") {
-    const approvedCustomers = await Customer.find({ kycStatus: "approved" }).select({ userId: 1 }).lean();
-    const ids = new Set(approvedCustomers.map((c) => String(c.userId)).filter((id) => isNumericUserId(id)));
-    if (!ids.size) {
-      const approvedUsers = await User.find({ kycStatus: "approved", userId: { $regex: /^\d+$/ } })
-        .select({ userId: 1 })
-        .lean();
-      approvedUsers.forEach((u) => ids.add(String(u.userId)));
-    }
-    return Array.from(ids);
   }
 
   const users = await User.find({ userId: { $regex: /^\d+$/ } }).select({ userId: 1 }).lean();

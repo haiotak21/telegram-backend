@@ -15,7 +15,7 @@ import validateRouter from "./routes/validate";
 import adminRouter from "./routes/admin";
 import debugRouter from "./routes/debug";
 import { connectDB, disconnectDB } from "./db";
-import { initBot, pollPendingKycUpdates } from "./services/botService";
+import { initBot } from "./services/botService";
 import { startBroadcastWorker } from "./services/broadcastService";
 import { reconcileAllCards } from "./services/reconciliationService";
 import { processStroWalletEvent } from "./services/webhookProcessor";
@@ -30,22 +30,6 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 connectDB().catch((e) => console.error("DB init failed:", e));
 initBot().catch((e) => console.error("Bot init failed:", e));
 startBroadcastWorker();
-
-const kycPollIntervalMs = Number(process.env.KYC_POLL_INTERVAL_MS || 60000);
-let kycPollRunning = false;
-if (Number.isFinite(kycPollIntervalMs) && kycPollIntervalMs > 0) {
-  setInterval(async () => {
-    if (kycPollRunning) return;
-    kycPollRunning = true;
-    try {
-      await pollPendingKycUpdates();
-    } catch (e) {
-      console.warn("KYC poll failed", e);
-    } finally {
-      kycPollRunning = false;
-    }
-  }, kycPollIntervalMs);
-}
 
 const reconciliationIntervalMs = Number(process.env.RECONCILIATION_INTERVAL_MS || 0);
 let reconciliationRunning = false;
@@ -121,7 +105,7 @@ app.use("/", paymentLegacyRouter);
 // Admin dashboard static assets
 const adminDir = path.resolve(process.cwd(), "public", "admin");
 app.use("/admin", express.static(adminDir));
-// Uploaded KYC images
+// Uploaded images
 const uploadsDir = path.resolve(process.cwd(), "public", "uploads");
 app.use("/uploads", express.static(uploadsDir));
 // Express 5 path-to-regexp requires a parameter name for wildcard; use regex for catch-all

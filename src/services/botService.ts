@@ -2,11 +2,8 @@ import TelegramBot, { InlineKeyboardButton } from "node-telegram-bot-api";
 import os from "os";
 import crypto from "crypto";
 import axios from "axios";
-import sharp from "sharp";
 import path from "path";
 import mongoose from "mongoose";
-import { promises as fs } from "fs";
-import { v2 as cloudinary } from "cloudinary";
 import { TelegramLink, ITelegramLink } from "../models/TelegramLink";
 import BotLock from "../models/BotLock";
 import CardRequest from "../models/CardRequest";
@@ -40,28 +37,7 @@ function clearPendingAction(value: number | string | undefined) {
   if (key) pendingActions.delete(key);
 }
 
-type KycIdType = "NIN" | "PASSPORT" | "DRIVING_LICENSE";
-type KycStep =
-  | "firstName"
-  | "lastName"
-  | "dateOfBirth"
-  | "phoneNumber"
-  | "customerEmail"
-  | "line1"
-  | "city"
-  | "state"
-  | "zipCode"
-  | "country"
-  | "houseNumber"
-  | "idType"
-  | "idNumber"
-  | "idImage"
-  | "idImageFront"
-  | "idImageBack"
-  | "userPhoto"
-  | "confirm";
-
-type KycStatus = "not_started" | "pending" | "approved" | "rejected";
+type IdType = "NIN" | "PASSPORT" | "DRIVING_LICENSE";
 
 type CreateCardStep = "name" | "type" | "amount" | "confirm";
 interface CreateCardSession {
@@ -74,46 +50,43 @@ interface CreateCardSession {
 }
 const createCardSessions = new Map<number, CreateCardSession>();
 
-interface KycData {
-  firstName: string;
-  lastName: string;
-  dateOfBirth: string;
-  phoneNumber: string;
-  customerEmail: string;
-  line1: string;
-  city: string;
-  state: string;
-  zipCode: string;
-  country: string;
-  houseNumber: string;
-  idType: KycIdType;
-  idNumber: string;
-  idImage: string;
-  idImageFront?: string;
-  idImageBack?: string;
-  idImagePdf?: string;
-  userPhoto: string;
+type CardProfileStep =
+  | "firstName"
+  | "lastName"
+  | "dateOfBirth"
+  | "phoneNumber"
+  | "customerEmail"
+  | "line1"
+  | "zipCode"
+  | "idNumber"
+  | "confirm";
+
+interface CardProfileData {
+  firstName?: string;
+  lastName?: string;
+  dateOfBirth?: string;
+  phoneNumber?: string;
+  customerEmail?: string;
+  line1?: string;
+  zipCode?: string;
+  idNumber?: string;
 }
 
-interface KycSession {
-  step: KycStep;
-  data: Partial<KycData>;
-  mode: "create" | "edit";
-  lastPromptStep?: KycStep;
+interface CardProfileSession {
+  step: CardProfileStep;
+  data: CardProfileData;
+  origin: "card_request";
+  lastPromptStep?: CardProfileStep;
 }
 
-const kycSessions = new Map<number, KycSession>();
-const KYC_ID_TYPES: { label: string; value: KycIdType }[] = [
-  { label: "National ID (NIN)", value: "NIN" },
-  { label: "Passport", value: "PASSPORT" },
-  { label: "Driving License", value: "DRIVING_LICENSE" },
-];
-const KYC_PHONE_REGEX = /^[1-9]\d{10,14}$/;
-const KYC_DOB_REGEX = /^\d{2}\/\d{2}\/\d{4}$/;
-const KYC_STATIC_COUNTRY = process.env.KYC_STATIC_COUNTRY || "Ghana";
-const KYC_STATIC_STATE = process.env.KYC_STATIC_STATE || "Accra";
-const KYC_STATIC_CITY = process.env.KYC_STATIC_CITY || "Accra";
-const KYC_STATIC_IDTYPE = (process.env.KYC_STATIC_IDTYPE || "PASSPORT") as KycIdType;
+const cardProfileSessions = new Map<number, CardProfileSession>();
+
+const PROFILE_PHONE_REGEX = /^[1-9]\d{10,14}$/;
+const PROFILE_DOB_REGEX = /^\d{2}\/\d{2}\/\d{4}$/;
+const PROFILE_STATIC_COUNTRY = process.env.KYC_STATIC_COUNTRY || "Ghana";
+const PROFILE_STATIC_STATE = process.env.KYC_STATIC_STATE || "Accra";
+const PROFILE_STATIC_CITY = process.env.KYC_STATIC_CITY || "Accra";
+const PROFILE_STATIC_IDTYPE = (process.env.KYC_STATIC_IDTYPE || "PASSPORT") as IdType;
 
 const WALLET_URL = process.env.WALLET_URL || "https://strowallet.com/app";
 const SUPPORT_URL = process.env.SUPPORT_URL || "https://t.me/Bunacardsupport";
@@ -192,9 +165,9 @@ async function notifyAdminLowBalanceIssue(detail?: string) {
 }
 
 // Tracks the last amount a user selected per payment method so we can validate against receipt
-const depositSelections = new Map<number, {
+      ? undefined
   method: PaymentMethod;
-  amountEtb: number;
+    const customerId = user?.strowalletCustomerId || existingCustomer?.customerId || null;
   creditAmountEtb: number;
   amountUsd: number;
   feeUsd: number;
@@ -297,7 +270,6 @@ async function getUserAndCustomerContext(userId: string) {
       ? {
           userId,
           email: user.customerEmail,
-          kycStatus: user.kycStatus,
         }
       : null;
     return { user, customer };
@@ -411,9 +383,6 @@ export async function initBot() {
     { command: "start", description: "Show welcome message" },
     { command: "menu", description: "Show main menu" },
     { command: "help", description: "Show available commands" },
-    { command: "kyc", description: "Submit KYC verification" },
-    { command: "kyc_status", description: "Check your KYC status" },
-    { command: "kyc_edit", description: "Edit and resubmit KYC" },
     { command: "card_request", description: "Request a virtual card" },
     { command: "requestcard", description: "Request a virtual card" },
     { command: "mycard", description: "View your card details" },
@@ -474,7 +443,7 @@ export async function initBot() {
     if (shouldSkipCommand(msg, "help")) return;
     await bot!.sendMessage(
       msg.chat.id,
-      "Commands:\n/kyc\n/kyc_status\n/kyc_edit\n/card_request\n/requestcard\n/mycard\n/cardstatus\n/transactions\n/freeze\n/unfreeze\n/linkemail your@example.com\n/linkcard CARD_ID\n/unlink (remove all links)\n/status\n/verify\n/deposit"
+      "Commands:\n/card_request\n/requestcard\n/mycard\n/cardstatus\n/transactions\n/freeze\n/unfreeze\n/linkemail your@example.com\n/linkcard CARD_ID\n/unlink (remove all links)\n/status\n/verify\n/deposit"
     );
   });
 
@@ -497,11 +466,6 @@ export async function initBot() {
         ],
       },
     });
-  });
-
-  botRef.onText(/^\/kyc_status$/i, async (msg: any) => {
-    const chatId = msg.chat.id;
-    await sendKycStatus(chatId);
   });
 
   botRef.onText(/^\/requestcard$/i, async (msg: any) => {
@@ -541,58 +505,6 @@ export async function initBot() {
     if (shouldSkipCommand(msg, "card_request")) return;
     const chatId = msg.chat.id;
     await handleCardRequest(chatId, msg);
-  });
-
-  botRef.onText(/^\/kyc$/i, async (msg: any) => {
-    if (shouldSkipCommand(msg, "kyc")) return;
-    const chatId = msg.chat.id;
-    const { user, customer } = await getUserAndCustomerContext(String(chatId));
-    const status = resolveKycStatus(user, customer);
-    if (status === "pending") {
-      await bot!.sendMessage(chatId, "✅ KYC already submitted. Status: pending verification.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
-    }
-    if (status === "approved") {
-      await bot!.sendMessage(chatId, "✅ KYC already approved.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
-    }
-    if (status === "rejected") {
-      await bot!.sendMessage(chatId, "❌ Your KYC was rejected. Use /kyc_edit to resubmit.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
-    }
-    await startKycFlow(chatId, msg, "create");
-  });
-
-  botRef.onText(/^\/kyc_edit$/i, async (msg: any) => {
-    if (shouldSkipCommand(msg, "kyc_edit")) return;
-    const chatId = msg.chat.id;
-    const { user, customer } = await getUserAndCustomerContext(String(chatId));
-    const status = resolveKycStatus(user, customer);
-    if (status === "not_started") {
-      await bot!.sendMessage(chatId, "No KYC record found. Use /kyc to submit.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
-    }
-    if (status === "approved") {
-      await bot!.sendMessage(chatId, "✅ KYC already approved. No edits required.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
-    }
-    if (status === "pending") {
-      await bot!.sendMessage(chatId, "⏳ KYC is pending verification. Please wait for approval.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
-    }
-    await startKycFlow(chatId, msg, "edit", user);
   });
 
   botRef.onText(/^\/linkemail(?:\s+([^\s]+))?$/i, async (msg: any, match?: RegExpExecArray | null) => {
@@ -656,7 +568,7 @@ export async function initBot() {
     if (shouldSkipCommand(msg, "cancel")) return;
     clearPendingAction(msg.chat.id);
     cardRequestSelections.delete(msg.chat.id);
-    kycSessions.delete(msg.chat.id);
+    cardProfileSessions.delete(msg.chat.id);
     createCardSessions.delete(msg.chat.id);
     await bot!.sendMessage(msg.chat.id, "Cancelled pending action.");
   });
@@ -680,38 +592,24 @@ export async function initBot() {
     }
     recentCallbackActions.set(chatId, { action, at: now });
 
-    if (action.startsWith("KYC_IDTYPE::")) {
-      const idType = action.replace("KYC_IDTYPE::", "") as KycIdType;
-      const session = kycSessions.get(chatId);
-      if (!session || session.step !== "idType") {
-        await bot!.answerCallbackQuery(query.id, { text: "KYC session not active" }).catch(() => { });
-        return;
-      }
-      if (!KYC_ID_TYPES.find((t) => t.value === idType)) {
-        await bot!.answerCallbackQuery(query.id, { text: "Invalid ID type" }).catch(() => { });
-        return;
-      }
-      session.data.idType = idType;
-      session.step = "idNumber";
-      kycSessions.set(chatId, session);
-      await bot!.answerCallbackQuery(query.id).catch(() => { });
-      await bot!.sendMessage(chatId, "Enter your ID number:", { reply_markup: { force_reply: true } });
-      return;
-    }
-
-    if (action.startsWith("KYC_CONFIRM::")) {
-      const decision = action.replace("KYC_CONFIRM::", "");
-      const session = kycSessions.get(chatId);
+    if (action.startsWith("PROFILE_CONFIRM::")) {
+      const decision = action.replace("PROFILE_CONFIRM::", "");
+      const session = cardProfileSessions.get(chatId);
       if (!session || session.step !== "confirm") {
-        await bot!.answerCallbackQuery(query.id, { text: "KYC session not active" }).catch(() => { });
+        await bot!.answerCallbackQuery(query.id, { text: "Profile session not active" }).catch(() => { });
         return;
       }
       await bot!.answerCallbackQuery(query.id).catch(() => { });
       if (decision === "yes") {
-        await submitKyc(chatId, session);
+        await persistCardProfile(String(chatId), session.data);
+        cardProfileSessions.delete(chatId);
+        await bot!.sendMessage(chatId, "✅ Profile saved. Continuing card request...", {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        await handleCardRequest(chatId, query.message, { skipProfile: true });
       } else {
-        kycSessions.delete(chatId);
-        await bot!.sendMessage(chatId, "KYC submission cancelled.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+        cardProfileSessions.delete(chatId);
+        await bot!.sendMessage(chatId, "Profile setup cancelled.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
       }
       return;
     }
@@ -770,7 +668,7 @@ export async function initBot() {
 
     if (action === "CANCEL") {
       clearPendingAction(chatId);
-      kycSessions.delete(chatId);
+      cardProfileSessions.delete(chatId);
       createCardSessions.delete(chatId);
       await bot!.answerCallbackQuery(query.id, { text: "Cancelled" }).catch(() => { });
       await bot!.sendMessage(chatId, "Cancelled pending action.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
@@ -780,18 +678,6 @@ export async function initBot() {
     if (action === "MENU") {
       await bot!.answerCallbackQuery(query.id).catch(() => { });
       return sendMenu(chatId, query.message);
-    }
-
-    if (action === "KYC_STATUS") {
-      await bot!.answerCallbackQuery(query.id).catch(() => { });
-      await sendKycStatus(chatId);
-      return;
-    }
-
-    if (action === "KYC_START") {
-      await bot!.answerCallbackQuery(query.id).catch(() => { });
-      await startKycFlow(chatId, query.message);
-      return;
     }
 
     if (action === "CARD_TXN_NO_CARD") {
@@ -982,9 +868,9 @@ export async function initBot() {
     });
     const messageKey = msg.message_id ? `msg:${chatId}:${msg.message_id}` : `msg:${chatId}:${Date.now()}`;
     if (isDuplicateUpdate(messageKey, 20000)) return;
-    const kyc = kycSessions.get(chatId);
-    if (kyc) {
-      await handleKycMessage(msg, kyc);
+    const profile = cardProfileSessions.get(chatId);
+    if (profile) {
+      await handleCardProfileMessage(msg, profile);
       return;
     }
 
@@ -1595,16 +1481,6 @@ export async function initBot() {
 
           const userId = String(msg.chat.id);
           const { user, customer } = await getUserAndCustomerContext(userId);
-          if (!customer || customer.kycStatus !== "approved") {
-            await bot!.sendMessage(msg.chat.id, [
-              "✅ Payment Verified",
-              "Please complete KYC to activate your card request.",
-            ].join("\n"), {
-              reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-            });
-            clearPendingAction(msg.chat.id);
-            return;
-          }
 
           const existingCard = isPrismaPersistenceEnabled()
             ? await prisma.card.findFirst({ where: { userId }, orderBy: { updatedAt: "desc" } })
@@ -1880,62 +1756,6 @@ export async function sendBroadcastToUser(userId: string, messageText: string, i
   } catch (e: any) {
     return { ok: false, error: e?.message || "Failed to send" };
   }
-}
-
-export async function notifyKycStatus(userId: string, status: KycStatus) {
-  if (!bot) return;
-  const chatId = Number(userId);
-  if (!Number.isFinite(chatId)) return;
-  if (status === "approved") {
-    await bot.sendMessage(chatId, "✅ Congratulations! Your KYC has been approved. You can now create your StroWallet card.", {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
-    return;
-  }
-  if (status === "rejected") {
-    await bot.sendMessage(chatId, "❌ KYC verification failed. Please try again or edit with /kyc_edit.", {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
-  }
-}
-
-export async function pollPendingKycUpdates() {
-  if (isPrismaOnlyMode()) {
-    const pendingUsers = await prisma.user.findMany({
-      where: {
-        kycStatus: { in: ["pending", "review", "processing", "unreview_kyc", "unreview-kyc", "unreview kyc"] },
-      },
-    });
-    let checked = 0;
-    let updated = 0;
-
-    for (const user of pendingUsers) {
-      checked += 1;
-      const before = normalizeKycStatus(user.kycStatus);
-      const after = await refreshKycStatusFromStroWallet(user);
-      if (after && after !== before) {
-        updated += 1;
-      }
-    }
-
-    return { checked, updated };
-  }
-  const pendingCustomers = await Customer.find({ kycStatus: "pending" }).lean();
-  let checked = 0;
-  let updated = 0;
-
-  for (const customer of pendingCustomers) {
-    const user = await User.findOne({ userId: String(customer.userId) }).lean();
-    if (!user) continue;
-    checked += 1;
-    const before = normalizeKycStatus(customer.kycStatus || user.kycStatus);
-    const after = await refreshKycStatusFromStroWallet(user);
-    if (after && after !== before) {
-      updated += 1;
-    }
-  }
-
-  return { checked, updated };
 }
 
 function buildInstanceId() {
@@ -2871,11 +2691,10 @@ async function sendDepositSummary(
   });
 }
 
-async function handleCardRequest(chatId: number, message?: any) {
+async function handleCardRequest(chatId: number, message?: any, options?: { skipProfile?: boolean }) {
   if (shouldSuppressOutgoing(chatId, "card_request")) return;
   const userId = String(chatId);
   const { user, customer: customerRecord } = await getUserAndCustomerContext(userId);
-  const kycStatus = resolveKycStatus(user, customerRecord);
 
   const existingCard = isPrismaPersistenceEnabled()
     ? await prisma.card.findFirst({ where: { userId }, orderBy: { updatedAt: "desc" } })
@@ -2890,23 +2709,12 @@ async function handleCardRequest(chatId: number, message?: any) {
     return;
   }
 
-  if (kycStatus !== "approved") {
-    if (kycStatus === "pending") {
-      await bot!.sendMessage(chatId, "⏳ KYC pending verification. Please wait and try again later.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
+  if (!options?.skipProfile) {
+    const missing = getCardProfileMissingFields(user, customerRecord);
+    if (missing.length) {
+      await startCardProfileFlow(chatId, message, user, customerRecord);
       return;
     }
-    if (kycStatus === "rejected") {
-      await bot!.sendMessage(chatId, "❌ KYC was rejected. Please resubmit with /kyc_edit.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
-    }
-    await bot!.sendMessage(chatId, "❌ Please first verify /kyc", {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
-    return;
   }
 
   const pendingRequest = isPrismaPersistenceEnabled()
@@ -2919,8 +2727,9 @@ async function handleCardRequest(chatId: number, message?: any) {
     return;
   }
 
-  if (!customerRecord?.email) {
-    await bot!.sendMessage(chatId, "❌ Missing email on your KYC. Please update and resubmit KYC.", {
+  const customerEmail = (customerRecord?.email || user?.customerEmail || "").trim();
+  if (!customerEmail) {
+    await bot!.sendMessage(chatId, "❌ Missing email for card creation. Please provide your email.", {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
     return;
@@ -2950,6 +2759,267 @@ async function handleCardRequest(chatId: number, message?: any) {
   await bot!.sendMessage(chatId, lines.join("\n"), {
     reply_markup: { inline_keyboard: buildCardRequestMethodKeyboard() },
   });
+}
+
+function getCardProfileMissingFields(user?: any, customer?: any) {
+  const idNumber = decryptKycIdNumber(customer?.idNumberEncrypted || user?.idNumberEncrypted);
+  const fields = {
+    firstName: user?.firstName || customer?.firstName,
+    lastName: user?.lastName || customer?.lastName,
+    dateOfBirth: user?.dateOfBirth || customer?.dateOfBirth,
+    phoneNumber: user?.phoneNumber || customer?.phoneNumber,
+    customerEmail: user?.customerEmail || customer?.email,
+    line1: user?.line1 || customer?.line1,
+    zipCode: user?.zipCode || customer?.zipCode,
+    idNumber,
+  };
+  return Object.entries(fields)
+    .filter(([, value]) => !String(value || "").trim())
+    .map(([key]) => key);
+}
+
+function nextCardProfileStep(data: CardProfileData): CardProfileStep {
+  if (!data.firstName) return "firstName";
+  if (!data.lastName) return "lastName";
+  if (!data.dateOfBirth) return "dateOfBirth";
+  if (!data.phoneNumber) return "phoneNumber";
+  if (!data.customerEmail) return "customerEmail";
+  if (!data.line1) return "line1";
+  if (!data.zipCode) return "zipCode";
+  if (!data.idNumber) return "idNumber";
+  return "confirm";
+}
+
+async function startCardProfileFlow(chatId: number, message?: any, user?: any, customer?: any) {
+  const data: CardProfileData = {
+    firstName: user?.firstName || customer?.firstName || message?.from?.first_name,
+    lastName: user?.lastName || customer?.lastName || undefined,
+    dateOfBirth: user?.dateOfBirth || customer?.dateOfBirth || undefined,
+    phoneNumber: user?.phoneNumber || customer?.phoneNumber || undefined,
+    customerEmail: user?.customerEmail || customer?.email || undefined,
+    line1: user?.line1 || customer?.line1 || undefined,
+    zipCode: user?.zipCode || customer?.zipCode || undefined,
+    idNumber: decryptKycIdNumber(customer?.idNumberEncrypted || user?.idNumberEncrypted),
+  };
+  const step = nextCardProfileStep(data);
+  cardProfileSessions.set(chatId, { step, data, origin: "card_request" });
+  await bot!.sendMessage(
+    chatId,
+    "💳 Card profile setup\nPlease provide these details to create your card.",
+    { reply_markup: { inline_keyboard: [[{ text: "Cancel", callback_data: "CANCEL" }]] } }
+  );
+  await promptCardProfileStep(chatId, cardProfileSessions.get(chatId)!);
+}
+
+async function handleCardProfileMessage(msg: any, session: CardProfileSession) {
+  const chatId = msg.chat.id;
+  const text = msg.text ? String(msg.text).trim() : "";
+  if (!text) {
+    await bot!.sendMessage(chatId, "Please send a text response.", { reply_markup: { force_reply: true } });
+    return;
+  }
+
+  switch (session.step) {
+    case "firstName":
+      session.data.firstName = text;
+      break;
+    case "lastName":
+      session.data.lastName = text;
+      break;
+    case "dateOfBirth":
+      if (!PROFILE_DOB_REGEX.test(text)) {
+        await bot!.sendMessage(chatId, "Invalid date format. Use MM/DD/YYYY.", { reply_markup: { force_reply: true } });
+        return;
+      }
+      session.data.dateOfBirth = text;
+      break;
+    case "phoneNumber":
+      if (!PROFILE_PHONE_REGEX.test(text)) {
+        await bot!.sendMessage(chatId, "Invalid phone number. Use international format without '+'.", { reply_markup: { force_reply: true } });
+        return;
+      }
+      session.data.phoneNumber = text;
+      break;
+    case "customerEmail":
+      if (!/.+@.+\..+/.test(text)) {
+        await bot!.sendMessage(chatId, "Invalid email format. Try again.", { reply_markup: { force_reply: true } });
+        return;
+      }
+      session.data.customerEmail = text;
+      break;
+    case "line1":
+      session.data.line1 = text;
+      break;
+    case "zipCode":
+      session.data.zipCode = text;
+      break;
+    case "idNumber":
+      session.data.idNumber = text;
+      break;
+    case "confirm":
+      await bot!.sendMessage(chatId, "Please use the buttons to confirm submission.", {
+        reply_markup: { inline_keyboard: buildCardProfileConfirmKeyboard() },
+      });
+      return;
+  }
+
+  session.step = nextCardProfileStep(session.data);
+  cardProfileSessions.set(chatId, session);
+  await promptCardProfileStep(chatId, session);
+}
+
+async function promptCardProfileStep(chatId: number, session: CardProfileSession) {
+  if (session.lastPromptStep === session.step) return;
+  session.lastPromptStep = session.step;
+  switch (session.step) {
+    case "firstName":
+      await bot!.sendMessage(chatId, "Enter your first name:", { reply_markup: { force_reply: true } });
+      break;
+    case "lastName":
+      await bot!.sendMessage(chatId, "Enter your last name:", { reply_markup: { force_reply: true } });
+      break;
+    case "dateOfBirth":
+      await bot!.sendMessage(chatId, "Enter your date of birth (MM/DD/YYYY):", { reply_markup: { force_reply: true } });
+      break;
+    case "phoneNumber":
+      await bot!.sendMessage(chatId, "Enter your phone number (international, no '+'):", { reply_markup: { force_reply: true } });
+      break;
+    case "customerEmail":
+      await bot!.sendMessage(chatId, "Enter your email address:", { reply_markup: { force_reply: true } });
+      break;
+    case "line1":
+      await bot!.sendMessage(chatId, "Enter your street address (line1):", { reply_markup: { force_reply: true } });
+      break;
+    case "zipCode":
+      await bot!.sendMessage(chatId, "Enter your ZIP/postal code:", { reply_markup: { force_reply: true } });
+      break;
+    case "idNumber":
+      await bot!.sendMessage(chatId, "Enter your ID number:", { reply_markup: { force_reply: true } });
+      break;
+    case "confirm":
+      await bot!.sendMessage(chatId, buildCardProfileSummary(session.data), {
+        reply_markup: { inline_keyboard: buildCardProfileConfirmKeyboard() },
+        disable_web_page_preview: true,
+      });
+      break;
+  }
+}
+
+function buildCardProfileConfirmKeyboard(): InlineKeyboardButton[][] {
+  return [
+    [
+      { text: "✅ Save Profile", callback_data: "PROFILE_CONFIRM::yes" },
+      { text: "❌ Cancel", callback_data: "PROFILE_CONFIRM::no" },
+    ],
+    [MENU_BUTTON],
+  ];
+}
+
+function buildCardProfileSummary(data: CardProfileData) {
+  const lines = [
+    "Please confirm your card profile details:",
+    `First name: ${data.firstName || ""}`,
+    `Last name: ${data.lastName || ""}`,
+    `Date of birth: ${data.dateOfBirth || ""}`,
+    `Phone: ${data.phoneNumber || ""}`,
+    `Email: ${data.customerEmail || ""}`,
+    `Address: ${data.line1 || ""}`,
+    `ZIP: ${data.zipCode || ""}`,
+    `Country: ${PROFILE_STATIC_COUNTRY}`,
+    `State: ${PROFILE_STATIC_STATE}`,
+    `City: ${PROFILE_STATIC_CITY}`,
+    `ID type: ${PROFILE_STATIC_IDTYPE}`,
+    `ID number: ${data.idNumber ? maskIdNumber(data.idNumber) : ""}`,
+  ].filter(Boolean);
+  return lines.join("\n");
+}
+
+async function persistCardProfile(userId: string, data: CardProfileData) {
+  const idNumberEncrypted = data.idNumber ? encryptKycIdNumber(data.idNumber) : undefined;
+  const idNumberLast4 = data.idNumber ? data.idNumber.slice(-4) : undefined;
+  const customerEmail = String(data.customerEmail || "").trim().toLowerCase();
+
+  if (isPrismaPersistenceEnabled()) {
+    await prisma.user.upsert({
+      where: { userId },
+      create: {
+        userId,
+        customerEmail,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        dateOfBirth: data.dateOfBirth,
+        phoneNumber: data.phoneNumber,
+        line1: data.line1,
+        city: PROFILE_STATIC_CITY,
+        state: PROFILE_STATIC_STATE,
+        zipCode: data.zipCode,
+        country: PROFILE_STATIC_COUNTRY,
+        idType: PROFILE_STATIC_IDTYPE,
+        idNumberEncrypted,
+        idNumberLast4,
+      },
+      update: {
+        customerEmail,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        dateOfBirth: data.dateOfBirth,
+        phoneNumber: data.phoneNumber,
+        line1: data.line1,
+        city: PROFILE_STATIC_CITY,
+        state: PROFILE_STATIC_STATE,
+        zipCode: data.zipCode,
+        country: PROFILE_STATIC_COUNTRY,
+        idType: PROFILE_STATIC_IDTYPE,
+        idNumberEncrypted,
+        idNumberLast4,
+      },
+    });
+    return;
+  }
+
+  await User.findOneAndUpdate(
+    { userId },
+    {
+      $set: {
+        customerEmail,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        dateOfBirth: data.dateOfBirth,
+        phoneNumber: data.phoneNumber,
+        line1: data.line1,
+        city: PROFILE_STATIC_CITY,
+        state: PROFILE_STATIC_STATE,
+        zipCode: data.zipCode,
+        country: PROFILE_STATIC_COUNTRY,
+        idType: PROFILE_STATIC_IDTYPE,
+        idNumberEncrypted,
+        idNumberLast4,
+      },
+    },
+    { upsert: true, new: true }
+  );
+
+  await Customer.findOneAndUpdate(
+    { userId },
+    {
+      $set: {
+        email: customerEmail,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        dateOfBirth: data.dateOfBirth,
+        phoneNumber: data.phoneNumber,
+        line1: data.line1,
+        city: PROFILE_STATIC_CITY,
+        state: PROFILE_STATIC_STATE,
+        zipCode: data.zipCode,
+        country: PROFILE_STATIC_COUNTRY,
+        idType: PROFILE_STATIC_IDTYPE,
+        idNumberEncrypted,
+        idNumberLast4,
+      },
+    },
+    { upsert: true, new: true }
+  );
 }
 
 function extractCardIdFromPayload(payload: any): string | undefined {
@@ -3043,9 +3113,9 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
     ? parsedCardAmount
     : getCardRequestBaseAmount();
   const amount = String(safeCardAmount);
-  const customerEmail = customer?.email || user?.customerEmail;
+  const customerEmail = user?.customerEmail || customer?.email;
   if (!customerEmail) {
-    await bot!.sendMessage(Number(userId), "❌ Missing email. Please update your KYC email and try again.", {
+    await bot!.sendMessage(Number(userId), "❌ Missing email. Please update your card profile and try again.", {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
     return;
@@ -3053,27 +3123,27 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
 
   if (isPrismaPersistenceEnabled()) {
     try {
-      const idNumber = decryptKycIdNumber(customer?.idNumberEncrypted || user?.idNumberEncrypted);
-      const idType = mapIdTypeToNfc(customer?.idType || user?.idType || KYC_STATIC_IDTYPE);
-      const country = normalizeCountryCode(customer?.country || user?.country || KYC_STATIC_COUNTRY);
+      const idNumber = decryptKycIdNumber(user?.idNumberEncrypted || customer?.idNumberEncrypted);
+      const idType = mapIdTypeToNfc(user?.idType || PROFILE_STATIC_IDTYPE);
+      const country = normalizeCountryCode(user?.country || PROFILE_STATIC_COUNTRY);
       if (!idNumber || !idType || !country) {
-        throw new Error("Missing KYC fields required for NFC card (id number, id type, country). Please resubmit KYC.");
+        throw new Error("Missing required profile fields for card creation. Please update your card profile.");
       }
       const payload = {
         name: nameOnCard,
-        first_name: customer?.firstName || user?.firstName || nameOnCard.split(" ")[0] || "User",
-        last_name: customer?.lastName || user?.lastName || nameOnCard.split(" ").slice(1).join(" ") || "",
-        dob: customer?.dateOfBirth || user?.dateOfBirth,
+        first_name: user?.firstName || nameOnCard.split(" ")[0] || "User",
+        last_name: user?.lastName || nameOnCard.split(" ").slice(1).join(" ") || "",
+        dob: user?.dateOfBirth,
         id_type: idType,
         id_number: idNumber,
         email: customerEmail,
-        line1: customer?.line1 || user?.line1 || "",
-        city: customer?.city || user?.city || KYC_STATIC_CITY,
-        state: customer?.state || user?.state || KYC_STATIC_STATE,
-        postal_code: customer?.zipCode || user?.zipCode || "00000",
+        line1: user?.line1 || "",
+        city: user?.city || PROFILE_STATIC_CITY,
+        state: user?.state || PROFILE_STATIC_STATE,
+        postal_code: user?.zipCode || "00000",
         country,
         amount_usd: amount,
-        phone: customer?.phoneNumber || user?.phoneNumber || "",
+        phone: user?.phoneNumber || "",
       };
       const resp = await callStroWallet("create-card", "post", payload);
       const data: any = resp?.data ?? resp;
@@ -3219,25 +3289,7 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
 }
 
 async function startCreateCardFlow(chatId: number, message?: any) {
-  const { user, customer } = await getUserAndCustomerContext(String(chatId));
-  const status = resolveKycStatus(user, customer);
-  if (status !== "approved") {
-    if (status === "pending") {
-      await bot!.sendMessage(chatId, "⏳ KYC pending verification. Please wait before creating a card.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-    } else if (status === "rejected") {
-      await bot!.sendMessage(chatId, "❌ Your KYC was rejected. Use /kyc_edit to resubmit.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-    } else {
-      await bot!.sendMessage(chatId, "❌ You must complete and pass KYC before creating a card. Use /kyc.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-    }
-    return;
-  }
-
+  const { user } = await getUserAndCustomerContext(String(chatId));
   const defaultName = [user?.firstName, user?.lastName].filter(Boolean).join(" ") || message?.from?.first_name || "StroWallet User";
   createCardSessions.set(chatId, { step: "name", data: { nameOnCard: defaultName } });
   await bot!.sendMessage(chatId, "Enter name on card (or send an empty message to keep default):", {
@@ -3319,46 +3371,38 @@ function buildCreateCardSummary(data: CreateCardSession["data"]) {
 
 async function submitCreateCard(chatId: number, session: CreateCardSession) {
   const userId = String(chatId);
-  const { user, customer } = await getUserAndCustomerContext(userId);
+  const { user } = await getUserAndCustomerContext(userId);
   const userRecord = user as any;
-  const customerRecord = customer as any;
-  if (!customer || customer.kycStatus !== "approved") {
-    createCardSessions.delete(chatId);
-    await bot!.sendMessage(chatId, "❌ You must complete and pass KYC before creating a card.", {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
-    return;
-  }
-  const customerEmail = customer.email || user?.customerEmail;
+  const customerEmail = userRecord?.customerEmail;
   if (!customerEmail) {
     createCardSessions.delete(chatId);
-    await bot!.sendMessage(chatId, "❌ Missing email. Please update your KYC email and try again.", {
+    await bot!.sendMessage(chatId, "❌ Missing email. Please update your card profile and try again.", {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
     return;
   }
   try {
-    const idNumber = decryptKycIdNumber(customerRecord?.idNumberEncrypted || userRecord?.idNumberEncrypted);
-    const idType = mapIdTypeToNfc(customerRecord?.idType || userRecord?.idType || KYC_STATIC_IDTYPE);
-    const country = normalizeCountryCode(customerRecord?.country || userRecord?.country || KYC_STATIC_COUNTRY);
+    const idNumber = decryptKycIdNumber(userRecord?.idNumberEncrypted);
+    const idType = mapIdTypeToNfc(userRecord?.idType || PROFILE_STATIC_IDTYPE);
+    const country = normalizeCountryCode(userRecord?.country || PROFILE_STATIC_COUNTRY);
     if (!idNumber || !idType || !country) {
-      throw new Error("Missing KYC fields required for NFC card (id number, id type, country). Please resubmit KYC.");
+      throw new Error("Missing required profile fields for card creation. Please update your card profile.");
     }
     const payload = {
       name: session.data.nameOnCard || "Virtual Card",
-      first_name: customerRecord?.firstName || userRecord?.firstName || (session.data.nameOnCard || "User").split(" ")[0],
-      last_name: customerRecord?.lastName || userRecord?.lastName || (session.data.nameOnCard || "").split(" ").slice(1).join(" "),
-      dob: customerRecord?.dateOfBirth || userRecord?.dateOfBirth,
+      first_name: userRecord?.firstName || (session.data.nameOnCard || "User").split(" ")[0],
+      last_name: userRecord?.lastName || (session.data.nameOnCard || "").split(" ").slice(1).join(" "),
+      dob: userRecord?.dateOfBirth,
       id_type: idType,
       id_number: idNumber,
       email: customerEmail,
-      line1: customerRecord?.line1 || userRecord?.line1 || "",
-      city: customerRecord?.city || userRecord?.city || KYC_STATIC_CITY,
-      state: customerRecord?.state || userRecord?.state || KYC_STATIC_STATE,
-      postal_code: customerRecord?.zipCode || userRecord?.zipCode || "00000",
+      line1: userRecord?.line1 || "",
+      city: userRecord?.city || PROFILE_STATIC_CITY,
+      state: userRecord?.state || PROFILE_STATIC_STATE,
+      postal_code: userRecord?.zipCode || "00000",
       country,
       amount_usd: session.data.amount || "3",
-      phone: customerRecord?.phoneNumber || userRecord?.phoneNumber || "",
+      phone: userRecord?.phoneNumber || "",
     };
     const resp = await callStroWallet("create-card", "post", payload);
     const data = resp?.data ?? resp;
@@ -3439,427 +3483,10 @@ async function submitCreateCard(chatId: number, session: CreateCardSession) {
   }
 }
 
-async function startKycFlow(chatId: number, message?: any, mode: "create" | "edit" = "create", user?: any) {
-  const data: Partial<KycData> = {};
-  if (mode === "edit" && user) {
-    data.firstName = user.firstName || undefined;
-    data.lastName = user.lastName || undefined;
-    data.dateOfBirth = user.dateOfBirth || undefined;
-    data.phoneNumber = user.phoneNumber || undefined;
-    data.customerEmail = user.customerEmail || undefined;
-    data.line1 = user.line1 || undefined;
-    data.city = user.city || undefined;
-    data.state = user.state || undefined;
-    data.zipCode = user.zipCode || undefined;
-    data.country = user.country || undefined;
-    data.houseNumber = user.houseNumber || undefined;
-    data.idType = user.idType || undefined;
-    // Force re-upload on edit to avoid stale Telegram URLs
-    data.idImage = undefined;
-    data.idImageFront = undefined;
-    data.idImageBack = undefined;
-    data.idImagePdf = undefined;
-    data.userPhoto = undefined;
-  }
-  kycSessions.set(chatId, { step: "firstName", data, mode });
-  await bot!.sendMessage(
-    chatId,
-    mode === "edit"
-      ? "🪪 KYC Update\nLet's update your details. Please answer the following questions."
-      : "🪪 KYC Verification\nLet's begin. Please answer the following questions.",
-    { reply_markup: { inline_keyboard: [[{ text: "Cancel", callback_data: "CANCEL" }]] } }
-  );
-  await bot!.sendMessage(chatId, "Enter your first name:", { reply_markup: { force_reply: true } });
-}
-
-async function handleKycMessage(msg: any, session: KycSession) {
-  const chatId = msg.chat.id;
-  const text = msg.text ? String(msg.text).trim() : "";
-
-  if (session.step === "idImage" || session.step === "idImageFront" || session.step === "idImageBack" || session.step === "userPhoto") {
-    const url = await extractKycMediaUrl(msg, text);
-    if (url) {
-      if (session.step === "idImage") {
-        session.data.idImage = url;
-        session.step = "userPhoto";
-      } else if (session.step === "idImageFront") {
-        session.data.idImageFront = url;
-        if (isPdfUrl(url)) {
-          session.data.idImagePdf = url;
-          session.data.idImage = url;
-          session.step = "userPhoto";
-        } else {
-          session.step = "idImageBack";
-        }
-      } else if (session.step === "idImageBack") {
-        session.data.idImageBack = url;
-        if (!session.data.idImage) session.data.idImage = session.data.idImageFront || url;
-        session.step = "userPhoto";
-      } else if (session.step === "userPhoto") {
-        session.data.userPhoto = url;
-        session.step = "confirm";
-      }
-
-      kycSessions.set(chatId, session);
-      await promptKycStep(chatId, session);
-      return;
-    }
-
-    const hint = session.step === "userPhoto" ? "photo or image URL" : "photo, PDF, or URL";
-    await bot!.sendMessage(chatId, `Please upload a ${hint}.`, { reply_markup: { force_reply: true } });
-    return;
-  }
-
-  if (!text) {
-    await bot!.sendMessage(chatId, "Please send a text response.", { reply_markup: { force_reply: true } });
-    return;
-  }
-
-  switch (session.step) {
-    case "firstName":
-      session.data.firstName = text;
-      session.step = "lastName";
-      break;
-    case "lastName":
-      session.data.lastName = text;
-      session.step = "dateOfBirth";
-      break;
-    case "dateOfBirth":
-      if (!KYC_DOB_REGEX.test(text)) {
-        await bot!.sendMessage(chatId, "Invalid date format. Use MM/DD/YYYY.", { reply_markup: { force_reply: true } });
-        return;
-      }
-      session.data.dateOfBirth = text;
-      session.step = "phoneNumber";
-      break;
-    case "phoneNumber":
-      if (!KYC_PHONE_REGEX.test(text)) {
-        await bot!.sendMessage(chatId, "Invalid phone number. Use international format without '+'.", { reply_markup: { force_reply: true } });
-        return;
-      }
-      session.data.phoneNumber = text;
-      session.step = "customerEmail";
-      break;
-    case "customerEmail":
-      if (!/.+@.+\..+/.test(text)) {
-        await bot!.sendMessage(chatId, "Invalid email format. Try again.", { reply_markup: { force_reply: true } });
-        return;
-      }
-      session.data.customerEmail = text;
-      session.step = "line1";
-      break;
-    case "line1":
-      session.data.line1 = text;
-      session.step = "city";
-      break;
-    case "city":
-      session.data.city = text;
-      session.step = "state";
-      break;
-    case "state":
-      session.data.state = text;
-      session.step = "zipCode";
-      break;
-    case "zipCode":
-      session.data.zipCode = text;
-      session.step = "country";
-      break;
-    case "country":
-      session.data.country = text;
-      session.step = "houseNumber";
-      break;
-    case "houseNumber":
-      session.data.houseNumber = text;
-      session.step = "idType";
-      break;
-    case "idType":
-      await bot!.sendMessage(chatId, "Please select an ID type using the buttons.", {
-        reply_markup: { inline_keyboard: buildKycIdTypeKeyboard() },
-      });
-      return;
-    case "idNumber":
-      session.data.idNumber = text;
-      session.step = requiresIdBack(session.data.idType) ? "idImageFront" : "idImage";
-      break;
-    case "confirm":
-      await bot!.sendMessage(chatId, "Please use the buttons to confirm submission.", {
-        reply_markup: { inline_keyboard: buildKycConfirmKeyboard() },
-      });
-      return;
-  }
-
-  kycSessions.set(chatId, session);
-  await promptKycStep(chatId, session);
-}
-
-async function promptKycStep(chatId: number, session: KycSession) {
-  if (session.lastPromptStep === session.step) return;
-  session.lastPromptStep = session.step;
-  switch (session.step) {
-    case "lastName":
-      await bot!.sendMessage(chatId, "Enter your last name:", { reply_markup: { force_reply: true } });
-      break;
-    case "dateOfBirth":
-      await bot!.sendMessage(chatId, "Enter your date of birth (MM/DD/YYYY):", { reply_markup: { force_reply: true } });
-      break;
-    case "phoneNumber":
-      await bot!.sendMessage(chatId, "Enter your phone number (international, no '+'):", { reply_markup: { force_reply: true } });
-      break;
-    case "customerEmail":
-      await bot!.sendMessage(chatId, "Enter your email address:", { reply_markup: { force_reply: true } });
-      break;
-    case "line1":
-      await bot!.sendMessage(chatId, "Enter your street address (line1):", { reply_markup: { force_reply: true } });
-      break;
-    case "city":
-      await bot!.sendMessage(chatId, "Enter your city:", { reply_markup: { force_reply: true } });
-      break;
-    case "state":
-      await bot!.sendMessage(chatId, "Enter your state:", { reply_markup: { force_reply: true } });
-      break;
-    case "zipCode":
-      await bot!.sendMessage(chatId, "Enter your ZIP code:", { reply_markup: { force_reply: true } });
-      break;
-    case "country":
-      await bot!.sendMessage(chatId, "Enter your country (e.g., Ethiopia):", { reply_markup: { force_reply: true } });
-      break;
-    case "houseNumber":
-      await bot!.sendMessage(chatId, "Enter your house number:", { reply_markup: { force_reply: true } });
-      break;
-    case "idType":
-      await bot!.sendMessage(chatId, "Select your ID type:", {
-        reply_markup: { inline_keyboard: buildKycIdTypeKeyboard() },
-      });
-      break;
-    case "idImage":
-      await bot!.sendMessage(chatId, "Upload your ID image (photo or URL):", { reply_markup: { force_reply: true } });
-      break;
-    case "idImageFront":
-      await bot!.sendMessage(chatId, "Upload the FRONT of your ID (photo or PDF):", { reply_markup: { force_reply: true } });
-      break;
-    case "idImageBack":
-      await bot!.sendMessage(chatId, "Upload the BACK of your ID (photo or PDF):", { reply_markup: { force_reply: true } });
-      break;
-    case "userPhoto":
-      await bot!.sendMessage(chatId, "Upload your selfie (photo or URL):", { reply_markup: { force_reply: true } });
-      break;
-    case "confirm":
-      await bot!.sendMessage(chatId, buildKycSummary(session.data), {
-        reply_markup: { inline_keyboard: buildKycConfirmKeyboard() },
-        disable_web_page_preview: true,
-      });
-      break;
-    default:
-      await bot!.sendMessage(chatId, "Enter your first name:", { reply_markup: { force_reply: true } });
-  }
-}
-
-function buildKycIdTypeKeyboard(): InlineKeyboardButton[][] {
-  return [
-    KYC_ID_TYPES.map((t) => ({ text: t.label, callback_data: `KYC_IDTYPE::${t.value}` })),
-    [MENU_BUTTON],
-  ];
-}
-
-function buildKycConfirmKeyboard(): InlineKeyboardButton[][] {
-  return [
-    [
-      { text: "✅ Submit KYC", callback_data: "KYC_CONFIRM::yes" },
-      { text: "❌ Cancel", callback_data: "KYC_CONFIRM::no" },
-    ],
-    [MENU_BUTTON],
-  ];
-}
-
-function buildKycSummary(data: Partial<KycData>) {
-  const maskedId = data.idNumber ? maskIdNumber(data.idNumber) : "";
-  const idImageLine = data.idImagePdf
-    ? "ID document: PDF uploaded"
-    : data.idImageFront || data.idImageBack
-      ? `ID document: front ${data.idImageFront ? "✔" : "✖"} / back ${data.idImageBack ? "✔" : "✖"}`
-      : data.idImage
-        ? "ID document: uploaded"
-        : "";
-
-  const lines = [
-    "Please confirm your KYC details:",
-    `First name: ${data.firstName || ""}`,
-    `Last name: ${data.lastName || ""}`,
-    `Date of birth: ${data.dateOfBirth || ""}`,
-    `Phone: ${data.phoneNumber || ""}`,
-    `Email: ${data.customerEmail || ""}`,
-    `Address: ${data.line1 || ""}, ${data.city || ""}, ${data.state || ""}, ${data.zipCode || ""}, ${data.country || ""}`,
-    `House number: ${data.houseNumber || ""}`,
-    `ID type: ${data.idType || ""}`,
-    `ID number: ${maskedId}`,
-    idImageLine,
-    `Selfie: ${data.userPhoto ? "uploaded" : ""}`,
-  ].filter(Boolean);
-  return lines.join("\n");
-}
-
 function maskIdNumber(idNumber: string) {
   if (!idNumber) return "";
   const last4 = idNumber.slice(-4);
   return `${"*".repeat(Math.max(0, idNumber.length - 4))}${last4}`;
-}
-
-function isHttpUrl(value: string) {
-  try {
-    const u = new URL(value);
-    return u.protocol === "http:" || u.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
-function requiresIdBack(idType?: KycIdType) {
-  return idType === "NIN" || idType === "DRIVING_LICENSE";
-}
-
-function isPdfUrl(value: string) {
-  return value.toLowerCase().includes(".pdf");
-}
-
-async function extractKycMediaUrl(msg: any, text?: string) {
-  const photo = msg.photo?.[msg.photo.length - 1];
-  if (photo?.file_id) {
-    return await getTelegramFileUrl(photo.file_id);
-  }
-  const document = msg.document;
-  if (document?.file_id) {
-    return await getTelegramFileUrl(document.file_id);
-  }
-  if (text && isHttpUrl(text)) return text;
-  return undefined;
-}
-
-async function getTelegramFileUrl(fileId: string) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) throw new Error("TELEGRAM_BOT_TOKEN not set");
-  const file = await bot!.getFile(fileId);
-  if (!file?.file_path) throw new Error("Telegram file path unavailable");
-  return `https://api.telegram.org/file/bot${token}/${file.file_path}`;
-}
-
-function isTelegramFileUrl(url?: string) {
-  if (!url) return false;
-  try {
-    const u = new URL(url);
-    return u.hostname === "api.telegram.org" && u.pathname.includes("/file/bot");
-  } catch {
-    return false;
-  }
-}
-
-async function toDataUriFromUrl(url: string) {
-  const resp = await axios.get(url, { responseType: "arraybuffer" });
-  let contentType = (resp.headers?.["content-type"] as string | undefined) || "application/octet-stream";
-  let buffer = Buffer.from(resp.data);
-  if (contentType.startsWith("image/")) {
-    try {
-      buffer = await sharp(buffer)
-        .rotate()
-        .resize({ width: 800, height: 800, fit: "inside" })
-        .jpeg({ quality: 70, mozjpeg: true })
-        .toBuffer();
-      contentType = "image/jpeg";
-    } catch (e) {
-      console.warn("[bot] Failed to compress image; using original", e);
-      if (!contentType.startsWith("image/")) contentType = "image/jpeg";
-    }
-  } else {
-    contentType = "image/jpeg";
-  }
-  const base64 = buffer.toString("base64");
-  return `data:${contentType};base64,${base64}`;
-}
-
-async function normalizeKycImagePayload(value?: string) {
-  if (!value) return value;
-  if (value.startsWith("data:")) return value;
-  if (isHttpUrl(value)) {
-    return await toDataUriFromUrl(value);
-  }
-  return value;
-}
-
-let cloudinaryReady: boolean | null = null;
-
-function ensureCloudinary() {
-  if (cloudinaryReady !== null) return cloudinaryReady;
-  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-  const apiKey = process.env.CLOUDINARY_API_KEY;
-  const apiSecret = process.env.CLOUDINARY_API_SECRET;
-  if (cloudName && apiKey && apiSecret) {
-    cloudinary.config({ cloud_name: cloudName, api_key: apiKey, api_secret: apiSecret, secure: true });
-    cloudinaryReady = true;
-    return true;
-  }
-  cloudinaryReady = false;
-  return false;
-}
-
-async function uploadToCloudinary(buffer: Buffer) {
-  const folder = process.env.CLOUDINARY_FOLDER || "strowallet-kyc";
-  return await new Promise<string>((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      { folder, resource_type: "image" },
-      (err, result) => {
-        if (err) return reject(err);
-        const url = result?.secure_url || result?.url;
-        if (!url) return reject(new Error("Cloudinary upload missing URL"));
-        resolve(url);
-      }
-    );
-    stream.end(buffer);
-  });
-}
-
-async function saveTelegramMedia(url: string) {
-  const resp = await axios.get(url, { responseType: "arraybuffer" });
-  const contentType = (resp.headers?.["content-type"] as string | undefined) || "application/octet-stream";
-  let buffer = Buffer.from(resp.data);
-  let ext = "jpg";
-  if (contentType.startsWith("image/")) {
-    try {
-      buffer = await sharp(buffer)
-        .rotate()
-        .resize({ width: 800, height: 800, fit: "inside" })
-        .jpeg({ quality: 70, mozjpeg: true })
-        .toBuffer();
-      ext = "jpg";
-    } catch (e) {
-      console.warn("[bot] Failed to compress image; using original", e);
-    }
-  }
-
-  if (ensureCloudinary()) {
-    try {
-      return await uploadToCloudinary(buffer);
-    } catch (e) {
-      console.warn("[bot] Cloudinary upload failed; falling back to local upload", e);
-    }
-  }
-
-  const uploadsDir = path.join(process.cwd(), "public", "uploads");
-  await fs.mkdir(uploadsDir, { recursive: true });
-  const name = `kyc_${Date.now()}_${crypto.randomBytes(6).toString("hex")}.${ext}`;
-  const filePath = path.join(uploadsDir, name);
-  await fs.writeFile(filePath, buffer);
-
-  const baseUrl = (process.env.BOT_BACKEND_BASE || "http://localhost:3000").replace(/\/$/, "");
-  return `${baseUrl}/uploads/${name}`;
-}
-
-async function embedTelegramMedia(url?: string) {
-  if (!url || !isTelegramFileUrl(url)) return url;
-  try {
-    return await saveTelegramMedia(url);
-  } catch (e) {
-    console.warn("[bot] Failed to embed Telegram media; falling back to URL", e);
-    return url;
-  }
 }
 
 function getKycEncryptionKey() {
@@ -3926,459 +3553,6 @@ function mapIdTypeToNfc(value?: string) {
   if (v === "passport") return "passport";
   if (v === "driving_license" || v === "drivers_license" || v === "drivinglicense") return "drivers_license";
   return undefined;
-}
-
-function extractCustomerId(payload: any) {
-  return (
-    payload?.data?.customerId ||
-    payload?.data?.customer_id ||
-    payload?.data?.data?.customerId ||
-    payload?.data?.data?.customer_id ||
-    payload?.data?.response?.customerId ||
-    payload?.data?.response?.customer_id ||
-    payload?.customerId ||
-    payload?.customer_id ||
-    payload?.data?.id ||
-    payload?.data?.data?.id ||
-    payload?.id
-  );
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function ensureProviderAcceptedKyc(resp: any) {
-  const data = resp?.data ?? resp ?? {};
-  const successFlag = data?.success;
-  const okFlag = data?.ok;
-  const statusFlag = data?.status;
-  const statusText = typeof statusFlag === "string" ? statusFlag.toLowerCase() : "";
-  const explicitFailureStatus = ["failed", "error", "rejected", "invalid"].includes(statusText);
-
-  // Some provider deployments return 200 with noisy/legacy `error(s)` fields even on success.
-  // Treat only explicit false/failure status as rejection.
-  if (successFlag === false || okFlag === false || statusFlag === false || explicitFailureStatus) {
-    const providerMessage =
-      data?.message ||
-      data?.error ||
-      data?.errors?.[0]?.message ||
-      "KYC request was rejected by provider";
-    const err: any = new Error(String(providerMessage));
-    err.status = 400;
-    throw err;
-  }
-}
-
-async function submitKyc(chatId: number, session: KycSession) {
-  const data = session.data as KycData;
-  const missing = [
-    "firstName",
-    "lastName",
-    "dateOfBirth",
-    "phoneNumber",
-    "customerEmail",
-    "line1",
-    "city",
-    "state",
-    "zipCode",
-    "country",
-    "houseNumber",
-    "idType",
-    "idNumber",
-    "userPhoto",
-  ].filter((k) => !(data as any)[k]);
-
-  const needsBothSides = requiresIdBack(data.idType);
-  const hasPdf = Boolean(data.idImagePdf);
-  if (needsBothSides && !hasPdf) {
-    if (!data.idImageFront) missing.push("idImageFront");
-    if (!data.idImageBack) missing.push("idImageBack");
-  }
-  if (!needsBothSides && !data.idImage) {
-    missing.push("idImage");
-  }
-
-  if (missing.length) {
-    await bot!.sendMessage(chatId, "Missing required fields. Please restart /kyc.", {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
-    kycSessions.delete(chatId);
-    return;
-  }
-
-  const idImageSource = data.idImagePdf || data.idImageFront || data.idImage || data.idImageBack;
-  const idImageForApi = await embedTelegramMedia(idImageSource);
-  const userPhotoForApi = await embedTelegramMedia(data.userPhoto);
-  const idImagePayload = await normalizeKycImagePayload(idImageForApi);
-  const userPhotoPayload = await normalizeKycImagePayload(userPhotoForApi);
-  const emailForApi = String(data.customerEmail || "").trim().toLowerCase();
-  const countryForApi = KYC_STATIC_COUNTRY;
-  const stateForApi = KYC_STATIC_STATE;
-  const cityForApi = KYC_STATIC_CITY;
-  const idTypeForApi = KYC_STATIC_IDTYPE;
-  const createPayload = {
-    firstName: data.firstName,
-    lastName: data.lastName,
-    dateOfBirth: data.dateOfBirth,
-    phoneNumber: data.phoneNumber,
-    customerEmail: emailForApi,
-    line1: data.line1,
-    city: cityForApi,
-    state: stateForApi,
-    zipCode: data.zipCode,
-    country: countryForApi,
-    houseNumber: data.houseNumber,
-    idType: idTypeForApi,
-    idNumber: data.idNumber,
-    idImage: idImagePayload,
-    userPhoto: userPhotoPayload,
-  };
-
-  const updatePayload = {
-    customerId: undefined as string | undefined,
-    firstName: data.firstName,
-    lastName: data.lastName,
-    idImage: idImagePayload,
-    userPhoto: userPhotoPayload,
-    phoneNumber: data.phoneNumber,
-    country: countryForApi,
-    city: cityForApi,
-    state: stateForApi,
-    zipCode: data.zipCode,
-    line1: data.line1,
-    houseNumber: data.houseNumber,
-  };
-
-  try {
-    const userId = String(chatId);
-    const { user } = await getUserAndCustomerContext(userId);
-    let resp: any;
-    if (session.mode === "edit") {
-      const customerId = user?.strowalletCustomerId;
-      if (!customerId) {
-        throw Object.assign(new Error("Missing StroWallet customer ID. Please resubmit /kyc."), { status: 400 });
-      }
-      updatePayload.customerId = customerId;
-      resp = await callStroWallet("updateCardCustomer", "put", updatePayload);
-    } else {
-      resp = await callStroWallet("create-user", "post", createPayload);
-    }
-
-    const respData = (resp as any)?.data ?? resp;
-    console.log("[bot] KYC provider response", {
-      chatId,
-      mode: session.mode,
-      hasCustomerId: Boolean(extractCustomerId(resp)),
-      success: respData?.success,
-      status: respData?.status,
-      message: respData?.message,
-      error: respData?.error,
-    });
-
-    ensureProviderAcceptedKyc(resp);
-
-    let customerId = extractCustomerId(resp);
-    if (!customerId && session.mode === "create") {
-      try {
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          await sleep(1200);
-          const lookup = await callStroWallet(
-            "getcardholder",
-            "get",
-            { customerEmail: emailForApi },
-            { silentOnStatus: [404] }
-          );
-          customerId = extractCustomerId(lookup);
-          if (customerId) break;
-        }
-      } catch (e) {
-        console.warn("[bot] KYC customerId lookup failed", e);
-      }
-    }
-    if (!customerId && session.mode === "create") {
-      // Some providers return 200 for create-user but delay customerId availability.
-      // Keep KYC pending and let later status sync resolve customerId by email.
-      console.warn("[bot] KYC create-user succeeded without immediate customerId", {
-        chatId,
-        email: emailForApi,
-      });
-    }
-    const idNumberEncrypted = encryptKycIdNumber(data.idNumber);
-    if (!idNumberEncrypted) {
-      console.warn("[bot] KYC_ENCRYPTION_KEY missing or invalid; idNumber not encrypted at rest");
-    }
-    const idNumberLast4 = data.idNumber.slice(-4);
-    if (isPrismaPersistenceEnabled()) {
-      await prisma.user.upsert({
-        where: { userId },
-        create: {
-          userId,
-          telegramId: user?.telegramId || userId,
-          chatId: user?.chatId || userId,
-          username: user?.username,
-          kycStatus: "pending",
-          strowalletCustomerId: customerId || user?.strowalletCustomerId,
-          firstName: data.firstName,
-          lastName: data.lastName,
-          dateOfBirth: data.dateOfBirth,
-          phoneNumber: data.phoneNumber,
-          customerEmail: emailForApi,
-          line1: data.line1,
-          city: data.city,
-          state: data.state,
-          zipCode: data.zipCode,
-          country: data.country,
-          houseNumber: data.houseNumber,
-          idType: data.idType,
-          idNumberEncrypted,
-          idNumberLast4,
-          idImageUrl: idImageForApi,
-          idImageFrontUrl: data.idImageFront,
-          idImageBackUrl: data.idImageBack,
-          idImagePdfUrl: data.idImagePdf,
-          userPhotoUrl: data.userPhoto,
-          kycSubmittedAt: new Date(),
-        },
-        update: {
-          kycStatus: "pending",
-          strowalletCustomerId: customerId || user?.strowalletCustomerId,
-          firstName: data.firstName,
-          lastName: data.lastName,
-          dateOfBirth: data.dateOfBirth,
-          phoneNumber: data.phoneNumber,
-          customerEmail: emailForApi,
-          line1: data.line1,
-          city: data.city,
-          state: data.state,
-          zipCode: data.zipCode,
-          country: data.country,
-          houseNumber: data.houseNumber,
-          idType: data.idType,
-          idNumberEncrypted,
-          idNumberLast4,
-          idImageUrl: idImageForApi,
-          idImageFrontUrl: data.idImageFront,
-          idImageBackUrl: data.idImageBack,
-          idImagePdfUrl: data.idImagePdf,
-          userPhotoUrl: data.userPhoto,
-          kycSubmittedAt: new Date(),
-        },
-      });
-    } else {
-      await User.findOneAndUpdate(
-        { userId },
-        {
-          $set: {
-            kycStatus: "pending",
-            strowalletCustomerId: customerId || user?.strowalletCustomerId,
-            firstName: data.firstName,
-            lastName: data.lastName,
-            dateOfBirth: data.dateOfBirth,
-            phoneNumber: data.phoneNumber,
-            customerEmail: data.customerEmail,
-            line1: data.line1,
-            city: data.city,
-            state: data.state,
-            zipCode: data.zipCode,
-            country: data.country,
-            houseNumber: data.houseNumber,
-            idType: data.idType,
-            idNumberEncrypted,
-            idNumberLast4,
-            idImageUrl: idImageForApi,
-            idImageFrontUrl: data.idImageFront,
-            idImageBackUrl: data.idImageBack,
-            idImagePdfUrl: data.idImagePdf,
-            userPhotoUrl: data.userPhoto,
-            kycSubmittedAt: new Date(),
-          },
-        },
-        { upsert: true, new: true }
-      );
-
-      await Customer.findOneAndUpdate(
-        { userId },
-        {
-          $set: {
-            customerId: customerId || undefined,
-            email: emailForApi,
-            telegramId: user?.telegramId || userId,
-            chatId: user?.chatId || userId,
-            username: user?.username,
-            firstName: data.firstName,
-            lastName: data.lastName,
-            dateOfBirth: data.dateOfBirth,
-            phoneNumber: data.phoneNumber,
-            line1: data.line1,
-            city: data.city,
-            state: data.state,
-            zipCode: data.zipCode,
-            country: data.country,
-            houseNumber: data.houseNumber,
-            idType: data.idType,
-            idNumberEncrypted,
-            idNumberLast4,
-            idImageUrl: idImageForApi,
-            idImageFrontUrl: data.idImageFront,
-            idImageBackUrl: data.idImageBack,
-            idImagePdfUrl: data.idImagePdf,
-            userPhotoUrl: data.userPhoto,
-            kycStatus: "pending",
-            submittedAt: new Date(),
-            approvedAt: undefined,
-            rawPayload: {
-              request: session.mode === "edit" ? updatePayload : createPayload,
-              response: resp,
-            },
-          },
-        },
-        { upsert: true, new: true }
-      );
-    }
-
-    kycSessions.delete(chatId);
-    await bot!.sendMessage(chatId, session.mode === "edit"
-      ? "✅ Your updated KYC has been submitted successfully. Status: pending approval."
-      : "✅ KYC submitted. Status: pending approval.", {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
-  } catch (err: any) {
-    kycSessions.delete(chatId);
-    if (err?.status === 400) {
-      const providerDetail = typeof err?.message === "string" && err.message.trim().length
-        ? `\nReason: ${err.message.trim()}`
-        : "";
-      await bot!.sendMessage(chatId, `❌ Invalid/missing data. Please retry with /kyc.${providerDetail}`, {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
-    }
-    await sendFriendlyError(chatId, err?.requestId);
-  }
-}
-
-async function refreshKycStatusFromStroWallet(user: any): Promise<KycStatus | undefined> {
-  try {
-    const existingCustomer = isPrismaPersistenceEnabled()
-      ? null
-      : await Customer.findOne({ userId: String(user?.userId) }).lean();
-    const customerId = user?.strowalletCustomerId || existingCustomer?.customerId;
-    const customerEmail = user?.customerEmail || existingCustomer?.email;
-    if (!customerId && !customerEmail) return undefined;
-    const resp = await callStroWallet(
-      "getcardholder",
-      "get",
-      {
-        customerId,
-        customerEmail,
-      },
-      { silentOnStatus: [404] }
-    );
-    if ((resp as any)?.ok === false) return undefined;
-    const data = resp?.data ?? resp;
-    const providerCustomerId = extractCustomerId(resp);
-    const statusRaw =
-      data?.status ||
-      data?.kycStatus ||
-      data?.verificationStatus ||
-      data?.state ||
-      data?.data?.status ||
-      data?.data?.kycStatus ||
-      data?.data?.verificationStatus ||
-      data?.data?.state;
-
-    const normalized = normalizeKycStatus(statusRaw);
-    const previous = normalizeKycStatus(existingCustomer?.kycStatus || user?.kycStatus);
-    const userId = String(user.userId);
-
-    if ((normalized && normalized !== user?.kycStatus) || (providerCustomerId && !user?.strowalletCustomerId)) {
-      if (isPrismaPersistenceEnabled()) {
-        await prisma.user.update({
-          where: { userId },
-          data: {
-            ...(normalized ? { kycStatus: normalized } : {}),
-            ...(providerCustomerId ? { strowalletCustomerId: providerCustomerId } : {}),
-          },
-        });
-      } else {
-        await User.findOneAndUpdate(
-          { userId },
-          { $set: { kycStatus: normalized || user?.kycStatus, ...(providerCustomerId ? { strowalletCustomerId: providerCustomerId } : {}) } },
-          { new: true }
-        );
-      }
-    }
-
-    if (!isPrismaPersistenceEnabled() && (normalized || providerCustomerId)) {
-      await Customer.findOneAndUpdate(
-        { userId },
-        {
-          $set: {
-            ...(providerCustomerId ? { customerId: providerCustomerId } : {}),
-            ...(normalized ? { kycStatus: normalized } : {}),
-            ...(normalized === "approved" ? { approvedAt: new Date() } : {}),
-          },
-        },
-        { new: true, upsert: true }
-      );
-    }
-
-    if (normalized && normalized !== previous && (normalized === "approved" || normalized === "rejected")) {
-      const lastNotified = existingCustomer?.lastKycNotificationStatus as "approved" | "rejected" | undefined;
-      if (lastNotified !== normalized) {
-        await notifyKycStatus(userId, normalized).catch(() => {});
-        if (!isPrismaPersistenceEnabled()) {
-          await Customer.findOneAndUpdate(
-            { userId },
-            { $set: { lastKycNotificationStatus: normalized, lastKycNotifiedAt: new Date() } },
-            { new: true, upsert: true }
-          );
-        }
-      }
-    }
-
-    return normalized;
-  } catch {
-    return undefined;
-  }
-}
-
-function normalizeKycStatus(value: any): KycStatus | undefined {
-  if (!value) return undefined;
-  const v = String(value).toLowerCase();
-  const compact = v.replace(/[\s_-]+/g, "");
-  if (["approved", "verified", "success", "active", "highkyc"].includes(compact)) return "approved";
-  if (["pending", "processing", "review", "unreviewkyc"].includes(compact)) return "pending";
-  if (["declined", "rejected", "failed", "lowkyc"].includes(compact)) return "rejected";
-  return undefined;
-}
-
-function resolveKycStatus(user?: any, customer?: any): KycStatus | "not_started" {
-  if (customer?.kycStatus) return customer.kycStatus as KycStatus;
-  const raw = user?.kycStatus;
-  if (!raw) return "not_started";
-  const normalized = normalizeKycStatus(raw);
-  return normalized || (raw === "not_started" ? "not_started" : "pending");
-}
-
-async function sendKycStatus(chatId: number) {
-  const { user, customer } = await getUserAndCustomerContext(String(chatId));
-  let status = resolveKycStatus(user, customer);
-  if (user && status !== "approved" && status !== "rejected") {
-    const refreshed = await refreshKycStatusFromStroWallet(user);
-    if (refreshed) status = refreshed;
-  }
-  if (status === "not_started") {
-    await bot!.sendMessage(chatId, "No KYC record found. Use /kyc to submit.", {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
-    return;
-  }
-  const label = status === "approved" ? "Approved" : status === "pending" ? "Waiting for approval" : "Verification failed — use /kyc_edit";
-  await bot!.sendMessage(chatId, `Your KYC status: ${label}.`, {
-    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-  });
 }
 
 function formatMaskedCard(last4?: string) {
@@ -4478,8 +3652,6 @@ async function sendUserInfo(chatId: number, message?: any) {
   const baseBalance = user?.balance ?? 0;
   const currency = user?.currency || "USDT";
   const email = user?.customerEmail || link?.customerEmail;
-  const kycStatus = resolveKycStatus(user, customer);
-  const kycLabel = kycStatus === "approved" ? "Approved ✅ (use /kyc to resubmit)" : "/kyc";
   const cardId = primaryCard?.cardId;
   const remoteDetail = cardId ? await fetchCardDetailSafe(cardId) : null;
   const walletBalance = Number(baseBalance);
@@ -4492,22 +3664,23 @@ async function sendUserInfo(chatId: number, message?: any) {
   const nameSource = user?.firstName || user?.lastName
     ? `${user?.firstName || ""} ${user?.lastName || ""}`.trim()
     : (user?.username ? String(user.username) : "User");
-  const hasReadyProfile = Boolean(email) && kycStatus === "approved" && Boolean(primaryCard);
+  const hasProfile = getCardProfileMissingFields(user, customer).length === 0;
+  const hasCard = Boolean(primaryCard);
 
   const lines = [
     "🧑‍💻 Here's Your Profile:",
     `👤 Name: ${nameSource}${username ? ` (${username})` : ""}`,
     `👤 User ID: ${chatId}`,
     `✉️ Email: ${email || "/linkemail"}`,
-    `KYC: ${kycLabel}`,
-    `Wallet: ${hasReadyProfile ? `${Number.isFinite(walletBalance) ? walletBalance.toFixed(2) : "0.00"} ${currency}` : "/card_request"}`,
-    hasReadyProfile && Number.isFinite(cardBalance)
+    `Card profile: ${hasProfile ? "Ready ✅" : "Incomplete"}`,
+    `Wallet: ${Number.isFinite(walletBalance) ? walletBalance.toFixed(2) : "0.00"} ${currency}`,
+    hasCard && Number.isFinite(cardBalance)
       ? `Card Balance: ${cardBalance.toFixed(2)} ${(remoteDetail?.currency || primaryCard?.currency || "USD").toUpperCase()}`
       : undefined,
-    `Cards: ${hasReadyProfile ? "1" : "/card_request"}`,
+    `Cards: ${hasCard ? "1" : "0"}`,
     "💳 Virtual Card",
-    `• Status: ${hasReadyProfile ? (cardStatusLabel || "Active") : "No Card"}`,
-    `• Last 4 digits: ${hasReadyProfile ? (last4 || "****") : "****"}`,
+    `• Status: ${hasCard ? (cardStatusLabel || "Active") : "No Card"}`,
+    `• Last 4 digits: ${hasCard ? (last4 || "****") : "****"}`,
   ].filter(Boolean) as string[];
 
   await editOrSend(chatId, message, lines.join("\n"), {

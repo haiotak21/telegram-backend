@@ -71,33 +71,6 @@ function normalizeError(e: any) {
   return { status, message: String(msg) };
 }
 
-function normalizeKycProviderStatus(value?: any): "pending" | "approved" | "rejected" | undefined {
-  if (value == null) return undefined;
-  const compact = String(value).toLowerCase().replace(/[\s_-]+/g, "");
-  if (["approved", "verified", "success", "active", "highkyc"].includes(compact)) return "approved";
-  if (["pending", "processing", "review", "unreviewkyc"].includes(compact)) return "pending";
-  if (["declined", "rejected", "failed", "lowkyc"].includes(compact)) return "rejected";
-  return undefined;
-}
-
-async function fetchCardholderKyc(customerId?: string | null, customerEmail?: string | null) {
-  const public_key = requirePublicKey();
-  const params: any = { public_key };
-  if (customerId) params.customerId = customerId;
-  if (customerEmail) params.customerEmail = customerEmail;
-  const resp = await bitvcard.get("getcardholder/", {
-    params,
-  });
-  const payload = resp.data;
-  const status = normalizeKycProviderStatus(
-    extractField(payload, ["kycStatus", "verificationStatus", "status", "state", "kyc_state"])
-  );
-  const providerCustomerId =
-    extractField(payload, ["customerId", "customer_id", "cardholderId", "card_holder_id"]) || customerId || undefined;
-  const providerEmail = extractField(payload, ["customerEmail", "customer_email", "email"]) || customerEmail || undefined;
-  return { status, providerCustomerId, providerEmail };
-}
-
 function extractField(obj: any, keys: string[]): string | undefined {
   if (!obj || typeof obj !== "object") return undefined;
   for (const key of keys) {
@@ -151,11 +124,6 @@ async function fetchCardHistory(cardId: string, page: number, take: number) {
   });
   return resp.data;
 }
-
-const SearchSchema = z.object({
-  search: z.string().optional(),
-  limit: z.coerce.number().int().min(1).max(200).optional(),
-});
 
 const TransactionQuerySchema = z.object({
   userId: z.string().optional(),
@@ -212,7 +180,7 @@ const CardLinkSchema = z
     message: "customerEmail or userId is required",
   });
 
-const BroadcastFilterSchema = z.enum(["all", "kyc_approved", "balance_positive"]);
+const BroadcastFilterSchema = z.enum(["all", "balance_positive"]);
 
 const BroadcastCreateSchema = z.object({
   messageText: z.string().min(1).max(4096),
@@ -242,9 +210,8 @@ function ensureCloudinary() {
 router.get("/stats", requireAdmin, async (_req, res) => {
   try {
     if (isPrismaPersistenceEnabled()) {
-      const [usersTotal, kycApproved, cardHoldersRows, transactionsTotal] = await Promise.all([
+      const [usersTotal, cardHoldersRows, transactionsTotal] = await Promise.all([
         prisma.user.count(),
-        prisma.user.count({ where: { kycStatus: "approved" } }),
         prisma.card.findMany({
           where: {
             cardId: { not: "" },
@@ -256,16 +223,15 @@ router.get("/stats", requireAdmin, async (_req, res) => {
         prisma.transaction.count(),
       ]);
       const cardHolders = cardHoldersRows.filter((row) => Boolean(row.userId)).length;
-      return ok(res, { usersTotal, kycApproved, cardHolders, transactionsTotal });
+      return ok(res, { usersTotal, cardHolders, transactionsTotal });
     }
 
-    const [usersTotal, kycApproved, cardHolders, transactionsTotal] = await Promise.all([
+    const [usersTotal, cardHolders, transactionsTotal] = await Promise.all([
       User.countDocuments({}),
-      Customer.countDocuments({ kycStatus: "approved" }),
       Card.distinct("userId", { cardId: { $exists: true, $ne: "" } }).then((ids) => ids.length),
       Transaction.countDocuments({}),
     ]);
-    return ok(res, { usersTotal, kycApproved, cardHolders, transactionsTotal });
+    return ok(res, { usersTotal, cardHolders, transactionsTotal });
   } catch (e) {
     const { status, message } = normalizeError(e);
     return fail(res, message, status);
@@ -373,251 +339,6 @@ router.get("/broadcast/:id", requireAdmin, async (req, res) => {
       startedAt: job.startedAt,
       completedAt: job.completedAt,
       lastError: job.lastError,
-    });
-  } catch (e) {
-    const { status, message } = normalizeError(e);
-    return fail(res, message, status);
-  }
-});
-
-router.get("/users", requireAdmin, async (req, res) => {
-  try {
-    const { search, limit } = SearchSchema.parse(req.query || {});
-    const q = search?.trim();
-
-    if (isPrismaPersistenceEnabled()) {
-      const baseWhere: any = {
-        OR: [
-          { kycStatus: { in: ["pending", "approved", "declined"] } },
-          { kycSubmittedAt: { not: null } },
-          { strowalletCustomerId: { not: null } },
-        ],
-      };
-
-      let where: any = baseWhere;
-      if (q) {
-        const isNumeric = /^\d+$/.test(q);
-        where = {
-          AND: [
-            baseWhere,
-            {
-              OR: [
-                ...(isNumeric ? [{ userId: q }] : []),
-                { customerEmail: q },
-                { strowalletCustomerId: q },
-              ],
-            },
-          ],
-        };
-      }
-
-      const items = await prisma.user.findMany({
-        where,
-        orderBy: [{ kycSubmittedAt: "desc" }, { updatedAt: "desc" }],
-        take: limit || 50,
-      });
-
-      const users = items.map((u) => ({
-        telegramUserId: u.userId,
-        customerId: u.strowalletCustomerId || null,
-        kycStatus: u.kycStatus || "not_started",
-        customerKycStatus: null,
-        userKycStatus: u.kycStatus || null,
-        firstName: u.firstName,
-        lastName: u.lastName,
-        customerEmail: u.customerEmail,
-        idType: u.idType,
-        submittedAt: u.kycSubmittedAt,
-      }));
-
-      return ok(res, { users });
-    }
-
-    const baseQuery: any = {
-      $or: [
-        { kycStatus: { $in: ["pending", "approved", "declined"] } },
-        { kycSubmittedAt: { $exists: true, $ne: null } },
-        { strowalletCustomerId: { $exists: true, $ne: null } },
-      ],
-    };
-
-    let query: any = baseQuery;
-
-    if (q) {
-      const isNumeric = /^\d+$/.test(q);
-      query = {
-        $and: [
-          baseQuery,
-          {
-            $or: [
-              ...(isNumeric ? [{ userId: q }] : []),
-              { customerEmail: q },
-              { strowalletCustomerId: q },
-            ],
-          },
-        ],
-      };
-    }
-
-    const items = await User.find(query)
-      .sort({ kycSubmittedAt: -1, updatedAt: -1 })
-      .limit(limit || 50)
-      .lean();
-
-    const userIds = items.map((u) => u.userId);
-    const customers = await Customer.find({ userId: { $in: userIds } }).lean();
-    const customerMap = new Map(customers.map((c) => [c.userId, c]));
-
-    const users = items.map((u) => {
-      const customer = customerMap.get(u.userId);
-      return {
-        telegramUserId: u.userId,
-        customerId: customer?.customerId || u.strowalletCustomerId,
-        kycStatus: customer?.kycStatus || "not_started",
-        customerKycStatus: customer?.kycStatus || null,
-        userKycStatus: u.kycStatus || null,
-        firstName: u.firstName,
-        lastName: u.lastName,
-        customerEmail: customer?.email || u.customerEmail,
-        idType: u.idType,
-        submittedAt: customer?.submittedAt || u.kycSubmittedAt,
-      };
-    });
-
-    return ok(res, { users });
-  } catch (e) {
-    const { status, message } = normalizeError(e);
-    return fail(res, message, status);
-  }
-});
-
-router.get("/users/:telegramUserId/kyc-status", requireAdmin, async (req, res) => {
-  try {
-    const telegramUserId = String(req.params.telegramUserId);
-    const refresh = String(req.query.refresh || "false").toLowerCase() === "true";
-    if (isPrismaPersistenceEnabled()) {
-      let user = await prisma.user.findUnique({ where: { userId: telegramUserId } });
-      if (!user) return fail(res, "User not found", 404);
-
-      if (refresh && (user.strowalletCustomerId || user.customerEmail)) {
-        try {
-          const refreshed = await fetchCardholderKyc(user.strowalletCustomerId, user.customerEmail);
-          if (refreshed.status || refreshed.providerCustomerId || refreshed.providerEmail) {
-            user = await prisma.user.update({
-              where: { userId: telegramUserId },
-              data: {
-                ...(refreshed.status ? { kycStatus: refreshed.status } : {}),
-                ...(refreshed.providerCustomerId ? { strowalletCustomerId: refreshed.providerCustomerId } : {}),
-                ...(refreshed.providerEmail ? { customerEmail: refreshed.providerEmail } : {}),
-              },
-            });
-          }
-        } catch (err) {
-          console.warn("[admin] kyc refresh failed", { telegramUserId, error: (err as any)?.message || String(err) });
-        }
-      }
-
-      return ok(res, {
-        telegramUserId: user.userId,
-        customerId: user.strowalletCustomerId || null,
-        customerEmail: user.customerEmail || null,
-        kycStatus: user.kycStatus || "not_started",
-        customerKycStatus: null,
-        userKycStatus: user.kycStatus || null,
-        submittedAt: user.kycSubmittedAt,
-        idType: user.idType,
-        name: [user.firstName, user.lastName].filter(Boolean).join(" "),
-      });
-    }
-
-    let user = await User.findOne({ userId: telegramUserId }).lean();
-    if (!user) return fail(res, "User not found", 404);
-    let customer = await Customer.findOne({ userId: telegramUserId }).lean();
-    if (!customer) return fail(res, "Customer not found", 404);
-
-    if (refresh && (customer.customerId || customer.email || user.strowalletCustomerId || user.customerEmail)) {
-      try {
-        const refreshed = await fetchCardholderKyc(
-          customer.customerId || user.strowalletCustomerId,
-          customer.email || user.customerEmail
-        );
-        if (refreshed.status || refreshed.providerCustomerId || refreshed.providerEmail) {
-          await Promise.all([
-            User.updateOne(
-              { userId: telegramUserId },
-              {
-                $set: {
-                  ...(refreshed.status ? { kycStatus: refreshed.status } : {}),
-                  ...(refreshed.providerCustomerId ? { strowalletCustomerId: refreshed.providerCustomerId } : {}),
-                  ...(refreshed.providerEmail ? { customerEmail: refreshed.providerEmail } : {}),
-                },
-              }
-            ),
-            Customer.updateOne(
-              { userId: telegramUserId },
-              {
-                $set: {
-                  ...(refreshed.status ? { kycStatus: refreshed.status } : {}),
-                  ...(refreshed.providerCustomerId ? { customerId: refreshed.providerCustomerId } : {}),
-                  ...(refreshed.providerEmail ? { email: refreshed.providerEmail } : {}),
-                },
-              }
-            ),
-          ]);
-          user = await User.findOne({ userId: telegramUserId }).lean();
-          customer = await Customer.findOne({ userId: telegramUserId }).lean();
-        }
-      } catch (err) {
-        console.warn("[admin] kyc refresh failed", { telegramUserId, error: (err as any)?.message || String(err) });
-      }
-    }
-
-    if (!user) return fail(res, "User not found", 404);
-    if (!customer) return fail(res, "Customer not found", 404);
-
-    return ok(res, {
-      telegramUserId: user.userId,
-      customerId: customer.customerId || user.strowalletCustomerId,
-      customerEmail: customer.email || user.customerEmail,
-      kycStatus: customer.kycStatus,
-      customerKycStatus: customer.kycStatus,
-      userKycStatus: user.kycStatus || null,
-      submittedAt: customer.submittedAt || user.kycSubmittedAt,
-      idType: user.idType,
-      name: [user.firstName, user.lastName].filter(Boolean).join(" "),
-    });
-  } catch (e) {
-    const { status, message } = normalizeError(e);
-    return fail(res, message, status);
-  }
-});
-
-router.get("/users/:telegramUserId/kyc-debug", requireAdmin, async (req, res) => {
-  try {
-    const telegramUserId = String(req.params.telegramUserId);
-    const user = await User.findOne({ userId: telegramUserId }).lean();
-    if (!user) return fail(res, "User not found", 404);
-
-    const missing = [
-      user.idType ? null : "idType",
-      user.idImageUrl || user.idImageFrontUrl || user.idImageBackUrl || user.idImagePdfUrl ? null : "idImage",
-      user.userPhotoUrl ? null : "userPhoto",
-      user.strowalletCustomerId ? null : "strowalletCustomerId",
-    ].filter(Boolean);
-
-    return ok(res, {
-      telegramUserId: user.userId,
-      kycStatus: user.kycStatus || "not_started",
-      strowalletCustomerId: user.strowalletCustomerId,
-      customerEmail: user.customerEmail,
-      idType: user.idType,
-      idImageUrl: user.idImageUrl,
-      idImageFrontUrl: user.idImageFrontUrl,
-      idImageBackUrl: user.idImageBackUrl,
-      idImagePdfUrl: user.idImagePdfUrl,
-      userPhotoUrl: user.userPhotoUrl,
-      submittedAt: user.kycSubmittedAt,
-      missing,
     });
   } catch (e) {
     const { status, message } = normalizeError(e);
@@ -836,43 +557,6 @@ router.post("/cards/link", requireAdmin, async (req, res) => {
     }
 
     return ok(res, { cardId, userId, customerEmail, linked: true });
-  } catch (e) {
-    const { status, message } = normalizeError(e);
-    return fail(res, message, status);
-  }
-});
-
-router.get("/users/:telegramUserId/kyc-payload", requireAdmin, async (req, res) => {
-  try {
-    const telegramUserId = String(req.params.telegramUserId);
-    const user = await User.findOne({ userId: telegramUserId }).lean();
-    if (!user) return fail(res, "User not found", 404);
-
-    const idImage = user.idImagePdfUrl || user.idImageFrontUrl || user.idImageUrl || user.idImageBackUrl;
-    const payload = {
-      public_key: process.env.STROWALLET_PUBLIC_KEY,
-      houseNumber: user.houseNumber,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      idNumber: "<FILL_WITH_USER_ID_NUMBER>",
-      customerEmail: user.customerEmail,
-      phoneNumber: user.phoneNumber,
-      dateOfBirth: user.dateOfBirth,
-      idImage,
-      userPhoto: user.userPhotoUrl,
-      line1: user.line1,
-      state: user.state,
-      zipCode: user.zipCode,
-      city: user.city,
-      country: user.country,
-      idType: user.idType,
-    };
-
-    return ok(res, {
-      note: "idNumber is not stored in plain text; fill it from the user. idNumberLast4 provided for reference.",
-      idNumberLast4: user.idNumberLast4,
-      payload,
-    });
   } catch (e) {
     const { status, message } = normalizeError(e);
     return fail(res, message, status);

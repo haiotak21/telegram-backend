@@ -28,7 +28,7 @@ npm start
 
 Base: `/api/strowallet`
 
-- `POST /create-user` – Register customer (KYC)
+- `POST /create-user` – Register customer
 - `GET /getcardholder` – Retrieve customer by id/email
 - `PUT /updateCardCustomer` – Update customer details
 - `POST /create-card` – Create virtual card

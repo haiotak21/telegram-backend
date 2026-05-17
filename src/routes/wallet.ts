@@ -329,10 +329,6 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
         const userId = String(tx.userId);
         const userRecord = await prisma.user.findUnique({ where: { userId } });
         if (!userRecord) return fail(res, "User not found", 404);
-        if ((userRecord.kycStatus || "").toLowerCase() !== "approved") {
-          return fail(res, "User KYC is not approved for card creation", 400);
-        }
-
         const cardAmountUsdRaw = txMetadata?.cardAmountUsd;
         const cardAmountUsd = Number(cardAmountUsdRaw);
         const amount = Number.isFinite(cardAmountUsd) && cardAmountUsd >= 3 ? cardAmountUsd : 3;
@@ -537,12 +533,6 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
         session.endSession();
         return fail(res, "User not found", 404);
       }
-      if (!customer || customer.kycStatus !== "approved") {
-        await session.abortTransaction();
-        session.endSession();
-        return fail(res, "User KYC is not approved for card creation", 400);
-      }
-
       const cardAmountUsdRaw = tx.metadata?.cardAmountUsd;
       const cardAmountUsd = Number(cardAmountUsdRaw);
       const amount = Number.isFinite(cardAmountUsd) && cardAmountUsd >= 3 ? cardAmountUsd : 3;

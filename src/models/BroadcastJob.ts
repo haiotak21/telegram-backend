@@ -1,6 +1,6 @@
 import mongoose, { Schema, Document, Model } from "mongoose";
 
-export type BroadcastFilter = "all" | "kyc_approved" | "balance_positive";
+export type BroadcastFilter = "all" | "balance_positive";
 export type BroadcastStatus = "pending" | "sending" | "completed" | "failed";
 
 export interface IBroadcastJob extends Document {
@@ -26,7 +26,7 @@ const BroadcastJobSchema = new Schema<IBroadcastJob>(
     createdBy: { type: String },
     messageText: { type: String, required: true },
     imageUrl: { type: String },
-    targetFilter: { type: String, enum: ["all", "kyc_approved", "balance_positive"], required: true },
+    targetFilter: { type: String, enum: ["all", "balance_positive"], required: true },
     targetUserIds: { type: [String], default: [] },
     targetCount: { type: Number, required: true, default: 0 },
     processedCount: { type: Number, required: true, default: 0 },

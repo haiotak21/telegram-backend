@@ -5,7 +5,7 @@ import { TelegramLink } from "../models/TelegramLink";
 import Transaction from "../models/Transaction";
 import User from "../models/User";
 import Customer from "../models/Customer";
-import { notifyByCardId, notifyByEmail, notifyCardRequestApproved, notifyCardStatusChanged, notifyKycStatus } from "./botService";
+import { notifyByCardId, notifyByEmail, notifyCardRequestApproved, notifyCardStatusChanged } from "./botService";
 import prisma from "../utils/prisma";
 import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
@@ -49,22 +49,11 @@ export async function processStroWalletEvent(payload: any) {
   const cardId = extractField(payload, ["card_id", "cardId", "id", "card"]);
   const customerEmail = extractField(payload, ["customerEmail", "customer_email", "email"]);
   const customerId = extractField(payload, ["customerId", "customer_id", "cardholderId", "card_holder_id"]);
-  const explicitKycStatus = extractField(payload, [
-    "kycStatus",
-    "verificationStatus",
-    "kyc_state",
-  ]);
-  const eventLooksLikeKyc = type.toLowerCase().includes("kyc");
-  const genericKycStatus = eventLooksLikeKyc
-    ? extractField(payload, ["status", "state"])
-    : undefined;
-  const kycStatus = normalizeKycStatus(explicitKycStatus || genericKycStatus);
 
   // Debug: Log extracted fields
   console.log('DEBUG: Extracted cardId:', cardId);
   console.log('DEBUG: Extracted customerEmail:', customerEmail);
   console.log('DEBUG: Extracted customerId:', customerId);
-  console.log('DEBUG: Extracted kycStatus:', kycStatus);
 
   const message = formatMessage(type, payload);
   const lowerType = type.toLowerCase();
@@ -75,114 +64,8 @@ export async function processStroWalletEvent(payload: any) {
     if (customerEmail) await notifyByEmail(customerEmail, message);
   }
 
-  if (kycStatus && (customerId || customerEmail)) {
-    // Debug: Entering KYC notification logic
-    console.log('DEBUG: Entering KYC notification logic');
-    const existing = isPrismaPersistenceEnabled()
-      ? null
-      : await Customer.findOne({
-          $or: [
-            ...(customerId ? [{ customerId }] : []),
-            ...(customerEmail ? [{ email: customerEmail }] : []),
-          ],
-        }).lean();
-
-    let userId = existing?.userId;
-    if (!userId && (customerId || customerEmail)) {
-      if (isPrismaPersistenceEnabled()) {
-        const user = await prisma.user.findFirst({
-          where: {
-            OR: [
-              ...(customerId ? [{ strowalletCustomerId: customerId }] : []),
-              ...(customerEmail ? [{ customerEmail }] : []),
-            ],
-          },
-        });
-        userId = user?.userId;
-      } else {
-        const user = await User.findOne({
-          $or: [
-            ...(customerId ? [{ strowalletCustomerId: customerId }] : []),
-            ...(customerEmail ? [{ customerEmail }] : []),
-          ],
-        }).lean();
-        userId = user?.userId;
-      }
-    }
-
-    // Debug: Log resolved userId
-    console.log('DEBUG: Resolved userId:', userId);
-
-    if (userId) {
-      const prevUser = isPrismaPersistenceEnabled()
-        ? await prisma.user.findUnique({ where: { userId } })
-        : await User.findOne({ userId }).lean();
-      const previousStatus = normalizeKycStatus(existing?.kycStatus || prevUser?.kycStatus);
-      const lastNotifiedStatus = existing?.lastKycNotificationStatus as "approved" | "rejected" | undefined;
-      // Debug: Log previous KYC status
-      console.log('DEBUG: Previous KYC status:', previousStatus);
-      console.log('DEBUG: Last notified KYC status:', lastNotifiedStatus);
-      if (!isPrismaPersistenceEnabled()) {
-        await Customer.findOneAndUpdate(
-          { userId },
-          {
-            $set: {
-              customerId: customerId || existing?.customerId,
-              email: customerEmail || existing?.email,
-              kycStatus,
-              approvedAt: kycStatus === "approved" ? new Date() : undefined,
-            },
-          },
-          { upsert: true, new: true }
-        );
-      }
-
-      if (isPrismaPersistenceEnabled()) {
-        await prisma.user.update({
-          where: { userId },
-          data: {
-            kycStatus,
-            ...(customerId ? { strowalletCustomerId: customerId } : {}),
-            ...(customerEmail ? { customerEmail } : {}),
-          },
-        });
-      } else {
-        await User.findOneAndUpdate(
-          { userId },
-          { $set: { kycStatus } },
-          { new: true }
-        );
-      }
-
-      const shouldNotify =
-        (kycStatus === "approved" || kycStatus === "rejected") &&
-        kycStatus !== lastNotifiedStatus;
-      // Debug: Log notification decision
-      console.log('DEBUG: shouldNotify:', shouldNotify);
-      if (shouldNotify) {
-        console.log(`DEBUG: Sending KYC notification to userId: ${userId}, status: ${kycStatus}`);
-        await notifyKycStatus(userId, kycStatus as any).catch((err) => {
-          console.error('Error sending KYC notification:', err);
-        });
-        if (!isPrismaPersistenceEnabled()) {
-          await Customer.findOneAndUpdate(
-            { userId },
-            {
-              $set: {
-                lastKycNotificationStatus: kycStatus,
-                lastKycNotifiedAt: new Date(),
-              },
-            },
-            { new: true }
-          );
-        }
-      }
-    } else {
-      console.log('DEBUG: No userId found for notification');
-    }
-  } else {
-    if (!kycStatus) console.log('DEBUG: No kycStatus extracted, skipping notification logic');
-    if (!customerId && !customerEmail) console.log('DEBUG: No customerId or customerEmail extracted, skipping notification logic');
+  if (!customerId && !customerEmail) {
+    console.log('DEBUG: No customerId or customerEmail extracted for notification routing');
   }
 
   if ((lowerType === "card.created" || lowerType.includes("virtualcard.created")) && cardId) {
@@ -401,15 +284,6 @@ export async function processStroWalletEvent(payload: any) {
       await notifyByCardId(cardId, lines.join("\n")).catch(() => {});
     }
   }
-}
-
-function normalizeKycStatus(value?: string): "pending" | "approved" | "rejected" | undefined {
-  if (!value) return undefined;
-  const compact = String(value).toLowerCase().replace(/[\s_-]+/g, "");
-  if (["approved", "verified", "success", "active", "highkyc"].includes(compact)) return "approved";
-  if (["pending", "processing", "review", "unreviewkyc"].includes(compact)) return "pending";
-  if (["declined", "rejected", "failed", "lowkyc"].includes(compact)) return "rejected";
-  return undefined;
 }
 
 async function resolveUserId(customerEmail?: string, cardId?: string) {
