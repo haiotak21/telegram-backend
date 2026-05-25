@@ -203,6 +203,202 @@ router.post("/", async (req, res) => {
     const userId = asString(body.userId);
     if (!userId) throw new Error("userId is required");
 
+    if (isPrismaPersistenceEnabled()) {
+      const user = await prisma.user.findUnique({ where: { userId } });
+      if (!user) {
+        return fail(res, "User not found", 404);
+      }
+
+      const activeCard = await prisma.card.findFirst({
+        where: {
+          userId,
+          status: { in: ["active", "ACTIVE", "frozen", "FROZEN"] },
+        },
+      });
+      if (activeCard) {
+        return fail(res, "User already has an active card", 400);
+      }
+
+      const existing = await prisma.cardRequest.findFirst({
+        where: { userId, status: { in: ["pending", "approved"] } },
+      });
+      if (existing) {
+        return fail(res, "You already have an active or approved card request", 400);
+      }
+
+      let reqAmount = Number(body.amount);
+      if (!Number.isFinite(reqAmount) || reqAmount < 3) reqAmount = 3;
+      let reqCardTypeRaw = asString(body.cardType);
+      let reqCardType = reqCardTypeRaw ? reqCardTypeRaw.toLowerCase() : "nfc";
+      if (reqCardType !== "visa" && reqCardType !== "mastercard" && reqCardType !== "nfc") reqCardType = "nfc";
+
+      const nameOnCard = asString(body.nameOnCard) || [user.firstName, user.lastName].filter(Boolean).join(" ") || "StroWallet User";
+      const customerEmail = asEmail(body.customerEmail) || user.customerEmail;
+      if (!customerEmail) {
+        return fail(res, "customerEmail is required to create a card", 400);
+      }
+
+      const request = await prisma.cardRequest.create({
+        data: {
+          userId,
+          nameOnCard,
+          cardType: reqCardType,
+          amount: reqAmount.toString(),
+          customerEmail,
+          mode: normalizeMode(getDefaultMode()) || null,
+          metadata: body.metadata as any,
+          status: "pending",
+        },
+      });
+
+      const bitvcard = buildBitvcardClient();
+      const public_key = requirePublicKey();
+
+      try {
+        let respData: any;
+        if (reqCardType === "nfc") {
+          const idNumber = decryptKycIdNumber(user.idNumberEncrypted || undefined);
+          const idType = mapIdTypeToNfc(user.idType || PROFILE_STATIC_IDTYPE);
+          const country = normalizeCountryCode(user.country || PROFILE_STATIC_COUNTRY);
+          const firstName = user.firstName;
+          const lastName = user.lastName;
+          const dob = user.dateOfBirth;
+          const phone = user.phoneNumber;
+          const line1 = user.line1 || "";
+          const city = user.city || PROFILE_STATIC_CITY;
+          const state = user.state || PROFILE_STATIC_STATE;
+          const postalCode = user.zipCode || "00000";
+
+          if (!idNumber || !idType || !country || !firstName || !lastName || !dob || !phone || !line1) {
+            await prisma.cardRequest.update({
+              where: { id: request.id },
+              data: { status: "declined", decisionReason: "Missing required profile fields for NFC card creation" },
+            });
+            return fail(res, "Missing required profile fields for NFC card creation", 400);
+          }
+
+          const payload: Record<string, any> = {
+            name: nameOnCard,
+            first_name: firstName,
+            last_name: lastName,
+            dob,
+            id_type: idType,
+            id_number: idNumber,
+            email: customerEmail,
+            line1,
+            city,
+            state,
+            postal_code: postalCode,
+            country,
+            amount_usd: reqAmount.toString(),
+            phone,
+            public_key,
+            mode: normalizeMode(getDefaultMode()),
+          };
+
+          const resp = await bitvcard.post("create-nfc-card/", undefined, { params: payload });
+          respData = resp.data as any;
+        } else {
+          const payload: Record<string, any> = {
+            name_on_card: nameOnCard,
+            card_type: reqCardType,
+            amount: reqAmount.toString(),
+            customerEmail,
+            public_key,
+            mode: normalizeMode(getDefaultMode()),
+          };
+          try {
+            const resp = await bitvcard.post("create-card/", payload, {
+              headers: { "Content-Type": "application/json" },
+            });
+            respData = resp.data as any;
+          } catch (firstErr: any) {
+            const fallbackResp = await bitvcard.post("create-card/", payload, {
+              headers: { "Content-Type": "application/json" },
+              params: payload,
+            });
+            respData = fallbackResp.data as any;
+            console.warn("[card-requests] create-card primary attempt failed, fallback succeeded", {
+              userId,
+              status: firstErr?.response?.status,
+              message: firstErr?.response?.data?.message || firstErr?.response?.data?.error || firstErr?.message,
+            });
+          }
+        }
+
+        const { cardId, cardNumber, cvc } = extractCardInfo(respData);
+
+        if (!cardId) {
+          await prisma.cardRequest.update({
+            where: { id: request.id },
+            data: {
+              status: "declined",
+              decisionReason: "Card creation succeeded but no card_id returned",
+              responseData: respData as any,
+            },
+          });
+          notifyCardRequestDeclined(request.userId, "Card creation succeeded but no card_id returned").catch(() => {});
+          return fail(res, "Card creation succeeded but no card_id returned", 502);
+        }
+
+        await prisma.cardRequest.update({
+          where: { id: request.id },
+          data: {
+            status: "approved",
+            cardId,
+            cardNumber,
+            cvc,
+            responseData: respData as any,
+            nameOnCard,
+            cardType: reqCardType,
+            amount: reqAmount.toString(),
+            customerEmail,
+            mode: normalizeMode(getDefaultMode()) || null,
+          },
+        });
+
+        const last4 = cardNumber ? cardNumber.slice(-4) : undefined;
+        await prisma.card.upsert({
+          where: { cardId },
+          create: {
+            cardId,
+            userId,
+            customerEmail,
+            nameOnCard,
+            cardType: reqCardType,
+            status: respData?.status || respData?.state || "active",
+            last4,
+            currency: respData?.currency || respData?.ccy || null,
+            balance: respData?.balance != null ? String(respData.balance) : (respData?.available_balance != null ? String(respData.available_balance) : null),
+            availableBalance: respData?.available_balance != null ? String(respData.available_balance) : null,
+          },
+          update: {
+            userId,
+            customerEmail,
+            nameOnCard,
+            cardType: reqCardType,
+            status: respData?.status || respData?.state || "active",
+            last4,
+            currency: respData?.currency || respData?.ccy || null,
+            balance: respData?.balance != null ? String(respData.balance) : (respData?.available_balance != null ? String(respData.available_balance) : null),
+            availableBalance: respData?.available_balance != null ? String(respData.available_balance) : null,
+          },
+        });
+
+        notifyCardRequestApproved(request.userId, { cardId, cardType: reqCardType, nameOnCard, raw: respData }).catch(() => {});
+
+        return ok(res, { request: { ...request, status: "approved", cardId }, cardId, response: respData }, 201);
+      } catch (e: any) {
+        const { status, message } = normalizeError(e);
+        await prisma.cardRequest.update({
+          where: { id: request.id },
+          data: { status: "declined", decisionReason: message || "Card request failed", responseData: undefined },
+        });
+        notifyCardRequestDeclined(request.userId, message || "Card request failed").catch(() => {});
+        return fail(res, message || "Card request failed", status);
+      }
+    }
+
     const user = (await User.findOne({ userId }).lean()) as any;
     if (!user) {
       return fail(res, "User not found", 404);
