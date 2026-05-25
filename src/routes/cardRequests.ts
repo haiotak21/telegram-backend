@@ -2,6 +2,7 @@ import express from "express";
 import axios, { AxiosError } from "axios";
 import http from "http";
 import https from "https";
+import crypto from "crypto";
 import CardRequest from "../models/CardRequest";
 import { TelegramLink } from "../models/TelegramLink";
 import User from "../models/User";
@@ -19,6 +20,11 @@ const STROWALLET_PREFER_IPV4 = String(process.env.STROWALLET_PREFER_IPV4 || "tru
 const httpAgent = STROWALLET_PREFER_IPV4 ? new http.Agent({ keepAlive: true, family: 4 } as any) : undefined;
 const httpsAgent = STROWALLET_PREFER_IPV4 ? new https.Agent({ keepAlive: true, family: 4 } as any) : undefined;
 
+const PROFILE_STATIC_COUNTRY = process.env.KYC_STATIC_COUNTRY || "Ghana";
+const PROFILE_STATIC_STATE = process.env.KYC_STATIC_STATE || "Accra";
+const PROFILE_STATIC_CITY = process.env.KYC_STATIC_CITY || "Accra";
+const PROFILE_STATIC_IDTYPE = process.env.KYC_STATIC_IDTYPE || "PASSPORT";
+
 function getDefaultMode() {
   return process.env.STROWALLET_DEFAULT_MODE || (process.env.NODE_ENV !== "production" ? "sandbox" : undefined);
 }
@@ -28,6 +34,62 @@ function normalizeMode(mode?: string) {
   const m = String(mode).toLowerCase();
   if (m === "live") return undefined;
   return m;
+}
+
+function getKycEncryptionKey() {
+  const raw = process.env.KYC_ENCRYPTION_KEY;
+  if (!raw) return null;
+  try {
+    const buf = raw.length === 64 ? Buffer.from(raw, "hex") : Buffer.from(raw, "base64");
+    if (buf.length !== 32) return null;
+    return buf;
+  } catch {
+    return null;
+  }
+}
+
+function decryptKycIdNumber(encrypted?: string) {
+  if (!encrypted) return undefined;
+  if (!encrypted.startsWith("v1:")) return undefined;
+  const key = getKycEncryptionKey();
+  if (!key) return undefined;
+  const parts = encrypted.split(":");
+  if (parts.length !== 4) return undefined;
+  const iv = Buffer.from(parts[1], "base64");
+  const tag = Buffer.from(parts[2], "base64");
+  const ciphertext = Buffer.from(parts[3], "base64");
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAuthTag(tag);
+  const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  return plaintext.toString("utf8");
+}
+
+function normalizeCountryCode(value?: string) {
+  const raw = String(value || "").trim();
+  if (!raw) return undefined;
+  if (raw.length === 3) return raw.toUpperCase();
+  const normalized = raw.toLowerCase();
+  const map: Record<string, string> = {
+    ghana: "GHA",
+    nigeria: "NGA",
+    ethiopia: "ETH",
+    kenya: "KEN",
+    uganda: "UGA",
+    tanzania: "TZA",
+    rwanda: "RWA",
+    burundi: "BDI",
+    sudan: "SDN",
+    "south sudan": "SSD",
+  };
+  return map[normalized];
+}
+
+function mapIdTypeToNfc(value?: string) {
+  const v = String(value || "").toLowerCase();
+  if (v === "nin" || v === "national_id" || v === "nationalid") return "national_id";
+  if (v === "passport") return "passport";
+  if (v === "driving_license" || v === "drivers_license" || v === "drivinglicense") return "drivers_license";
+  return undefined;
 }
 
 
@@ -161,10 +223,10 @@ router.post("/", async (req, res) => {
     // Enforce minimum amount of 3
     let reqAmount = Number(body.amount);
     if (!Number.isFinite(reqAmount) || reqAmount < 3) reqAmount = 3;
-    // Enforce cardType to be visa or mastercard
+    // Enforce cardType to be visa, mastercard, or nfc (default nfc)
     let reqCardTypeRaw = asString(body.cardType);
-    let reqCardType = reqCardTypeRaw ? reqCardTypeRaw.toLowerCase() : "visa";
-    if (reqCardType !== "visa" && reqCardType !== "mastercard") reqCardType = "visa";
+    let reqCardType = reqCardTypeRaw ? reqCardTypeRaw.toLowerCase() : "nfc";
+    if (reqCardType !== "visa" && reqCardType !== "mastercard" && reqCardType !== "nfc") reqCardType = "nfc";
 
     const nameOnCard = asString(body.nameOnCard) || [user.firstName, user.lastName].filter(Boolean).join(" ") || "StroWallet User";
     const customerEmail = asEmail(body.customerEmail) || customer.email || user.customerEmail;
@@ -185,34 +247,73 @@ router.post("/", async (req, res) => {
 
     const bitvcard = buildBitvcardClient();
     const public_key = requirePublicKey();
-    const payload: Record<string, any> = {
-      name_on_card: nameOnCard,
-      card_type: reqCardType,
-      amount: reqAmount.toString(),
-      customerEmail,
-      public_key,
-      mode: normalizeMode(getDefaultMode()),
-    };
-
     try {
       let respData: any;
-      try {
-        const resp = await bitvcard.post("create-card/", payload, {
-          headers: { "Content-Type": "application/json" },
-        });
+      if (reqCardType === "nfc") {
+        const idNumber = decryptKycIdNumber(customer?.idNumberEncrypted || user?.idNumberEncrypted);
+        const idType = mapIdTypeToNfc(user?.idType || customer?.idType || PROFILE_STATIC_IDTYPE);
+        const country = normalizeCountryCode(user?.country || customer?.country || PROFILE_STATIC_COUNTRY);
+        const firstName = user?.firstName || customer?.firstName;
+        const lastName = user?.lastName || customer?.lastName;
+        const dob = user?.dateOfBirth || customer?.dateOfBirth;
+        const phone = user?.phoneNumber || customer?.phoneNumber;
+        const line1 = user?.line1 || customer?.line1 || "";
+        const city = user?.city || customer?.city || PROFILE_STATIC_CITY;
+        const state = user?.state || customer?.state || PROFILE_STATIC_STATE;
+        const postalCode = user?.zipCode || customer?.zipCode || "00000";
+
+        if (!idNumber || !idType || !country || !firstName || !lastName || !dob || !phone || !line1) {
+          return fail(res, "Missing required profile fields for NFC card creation", 400);
+        }
+
+        const payload: Record<string, any> = {
+          name: nameOnCard,
+          first_name: firstName,
+          last_name: lastName,
+          dob,
+          id_type: idType,
+          id_number: idNumber,
+          email: customerEmail,
+          line1,
+          city,
+          state,
+          postal_code: postalCode,
+          country,
+          amount_usd: reqAmount.toString(),
+          phone,
+          public_key,
+          mode: normalizeMode(getDefaultMode()),
+        };
+
+        const resp = await bitvcard.post("create-nfc-card/", undefined, { params: payload });
         respData = resp.data as any;
-      } catch (firstErr: any) {
-        // Fallback for deployments that parse some fields from query params.
-        const fallbackResp = await bitvcard.post("create-card/", payload, {
-          headers: { "Content-Type": "application/json" },
-          params: payload,
-        });
-        respData = fallbackResp.data as any;
-        console.warn("[card-requests] create-card primary attempt failed, fallback succeeded", {
-          userId,
-          status: firstErr?.response?.status,
-          message: firstErr?.response?.data?.message || firstErr?.response?.data?.error || firstErr?.message,
-        });
+      } else {
+        const payload: Record<string, any> = {
+          name_on_card: nameOnCard,
+          card_type: reqCardType,
+          amount: reqAmount.toString(),
+          customerEmail,
+          public_key,
+          mode: normalizeMode(getDefaultMode()),
+        };
+        try {
+          const resp = await bitvcard.post("create-card/", payload, {
+            headers: { "Content-Type": "application/json" },
+          });
+          respData = resp.data as any;
+        } catch (firstErr: any) {
+          // Fallback for deployments that parse some fields from query params.
+          const fallbackResp = await bitvcard.post("create-card/", payload, {
+            headers: { "Content-Type": "application/json" },
+            params: payload,
+          });
+          respData = fallbackResp.data as any;
+          console.warn("[card-requests] create-card primary attempt failed, fallback succeeded", {
+            userId,
+            status: firstErr?.response?.status,
+            message: firstErr?.response?.data?.message || firstErr?.response?.data?.error || firstErr?.message,
+          });
+        }
       }
       const { cardId, cardNumber, cvc } = extractCardInfo(respData);
 

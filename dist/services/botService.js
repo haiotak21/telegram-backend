@@ -3327,15 +3327,16 @@ function normalizeCardDetail(raw) {
     const billingState = pickNestedField(raw, ["billing_state", "billingState"]);
     const billingZip = pickNestedField(raw, ["billing_zip_code", "billing_zip", "billingZip", "billingZipCode"]);
     const billingCountry = pickNestedField(raw, ["billing_country", "billingCountry"]);
-    const line1 = pickNestedField(raw, ["line1", "address", "addressLine1", "address_line1"]);
+    const line1 = pickNestedField(raw, ["line1", "addressLine1", "address_line1"]);
     const city = pickNestedField(raw, ["city", "town"]);
     const state = pickNestedField(raw, ["state", "province", "region"]);
     const zip = pickNestedField(raw, ["zip", "zipCode", "postal", "postalCode"]);
     const country = pickNestedField(raw, ["country"]);
+    const addressRaw = pickNestedField(raw, ["address", "address_full", "addressFull"]);
     const billingParts = [billingStreet || line1, billingCity || city].filter(Boolean).join(", ");
     const addressParts = [billingState || state, billingZip || zip, billingCountry || country].filter(Boolean).join(", ");
     const billing = billingRaw || (billingParts ? billingParts : undefined);
-    const address = addressParts ? addressParts : undefined;
+    const address = addressRaw || (addressParts ? addressParts : undefined);
     return {
         card_number: cardNumber,
         cvc,
@@ -3512,9 +3513,8 @@ async function sendMyCards(chatId, message) {
         const cvc = String(remoteDetail?.cvc || "").trim();
         const validThru = extractExpiry(remoteDetail || card);
         const balanceLabel = formatCardMoney((remoteDetail?.balance ?? remoteDetail?.available_balance ?? card.balance ?? user?.balance), remoteDetail?.currency || card.currency || user?.currency || "USD");
-        const profileFallback = buildProfileAddressFallback(user, null);
-        const billing = remoteDetail?.billing || profileFallback.billing;
-        const address = remoteDetail?.address || profileFallback.address;
+        const billing = remoteDetail?.billing;
+        const address = remoteDetail?.address;
         const lines = [
             "💳 Your Virtual Card",
             `Card Type: ${String(card.cardType || "virtual").toLowerCase()}`,
@@ -3602,9 +3602,8 @@ async function sendMyCards(chatId, message) {
     const statusText = isFrozenStatus(activeCard.status) ? "❄️ Frozen" : "✅ Active";
     const balanceLabel = formatCardMoney(mergedDetail?.balance ?? mergedDetail?.available_balance ?? activeCard.balance ?? user?.balance, mergedDetail?.currency || activeCard.currency || user?.currency || "USD");
     const expiry = extractExpiry(mergedDetail) || extractExpiry(latestRequest?.responseData || latestRequest?.metadata || {});
-    const profileFallback = buildProfileAddressFallback(user, customer);
-    const billing = mergedDetail?.billing || latestRequest?.metadata?.billing || profileFallback.billing;
-    const address = mergedDetail?.address || latestRequest?.metadata?.address || profileFallback.address;
+    const billing = mergedDetail?.billing || latestRequest?.metadata?.billing;
+    const address = mergedDetail?.address || latestRequest?.metadata?.address;
     const lines = [
         "💳 Your Virtual Card",
         `Card Type: ${cardType}`,
@@ -3851,9 +3850,8 @@ async function sendCardSensitiveDetails(chatId, cardId) {
     const cardNumber = local?.cardNumber || remote?.card_number;
     const cvc = local?.cvc || remote?.cvc;
     const expiry = localExpiry || extractExpiry(remote);
-    const profileFallback = buildProfileAddressFallback(user, customer);
-    const billing = localBilling || remote?.billing || profileFallback.billing;
-    const address = localAddress || remote?.address || profileFallback.address;
+    const billing = localBilling || remote?.billing;
+    const address = localAddress || remote?.address;
     if (!cardNumber || !cvc) {
         await bot.sendMessage(chatId, "Full card details are not available. Please try again later or contact support.", {
             reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -4275,26 +4273,6 @@ function buildCardDetailMessage(detail, cardId) {
         address ? `Address: ${address}` : undefined,
     ].filter(Boolean);
     return lines.join("\n");
-}
-function buildProfileAddressFallback(user, customer) {
-    const line1 = String(user?.line1 || customer?.line1 || "").trim();
-    const city = String(user?.city || customer?.city || PROFILE_STATIC_CITY || "").trim();
-    const zipCode = String(user?.zipCode || customer?.zipCode || "").trim();
-    const country = String(user?.country || customer?.country || PROFILE_STATIC_COUNTRY || "").trim();
-    const billingParts = [];
-    if (line1)
-        billingParts.push(line1);
-    if (line1 && city)
-        billingParts.push(city);
-    const addressParts = [];
-    if (zipCode)
-        addressParts.push(zipCode);
-    if (zipCode && country)
-        addressParts.push(country);
-    return {
-        billing: billingParts.length ? billingParts.join(", ") : undefined,
-        address: addressParts.length ? addressParts.join(", ") : undefined,
-    };
 }
 async function fetchCardDetailSafe(cardId) {
     try {
