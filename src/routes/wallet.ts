@@ -267,6 +267,13 @@ router.get("/transactions/recent", requireAdmin, async (req, res) => {
 });
 
 router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
+  console.log("[wallet] transaction decision request", {
+    params: req.params,
+    rawUrl: req.originalUrl,
+    body: req.body,
+    contentType: req.headers["content-type"],
+  });
+
   if (isPrismaPersistenceEnabled()) {
     try {
       const id = String(req.params.id || "").trim();

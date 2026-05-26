@@ -1174,6 +1174,13 @@
         setTimeout(() => t.classList.remove("show"), 2400);
       }
 
+      function extractErrorMessage(err) {
+        if (typeof err === "string") return err;
+        if (err?.data?.error) return String(err.data.error);
+        if (err?.message) return String(err.message);
+        return "An unexpected error occurred";
+      }
+
       function updateTokenStatus() {
         const token = (els.adminToken.value || "").trim();
         if (token) {
@@ -1236,7 +1243,7 @@
         } catch (_) {}
         if (data && typeof data === "object" && "ok" in data) {
           if (data.ok === false) {
-            const message = data.error || "Request failed";
+            const message = extractErrorMessage(data.error || data);
             const err = new Error(message);
             err.status = res.status;
             err.data = data;
@@ -1245,7 +1252,7 @@
           data = data.data;
         }
         if (!res.ok) {
-          const message = data?.message || data?.error || "Request failed";
+          const message = extractErrorMessage(data?.message || data?.error || data);
           const err = new Error(message);
           err.status = res.status;
           // Attach payload so UI can show validation detail
@@ -2436,7 +2443,7 @@
 
           showToast("Marked declined", "info");
         } catch (err) {
-          const msg = err?.message || "Action failed";
+          const msg = extractErrorMessage(err);
           if (els.recentStatus) els.recentStatus.textContent = msg;
           showToast(msg, "error");
         } finally {
