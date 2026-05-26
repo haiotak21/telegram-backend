@@ -5,5 +5,15 @@ export function ok(res: Response, data: any, status = 200) {
 }
 
 export function fail(res: Response, error: string, status = 400) {
-  return res.status(status).json({ ok: false, error });
+  let errString: string;
+  if (typeof error === "string") {
+    errString = error;
+  } else {
+    try {
+      errString = JSON.stringify(error);
+    } catch {
+      errString = String(error);
+    }
+  }
+  return res.status(status).json({ ok: false, error: errString });
 }
