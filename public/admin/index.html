@@ -1166,7 +1166,7 @@
 
       function showToast(msg, kind = "info") {
         const t = els.toast;
-        t.textContent = msg;
+        t.textContent = extractErrorMessage(msg);
         t.className =
           "toast " +
           (kind === "success" ? "good" : kind === "error" ? "bad" : "");
