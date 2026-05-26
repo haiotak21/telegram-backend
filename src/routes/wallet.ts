@@ -352,7 +352,8 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
             },
           );
         } catch (createErr: any) {
-          const msg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
+          const rawMsg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
+          const msg = typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg);
           return fail(res, msg, 400);
         }
 
@@ -562,7 +563,8 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
       } catch (createErr: any) {
         await session.abortTransaction();
         session.endSession();
-        const msg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
+        const rawMsg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
+        const msg = typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg);
         return fail(res, msg, 400);
       }
 

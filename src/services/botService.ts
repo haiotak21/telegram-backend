@@ -25,7 +25,8 @@ type PendingAction =
   | { type: "verify"; method: PaymentMethod; expectedAmount?: number }
   | { type: "deposit_amount"; method: PaymentMethod }
   | { type: "deposit_convert_amount" }
-  | { type: "card_request_verify"; method: PaymentMethod };
+  | { type: "card_request_verify"; method: PaymentMethod }
+  | { type: "airtime" };
 const pendingActions = new Map<string, PendingAction>();
 
 function chatKey(value: number | string | undefined): string | null {
@@ -299,6 +300,7 @@ const MENU_KEYBOARD: InlineKeyboardButton[][] = [
   [{ text: "📢 News", url: NEWS_URL }],
 ];
 
+
 export async function initBot() {
   const killSwitch = String(process.env.TELEGRAM_BOT_DISABLED || "false").toLowerCase() === "true";
   if (killSwitch) {
@@ -383,6 +385,11 @@ export async function initBot() {
     { command: "start", description: "Show welcome message" },
     { command: "menu", description: "Show main menu" },
     { command: "help", description: "Show available commands" },
+    { command: "virtualaccount", description: "Show your virtual account" },
+    { command: "usdt", description: "Show your USDT address" },
+    { command: "airtime", description: "Buy airtime (provider phone amount)" },
+    { command: "dataplans", description: "List data plans (/dataplans mtn-data)" },
+    { command: "buydata", description: "Buy data (/buydata mtn-data variation phone amount)" },
     { command: "card_request", description: "Request a virtual card" },
     { command: "requestcard", description: "Request a virtual card" },
     { command: "mycard", description: "View your card details" },
@@ -443,13 +450,63 @@ export async function initBot() {
     if (shouldSkipCommand(msg, "help")) return;
     await bot!.sendMessage(
       msg.chat.id,
-      "Commands:\n/card_request\n/requestcard\n/mycard\n/cardstatus\n/transactions\n/freeze\n/unfreeze\n/linkemail your@example.com\n/linkcard CARD_ID\n/unlink (remove all links)\n/status\n/verify\n/deposit"
+      "Commands:\n/card_request\n/requestcard\n/mycard\n/cardstatus\n/transactions\n/freeze\n/unfreeze\n/linkemail your@example.com\n/linkcard CARD_ID\n/unlink (remove all links)\n/status\n/verify\n/deposit\n/virtualaccount\n/usdt\n/airtime\n/dataplans\n/buydata"
     );
   });
 
   botRef.onText(/^\/deposit$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "deposit")) return;
     await sendDepositInfo(msg.chat.id);
+  });
+
+  botRef.onText(/^\/virtualaccount$/i, async (msg: any) => {
+    if (shouldSkipCommand(msg, "virtualaccount")) return;
+    await sendVirtualAccount(msg.chat.id);
+  });
+
+  botRef.onText(/^\/usdt$/i, async (msg: any) => {
+    if (shouldSkipCommand(msg, "usdt")) return;
+    await sendUsdtAddress(msg.chat.id);
+  });
+
+  botRef.onText(/^\/airtime(?:\s+(.+))?$/i, async (msg: any, match?: RegExpExecArray | null) => {
+    if (shouldSkipCommand(msg, "airtime")) return;
+    const args = match?.[1];
+    if (!args) {
+      const key = chatKey(msg.chat.id);
+      if (key) pendingActions.set(key, { type: "airtime" });
+      await bot!.sendMessage(
+        msg.chat.id,
+        "Send airtime in this format: provider phone amount\nExample: mtn 08031234567 500",
+        { reply_markup: { force_reply: true } }
+      );
+      return;
+    }
+    await handleAirtimeRequest(msg.chat.id, args);
+  });
+
+  botRef.onText(/^\/dataplans(?:\s+([\w-]+))?$/i, async (msg: any, match?: RegExpExecArray | null) => {
+    if (shouldSkipCommand(msg, "dataplans")) return;
+    const service = match?.[1];
+    if (!service) {
+      await bot!.sendMessage(msg.chat.id, "Usage: /dataplans mtn-data", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+      return;
+    }
+    await sendDataPlans(msg.chat.id, service);
+  });
+
+  botRef.onText(/^\/buydata(?:\s+(.+))?$/i, async (msg: any, match?: RegExpExecArray | null) => {
+    if (shouldSkipCommand(msg, "buydata")) return;
+    const args = match?.[1];
+    if (!args) {
+      await bot!.sendMessage(
+        msg.chat.id,
+        "Usage: /buydata service_id variation_code phone amount\nExample: /buydata mtn-data mtn-50mb-200 08031234567 200",
+        { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+      );
+      return;
+    }
+    await handleBuyDataRequest(msg.chat.id, args);
   });
 
   botRef.onText(/^\/verify$/i, async (msg: any) => {
@@ -1586,6 +1643,9 @@ export async function initBot() {
       const usdAmount = Number(text.replace(/,/g, ""));
       clearPendingAction(msg.chat.id);
       await sendDepositConversionPreview(msg.chat.id, usdAmount);
+    } else if (pending.type === "airtime") {
+      clearPendingAction(msg.chat.id);
+      await handleAirtimeRequest(msg.chat.id, text);
     }
   });
 }
@@ -2510,6 +2570,14 @@ async function handleMenuSelection(action: string, chatId: number, message?: any
       return sendDepositInfo(chatId, message);
     case "MENU_WALLET":
       return sendWalletSummary(chatId, message);
+    case "WALLET_VIRTUAL_ACCOUNT":
+      return sendVirtualAccount(chatId, message);
+    case "WALLET_USDT_ADDRESS":
+      return sendUsdtAddress(chatId, message);
+    case "WALLET_AIRTIME":
+      return sendAirtimePrompt(chatId, message);
+    case "WALLET_DATA_PLANS":
+      return sendDataPlans(chatId, "mtn-data", message);
     case "MENU_INVITE":
       return bot!.sendMessage(chatId, "Invite friends and earn rewards: share your referral link from the app.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -3229,7 +3297,8 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
       });
       return;
     } catch (e: any) {
-      const messageText = e?.response?.data?.error || e?.message || "Your card request could not be approved.";
+      const rawMessageText = e?.response?.data?.error || e?.message || "Your card request could not be approved.";
+      const messageText = typeof rawMessageText === "string" ? rawMessageText : JSON.stringify(rawMessageText);
       if (isLowBalanceErrorMessage(messageText)) {
         await notifyAdminLowBalanceIssue(messageText).catch(() => {});
         await bot!.sendMessage(Number(userId), [
@@ -3270,7 +3339,8 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
       });
     }
   } catch (e: any) {
-    const messageText = e?.response?.data?.error || "Your card request could not be approved.";
+    const rawMessageText = e?.response?.data?.error || "Your card request could not be approved.";
+    const messageText = typeof rawMessageText === "string" ? rawMessageText : JSON.stringify(rawMessageText);
     if (isLowBalanceErrorMessage(messageText)) {
       await notifyAdminLowBalanceIssue(messageText).catch(() => {});
       await bot!.sendMessage(Number(userId), [
@@ -3476,7 +3546,8 @@ async function submitCreateCard(chatId: number, session: CreateCardSession) {
     );
   } catch (err: any) {
     createCardSessions.delete(chatId);
-    const msg = err?.response?.data?.message || err?.response?.data?.error || err?.message || "Card creation failed";
+    const rawMsg = err?.response?.data?.message || err?.response?.data?.error || err?.message || "Card creation failed";
+    const msg = typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg);
     await bot!.sendMessage(chatId, `❌ ${msg}\nPlease try again.`, {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
@@ -3735,8 +3806,176 @@ async function sendWalletSummary(chatId: number, message?: any) {
   ];
 
   await editOrSend(chatId, message, lines.join("\n"), {
-    inline_keyboard: [[{ text: "🔍 My Cards", callback_data: "MENU_MY_CARDS" }], [MENU_BUTTON]],
+    inline_keyboard: [
+      [{ text: "🔍 My Cards", callback_data: "MENU_MY_CARDS" }],
+      [{ text: "🏦 Virtual Account", callback_data: "WALLET_VIRTUAL_ACCOUNT" }],
+      [{ text: "🪙 USDT Wallet", callback_data: "WALLET_USDT_ADDRESS" }],
+      [
+        { text: "📱 Buy Airtime", callback_data: "WALLET_AIRTIME" },
+        { text: "📶 Data Plans", callback_data: "WALLET_DATA_PLANS" },
+      ],
+      [MENU_BUTTON],
+    ],
   });
+}
+
+async function sendVirtualAccount(chatId: number, message?: any) {
+  if (!bot) return;
+  try {
+    const resp = await callStroWallet("virtual-bank/account", "post", { userId: String(chatId) });
+    const data: any = resp?.data ?? resp;
+    const account = data?.account ?? data;
+    if (!account || !account.accountNumber) {
+      await editOrSend(chatId, message, "No virtual account found. Please update your profile email/phone first.", {
+        inline_keyboard: [[MENU_BUTTON]],
+      });
+      return;
+    }
+
+    const lines = [
+      "🏦 Virtual Account",
+      `Account Number: ${account.accountNumber}`,
+      account.accountName ? `Account Name: ${account.accountName}` : undefined,
+      account.bankName ? `Bank: ${account.bankName}` : undefined,
+      account.currency ? `Currency: ${String(account.currency).toUpperCase()}` : undefined,
+      "Send money to this account to fund your wallet.",
+    ].filter(Boolean) as string[];
+
+    await editOrSend(chatId, message, lines.join("\n"), { inline_keyboard: [[MENU_BUTTON]] });
+  } catch (err: any) {
+    await bot.sendMessage(chatId, `❌ Failed to load virtual account: ${err?.message || "Unexpected error"}`, {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+  }
+}
+
+async function sendUsdtAddress(chatId: number, message?: any) {
+  if (!bot) return;
+  try {
+    const resp = await callStroWallet("usdt/address", "post", { userId: String(chatId) });
+    const data: any = resp?.data ?? resp;
+    const record = data?.address ?? data;
+    const address = record?.address;
+    if (!address) {
+      await editOrSend(chatId, message, "No USDT address found. Please update your profile email first.", {
+        inline_keyboard: [[MENU_BUTTON]],
+      });
+      return;
+    }
+
+    const lines = [
+      "🪙 USDT Wallet (TRC20)",
+      `Address: ${address}`,
+      "Send USDT (TRC20) to this address to fund your wallet.",
+    ];
+    await editOrSend(chatId, message, lines.join("\n"), { inline_keyboard: [[MENU_BUTTON]] });
+  } catch (err: any) {
+    await bot.sendMessage(chatId, `❌ Failed to load USDT address: ${err?.message || "Unexpected error"}`, {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+  }
+}
+
+async function sendAirtimePrompt(chatId: number, message?: any) {
+  if (!bot) return;
+  const key = chatKey(chatId);
+  if (key) pendingActions.set(key, { type: "airtime" });
+  await editOrSend(
+    chatId,
+    message,
+    "Send airtime in this format: provider phone amount\nExample: mtn 08031234567 500",
+    { inline_keyboard: [[MENU_BUTTON]] }
+  );
+}
+
+async function handleAirtimeRequest(chatId: number, text: string) {
+  if (!bot) return;
+  const parts = String(text || "").trim().split(/\s+/);
+  if (parts.length < 3) {
+    await bot.sendMessage(chatId, "Invalid format. Use: provider phone amount", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+    return;
+  }
+  const [provider, phoneRaw, amountRaw] = parts;
+  const phone = phoneRaw.replace(/[^\d]/g, "");
+  const amount = amountRaw.replace(/[^\d.]/g, "");
+  if (!provider || !phone || !amount) {
+    await bot.sendMessage(chatId, "Invalid format. Use: provider phone amount", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+    return;
+  }
+
+  try {
+    const resp = await callStroWallet("bills/airtime", "post", {
+      service_name: provider.toLowerCase(),
+      phone,
+      amount,
+    });
+    const data: any = resp?.data ?? resp;
+    await bot.sendMessage(chatId, `✅ Airtime request sent.\n${JSON.stringify(data)}`, {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+  } catch (err: any) {
+    await bot.sendMessage(chatId, `❌ Airtime failed: ${err?.message || "Unexpected error"}`, {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+  }
+}
+
+async function sendDataPlans(chatId: number, serviceId: string, message?: any) {
+  if (!bot) return;
+  try {
+    const resp = await callStroWallet("bills/data/plans", "get", { service_name: serviceId });
+    const data: any = resp?.data ?? resp;
+    const plans = data?.data?.varations || data?.data?.variations || [];
+    if (!Array.isArray(plans) || plans.length === 0) {
+      await editOrSend(chatId, message, "No data plans found for that service.", { inline_keyboard: [[MENU_BUTTON]] });
+      return;
+    }
+    const lines = [
+      `📶 Data Plans (${serviceId})`,
+      ...plans.slice(0, 10).map((p: any) => `${p.variation_code}: ${p.name} - ${p.variation_amount}`),
+      "",
+      "Buy: /buydata service_id variation_code phone amount",
+    ];
+    await editOrSend(chatId, message, lines.join("\n"), { inline_keyboard: [[MENU_BUTTON]] });
+  } catch (err: any) {
+    await bot.sendMessage(chatId, `❌ Failed to load data plans: ${err?.message || "Unexpected error"}`, {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+  }
+}
+
+async function handleBuyDataRequest(chatId: number, text: string) {
+  if (!bot) return;
+  const parts = String(text || "").trim().split(/\s+/);
+  if (parts.length < 4) {
+    await bot.sendMessage(chatId, "Usage: /buydata service_id variation_code phone amount", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+    return;
+  }
+  const [serviceId, variationCode, phoneRaw, amountRaw] = parts;
+  const phone = phoneRaw.replace(/[^\d]/g, "");
+  const amount = amountRaw.replace(/[^\d.]/g, "");
+  if (!serviceId || !variationCode || !phone || !amount) {
+    await bot.sendMessage(chatId, "Invalid format. Use: /buydata service_id variation_code phone amount", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+    return;
+  }
+
+  try {
+    const resp = await callStroWallet("bills/data", "post", {
+      service_name: serviceId,
+      service_id: serviceId,
+      variation_code: variationCode,
+      phone,
+      amount,
+    });
+    const data: any = resp?.data ?? resp;
+    await bot.sendMessage(chatId, `✅ Data request sent.\n${JSON.stringify(data)}`, {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+  } catch (err: any) {
+    await bot.sendMessage(chatId, `❌ Data purchase failed: ${err?.message || "Unexpected error"}`, {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+  }
 }
 
 
@@ -4907,7 +5146,8 @@ async function callStroWallet(
     return resp.data;
   } catch (e: any) {
     const requestId = e?.response?.data?.requestId || e?.response?.data?.id;
-    const message = e?.response?.data?.error || e?.message || "Request failed";
+    const rawMessage = e?.response?.data?.error || e?.message || "Request failed";
+    const message = typeof rawMessage === "string" ? rawMessage : JSON.stringify(rawMessage);
     const status = e?.response?.status;
     if (status && options?.silentOnStatus?.includes(status)) {
       return { ok: false, status, data: e?.response?.data };
