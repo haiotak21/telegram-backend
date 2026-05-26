@@ -149,6 +149,35 @@ function buildBitvcardClient() {
   });
 }
 
+function parseMaybeJson(value: any) {
+  if (typeof value !== "string") return value;
+  const text = value.trim();
+  if (!text) return value;
+  if (!(text.startsWith("{") || text.startsWith("["))) return value;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return value;
+  }
+}
+
+async function postBitvcardRaw(client: ReturnType<typeof buildBitvcardClient>, path: string, data?: any, options?: Record<string, any>) {
+  const resp = await client.post(path, data, {
+    responseType: "text",
+    transformResponse: [(raw) => raw],
+    headers: {
+      "Content-Type": "application/json",
+      ...(options?.headers || {}),
+    },
+    ...options,
+  });
+  return {
+    ...resp,
+    data: parseMaybeJson(resp.data),
+    rawData: resp.data,
+  };
+}
+
 async function fetchCardDetail(cardId: string, mode?: string) {
   const public_key = requirePublicKey();
   const resp = await axios.post(
@@ -296,8 +325,14 @@ router.post("/", async (req, res) => {
             mode: normalizeMode(getDefaultMode()),
           };
 
-          const resp = await bitvcard.post("create-nfc-card/", undefined, { params: payload });
+          const resp = await postBitvcardRaw(bitvcard, "create-nfc-card/", undefined, { params: payload });
           respData = resp.data as any;
+          if (typeof resp.rawData === "string" && !(respData && typeof respData === "object")) {
+            console.warn("[card-requests] create-nfc-card returned non-JSON body", {
+              userId,
+              rawData: resp.rawData,
+            });
+          }
         } else {
           const payload: Record<string, any> = {
             name_on_card: nameOnCard,
@@ -308,21 +343,28 @@ router.post("/", async (req, res) => {
             mode: normalizeMode(getDefaultMode()),
           };
           try {
-            const resp = await bitvcard.post("create-card/", payload, {
-              headers: { "Content-Type": "application/json" },
-            });
+            const resp = await postBitvcardRaw(bitvcard, "create-card/", payload);
             respData = resp.data as any;
+            if (typeof resp.rawData === "string" && !(respData && typeof respData === "object")) {
+              console.warn("[card-requests] create-card returned non-JSON body", {
+                userId,
+                rawData: resp.rawData,
+              });
+            }
           } catch (firstErr: any) {
-            const fallbackResp = await bitvcard.post("create-card/", payload, {
-              headers: { "Content-Type": "application/json" },
-              params: payload,
-            });
+            const fallbackResp = await postBitvcardRaw(bitvcard, "create-card/", payload, { params: payload });
             respData = fallbackResp.data as any;
             console.warn("[card-requests] create-card primary attempt failed, fallback succeeded", {
               userId,
               status: firstErr?.response?.status,
               message: firstErr?.response?.data?.message || firstErr?.response?.data?.error || firstErr?.message,
             });
+            if (typeof fallbackResp.rawData === "string" && !(respData && typeof respData === "object")) {
+              console.warn("[card-requests] create-card fallback returned non-JSON body", {
+                userId,
+                rawData: fallbackResp.rawData,
+              });
+            }
           }
         }
 
@@ -481,8 +523,14 @@ router.post("/", async (req, res) => {
           mode: normalizeMode(getDefaultMode()),
         };
 
-        const resp = await bitvcard.post("create-nfc-card/", undefined, { params: payload });
+        const resp = await postBitvcardRaw(bitvcard, "create-nfc-card/", undefined, { params: payload });
         respData = resp.data as any;
+        if (typeof resp.rawData === "string" && !(respData && typeof respData === "object")) {
+          console.warn("[card-requests] create-nfc-card returned non-JSON body", {
+            userId,
+            rawData: resp.rawData,
+          });
+        }
       } else {
         const payload: Record<string, any> = {
           name_on_card: nameOnCard,
@@ -493,22 +541,29 @@ router.post("/", async (req, res) => {
           mode: normalizeMode(getDefaultMode()),
         };
         try {
-          const resp = await bitvcard.post("create-card/", payload, {
-            headers: { "Content-Type": "application/json" },
-          });
+          const resp = await postBitvcardRaw(bitvcard, "create-card/", payload);
           respData = resp.data as any;
+          if (typeof resp.rawData === "string" && !(respData && typeof respData === "object")) {
+            console.warn("[card-requests] create-card returned non-JSON body", {
+              userId,
+              rawData: resp.rawData,
+            });
+          }
         } catch (firstErr: any) {
           // Fallback for deployments that parse some fields from query params.
-          const fallbackResp = await bitvcard.post("create-card/", payload, {
-            headers: { "Content-Type": "application/json" },
-            params: payload,
-          });
+          const fallbackResp = await postBitvcardRaw(bitvcard, "create-card/", payload, { params: payload });
           respData = fallbackResp.data as any;
           console.warn("[card-requests] create-card primary attempt failed, fallback succeeded", {
             userId,
             status: firstErr?.response?.status,
             message: firstErr?.response?.data?.message || firstErr?.response?.data?.error || firstErr?.message,
           });
+          if (typeof fallbackResp.rawData === "string" && !(respData && typeof respData === "object")) {
+            console.warn("[card-requests] create-card fallback returned non-JSON body", {
+              userId,
+              rawData: fallbackResp.rawData,
+            });
+          }
         }
       }
       const { cardId, cardNumber, cvc } = extractCardInfo(respData);
