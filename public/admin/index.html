@@ -1304,6 +1304,7 @@
           const card = document.createElement("div");
           card.className = "txn-card";
           const txId =
+            normalizeTxnId(t.id) ||
             normalizeTxnId(t._id) ||
             normalizeTxnId(t.transactionNumber) ||
             normalizeTxnId(t.referenceNumber);
