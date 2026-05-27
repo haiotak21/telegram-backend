@@ -260,6 +260,12 @@ router.get("/transactions/recent", requireAdmin, async (req, res) => {
     }
 });
 router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
+    console.log("[wallet] transaction decision request", {
+        params: req.params,
+        rawUrl: req.originalUrl,
+        body: req.body,
+        contentType: req.headers["content-type"],
+    });
     if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
         try {
             const id = String(req.params.id || "").trim();
@@ -331,7 +337,7 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
                     createResp = await createCardRequestViaBackend({
                         userId,
                         nameOnCard,
-                        cardType: "visa",
+                        cardType: "nfc",
                         amount: String(amount),
                         customerEmail,
                         metadata: {
@@ -341,7 +347,8 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
                     });
                 }
                 catch (createErr) {
-                    const msg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
+                    const rawMsg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
+                    const msg = typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg);
                     return (0, apiResponse_1.fail)(res, msg, 400);
                 }
                 const cardId = createResp?.data?.data?.cardId;
@@ -522,7 +529,7 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
                 createResp = await createCardRequestViaBackend({
                     userId,
                     nameOnCard,
-                    cardType: "visa",
+                    cardType: "nfc",
                     amount: String(amount),
                     customerEmail,
                     metadata: {
@@ -534,7 +541,8 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
             catch (createErr) {
                 await session.abortTransaction();
                 session.endSession();
-                const msg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
+                const rawMsg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
+                const msg = typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg);
                 return (0, apiResponse_1.fail)(res, msg, 400);
             }
             const cardId = createResp?.data?.data?.cardId;

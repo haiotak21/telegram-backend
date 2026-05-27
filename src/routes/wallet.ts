@@ -349,7 +349,7 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
             {
               userId,
               nameOnCard,
-              cardType: "visa",
+              cardType: "nfc",
               amount: String(amount),
               customerEmail,
               metadata: {
@@ -558,7 +558,7 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
           {
             userId,
             nameOnCard,
-            cardType: "visa",
+            cardType: "nfc",
             amount: String(amount),
             customerEmail,
             metadata: {
