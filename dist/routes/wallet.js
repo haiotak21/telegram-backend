@@ -79,6 +79,17 @@ function isRetryableBackendError(err) {
     const status = Number(err?.response?.status || 0);
     return status >= 500;
 }
+function describeHttpError(err, fallback) {
+    const body = err?.response?.data;
+    const bodyText = typeof body === "string"
+        ? body
+        : body && typeof body === "object"
+            ? body.error || body.message || body.detail || JSON.stringify(body)
+            : "";
+    const status = err?.response?.status ? ` (${err.response.status})` : "";
+    const msg = bodyText || err?.message || fallback;
+    return `${String(msg)}${status}`;
+}
 async function createCardRequestViaBackend(payload) {
     let lastError;
     for (const base of getBackendBaseCandidates()) {
@@ -347,8 +358,7 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
                     });
                 }
                 catch (createErr) {
-                    const rawMsg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
-                    const msg = typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg);
+                    const msg = describeHttpError(createErr, "Failed to create card request");
                     return (0, apiResponse_1.fail)(res, msg, 400);
                 }
                 const cardId = createResp?.data?.data?.cardId;
@@ -541,8 +551,7 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
             catch (createErr) {
                 await session.abortTransaction();
                 session.endSession();
-                const rawMsg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
-                const msg = typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg);
+                const msg = describeHttpError(createErr, "Failed to create card request");
                 return (0, apiResponse_1.fail)(res, msg, 400);
             }
             const cardId = createResp?.data?.data?.cardId;

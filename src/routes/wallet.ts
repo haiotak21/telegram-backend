@@ -80,6 +80,18 @@ function isRetryableBackendError(err: any) {
   return status >= 500;
 }
 
+function describeHttpError(err: any, fallback: string) {
+  const body = err?.response?.data;
+  const bodyText = typeof body === "string"
+    ? body
+    : body && typeof body === "object"
+      ? body.error || body.message || body.detail || JSON.stringify(body)
+      : "";
+  const status = err?.response?.status ? ` (${err.response.status})` : "";
+  const msg = bodyText || err?.message || fallback;
+  return `${String(msg)}${status}`;
+}
+
 async function createCardRequestViaBackend(payload: Record<string, any>) {
   let lastError: any;
   for (const base of getBackendBaseCandidates()) {
@@ -359,8 +371,7 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
             },
           );
         } catch (createErr: any) {
-          const rawMsg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
-          const msg = typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg);
+          const msg = describeHttpError(createErr, "Failed to create card request");
           return fail(res, msg, 400);
         }
 
@@ -570,8 +581,7 @@ router.post("/transactions/:id/decision", requireAdmin, async (req, res) => {
       } catch (createErr: any) {
         await session.abortTransaction();
         session.endSession();
-        const rawMsg = createErr?.response?.data?.error || createErr?.message || "Failed to create card request";
-        const msg = typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg);
+        const msg = describeHttpError(createErr, "Failed to create card request");
         return fail(res, msg, 400);
       }
 
