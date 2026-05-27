@@ -171,21 +171,22 @@ function parseMaybeJson(value) {
     }
 }
 async function postBitvcardRaw(client, path, data, options) {
+    const url = `${BITVCARD_BASE}${path}`;
+    const headers = {
+        "Content-Type": "application/json",
+        ...(options?.headers || {}),
+    };
+    console.log("SENDING TO PROVIDER:", JSON.stringify(data ?? options?.params ?? null));
+    console.log("PROVIDER URL:", url);
+    console.log("PROVIDER HEADERS:", headers);
     const resp = await client.post(path, data, {
         responseType: "text",
         transformResponse: [(raw) => raw],
-        headers: {
-            "Content-Type": "application/json",
-            ...(options?.headers || {}),
-        },
+        headers,
         ...options,
     });
-    console.log("[card-requests] provider raw response", {
-        path,
-        status: resp.status,
-        contentType: resp.headers?.["content-type"],
-        rawData: resp.data,
-    });
+    console.log("PROVIDER STATUS:", resp.status);
+    console.log("PROVIDER RAW RESPONSE:", resp.data);
     return {
         ...resp,
         data: parseMaybeJson(resp.data),
