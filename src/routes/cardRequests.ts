@@ -171,6 +171,12 @@ async function postBitvcardRaw(client: ReturnType<typeof buildBitvcardClient>, p
     },
     ...options,
   });
+  console.log("[card-requests] provider raw response", {
+    path,
+    status: resp.status,
+    contentType: resp.headers?.["content-type"],
+    rawData: resp.data,
+  });
   return {
     ...resp,
     data: parseMaybeJson(resp.data),

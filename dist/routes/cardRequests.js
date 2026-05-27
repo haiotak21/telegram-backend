@@ -180,6 +180,12 @@ async function postBitvcardRaw(client, path, data, options) {
         },
         ...options,
     });
+    console.log("[card-requests] provider raw response", {
+        path,
+        status: resp.status,
+        contentType: resp.headers?.["content-type"],
+        rawData: resp.data,
+    });
     return {
         ...resp,
         data: parseMaybeJson(resp.data),
