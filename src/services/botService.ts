@@ -116,7 +116,7 @@ const MIN_DEPOSIT_ETB = 1000;
 const DEPOSIT_AMOUNTS = [1000, 2000, 3000, 5000, 10000];
 const DEPOSIT_ACCOUNTS: Record<PaymentMethod, { title: string; account: string; name: string; typeLabel: string }> = {
   cbe: { title: "CBE Deposit", account: "1000139256208", name: "Addisu melke admasu", typeLabel: "CBE" },
-  telebirr: { title: "Telebirr Deposit", account: EXPECTED_TELEBIRR_PHONE, name: "Addisu melke admasu", typeLabel: "Telebirr" },
+  telebirr: { title: "Telebirr Deposit", account: "0908025718", name: "Addisu melke admasu", typeLabel: "Telebirr" },
 };
 const CARD_REQUEST_BASE_AMOUNT_ETB = Number(process.env.CARD_REQUEST_BASE_AMOUNT_ETB || 3);
 const BOT_LOCK_KEY = "telegram-bot";
