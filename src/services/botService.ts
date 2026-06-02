@@ -98,7 +98,7 @@ const EXPECTED_RECEIVER_NAME = (process.env.RECEIVER_NAME || process.env.CBE_REC
 const EXPECTED_TELEBIRR_NAME = (process.env.TELEBIRR_RECEIVER_NAME || "Addisu melke admasu").trim();
 const CBE_STRICT_RECEIVER = String(process.env.CBE_STRICT_RECEIVER || "true").toLowerCase() === "true";
 const TELEBIRR_STRICT_RECEIVER = String(process.env.TELEBIRR_STRICT_RECEIVER || "true").toLowerCase() === "true";
-const EXPECTED_TELEBIRR_PHONE = (process.env.TELEBIRR_PHONE_NUMBER || "0910840397").trim();
+const EXPECTED_TELEBIRR_PHONE = (process.env.TELEBIRR_PHONE_NUMBER || "0908025718").trim();
 const EXPECTED_CBE_ACCOUNT = (process.env.CBE_ACCOUNT_NUMBER || "1000139256208").trim();
 
 function getDefaultMode() {
@@ -116,7 +116,7 @@ const MIN_DEPOSIT_ETB = 1000;
 const DEPOSIT_AMOUNTS = [1000, 2000, 3000, 5000, 10000];
 const DEPOSIT_ACCOUNTS: Record<PaymentMethod, { title: string; account: string; name: string; typeLabel: string }> = {
   cbe: { title: "CBE Deposit", account: "1000139256208", name: "Addisu melke admasu", typeLabel: "CBE" },
-  telebirr: { title: "Telebirr Deposit", account: "0910840397", name: "Addisu melke admasu", typeLabel: "Telebirr" },
+  telebirr: { title: "Telebirr Deposit", account: EXPECTED_TELEBIRR_PHONE, name: "Addisu melke admasu", typeLabel: "Telebirr" },
 };
 const CARD_REQUEST_BASE_AMOUNT_ETB = Number(process.env.CARD_REQUEST_BASE_AMOUNT_ETB || 3);
 const BOT_LOCK_KEY = "telegram-bot";
