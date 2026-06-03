@@ -4495,6 +4495,7 @@ async function sendWalletSummary(chatId: number, message?: any) {
 
 async function sendVirtualAccount(chatId: number, message?: any, options?: { forceCreate?: boolean }) {
   if (!bot) return;
+  if (options?.forceCreate && shouldSuppressOutgoing(chatId, "virtual_account_create", 3000)) return;
   try {
     const payload = { userId: String(chatId), ...(options?.forceCreate ? { forceCreate: true } : {}) };
     const resp = await callStroWallet("virtual-bank/account", "post", payload);
@@ -4529,6 +4530,7 @@ async function sendVirtualAccount(chatId: number, message?: any, options?: { for
 
 async function sendUsdtAddress(chatId: number, message?: any, options?: { forceCreate?: boolean }) {
   if (!bot) return;
+  if (options?.forceCreate && shouldSuppressOutgoing(chatId, "usdt_address_create", 3000)) return;
   try {
     const payload = { userId: String(chatId), ...(options?.forceCreate ? { forceCreate: true } : {}) };
     const resp = await callStroWallet("usdt/address", "post", payload);
