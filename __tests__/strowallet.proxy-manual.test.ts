@@ -11,6 +11,12 @@ app.use("/", strowalletRouter);
 
 describe("StroWallet proxy manual smoke", () => {
   it("should respond on each route (expecting missing public key error)", async () => {
+    const hasPublicKey = Boolean(process.env.STROWALLET_PUBLIC_KEY);
+    const runLive = String(process.env.STROWALLET_RUN_LIVE_TESTS || "").toLowerCase() === "true";
+    if (hasPublicKey && !runLive) {
+      // Avoid slow/real network calls in manual smoke unless explicitly enabled.
+      return;
+    }
     const tests = [
       { method: "post", path: "/create-user", body: { customerEmail: "test@example.com" } },
       { method: "get", path: "/getcardholder" },
@@ -49,6 +55,8 @@ describe("StroWallet proxy manual smoke", () => {
       expect(res.type).toMatch(/json/);
       if (res.status === 500) {
         expect(res.body.error).toMatch(/Missing STROWALLET_PUBLIC_KEY/);
+      } else if (res.status === 400) {
+        expect(res.body.error || res.body.message || res.body).toBeTruthy();
       } else {
         expect(typeof res.body).toBe("object");
       }

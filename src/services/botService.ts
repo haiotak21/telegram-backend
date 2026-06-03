@@ -26,7 +26,8 @@ type PendingAction =
   | { type: "deposit_amount"; method: PaymentMethod }
   | { type: "deposit_convert_amount" }
   | { type: "card_request_verify"; method: PaymentMethod }
-  | { type: "airtime" };
+  | { type: "airtime" }
+  | { type: "data_plans" };
 const pendingActions = new Map<string, PendingAction>();
 
 function chatKey(value: number | string | undefined): string | null {
@@ -287,16 +288,18 @@ const MENU_KEYBOARD: InlineKeyboardButton[][] = [
     { text: "➕ Request Card", callback_data: "MENU_CREATE_CARD" },
     { text: "💳 My Cards", callback_data: "MENU_MY_CARDS" },
   ],
-  [{ text: "💰 Deposit", callback_data: "MENU_DEPOSIT" }],
   [
-    { text: "👤 User Info", callback_data: "MENU_USER_INFO" },
-    { text: "💰 Wallet", callback_data: "MENU_WALLET" },
+    { text: "💰 Deposit", callback_data: "MENU_DEPOSIT" },
+    { text: "💸 Transfer", callback_data: "MENU_TRANSFER" },
   ],
   [
-    { text: "🧑‍🤝‍🧑 Invite Friends", callback_data: "MENU_INVITE" },
+    { text: "🧾 Pay Bills", callback_data: "MENU_PAY_BILLS" },
+    { text: "👛 Wallet", callback_data: "MENU_WALLET" },
+  ],
+  [
+    { text: "👫 Invite Friends", callback_data: "MENU_INVITE" },
     { text: "🆘 Support", url: SUPPORT_URL },
   ],
-  [{ text: "📢 News", url: NEWS_URL }],
 ];
 
 
@@ -1642,6 +1645,16 @@ export async function initBot() {
       const usdAmount = Number(text.replace(/,/g, ""));
       clearPendingAction(msg.chat.id);
       await sendDepositConversionPreview(msg.chat.id, usdAmount);
+    } else if (pending.type === "data_plans") {
+      const service = text.toLowerCase();
+      clearPendingAction(msg.chat.id);
+      if (!service) {
+        await bot!.sendMessage(msg.chat.id, "Please enter a valid provider id (example: mtn-data).", {
+          reply_markup: { force_reply: true },
+        });
+        return;
+      }
+      await sendDataPlans(msg.chat.id, service);
     } else if (pending.type === "airtime") {
       clearPendingAction(msg.chat.id);
       await handleAirtimeRequest(msg.chat.id, text);
@@ -1940,6 +1953,96 @@ async function sendMenu(chatId: number, message?: any) {
   if (!bot) return;
   if (shouldSuppressOutgoing(chatId, "menu")) return;
   await editOrSend(chatId, message, "Main menu", { inline_keyboard: MENU_KEYBOARD });
+}
+
+function buildDepositMenuKeyboard(): InlineKeyboardButton[][] {
+  return [
+    [
+      { text: "🏦 Bank Transfer", callback_data: "DEPOSIT_MENU_BANK" },
+      { text: "📱 Mobile Money", callback_data: "DEPOSIT_MENU_MOBILE" },
+    ],
+    [
+      { text: "💳 Card Deposit", callback_data: "DEPOSIT_MENU_CARD" },
+      { text: "🌍 International", callback_data: "DEPOSIT_MENU_INTL" },
+    ],
+    [{ text: "🧮 Conversion", callback_data: "DEPOSIT_CONVERT" }],
+    [MENU_BUTTON],
+  ];
+}
+
+async function sendDepositMenu(chatId: number, message?: any) {
+  if (shouldSuppressOutgoing(chatId, "deposit_menu")) return;
+  await editOrSend(chatId, message, "Choose a deposit method:", {
+    inline_keyboard: buildDepositMenuKeyboard(),
+  });
+}
+
+function buildTransferMenuKeyboard(): InlineKeyboardButton[][] {
+  return [
+    [
+      { text: "📱 To Phone Number", callback_data: "TRANSFER_PHONE" },
+      { text: "💳 To Card Number", callback_data: "TRANSFER_CARD" },
+    ],
+    [
+      { text: "👤 To Username", callback_data: "TRANSFER_USERNAME" },
+      { text: "🏦 To Bank Account", callback_data: "TRANSFER_BANK" },
+    ],
+    [MENU_BUTTON],
+  ];
+}
+
+async function sendTransferMenu(chatId: number, message?: any) {
+  await editOrSend(chatId, message, "Choose a transfer type:", {
+    inline_keyboard: buildTransferMenuKeyboard(),
+  });
+}
+
+function buildPayBillsMenuKeyboard(): InlineKeyboardButton[][] {
+  return [
+    [
+      { text: "⚡️ Electricity", callback_data: "BILLS_ELECTRICITY" },
+      { text: "💧 Water", callback_data: "BILLS_WATER" },
+    ],
+    [
+      { text: "📶 Airtime", callback_data: "BILLS_AIRTIME" },
+      { text: "🌐 Internet", callback_data: "BILLS_INTERNET" },
+    ],
+    [
+      { text: "📺 TV Package", callback_data: "BILLS_TV" },
+      { text: "➕ More", callback_data: "BILLS_MORE" },
+    ],
+    [MENU_BUTTON],
+  ];
+}
+
+async function sendPayBillsMenu(chatId: number, message?: any) {
+  await editOrSend(chatId, message, "Choose a bill to pay:", {
+    inline_keyboard: buildPayBillsMenuKeyboard(),
+  });
+}
+
+function buildWalletMenuKeyboard(): InlineKeyboardButton[][] {
+  return [
+    [
+      { text: "💵 Balance", callback_data: "WALLET_BALANCE" },
+      { text: "🔍 My Card", callback_data: "WALLET_MY_CARD" },
+    ],
+    [
+      { text: "🏦 Virtual Account", callback_data: "WALLET_VIRTUAL_ACCOUNT" },
+      { text: "💵 Usdt Wallet", callback_data: "WALLET_USDT_ADDRESS" },
+    ],
+    [
+      { text: "📊 Transaction History", callback_data: "WALLET_TRANSACTIONS" },
+      { text: "⬇️ Withdraw", callback_data: "WALLET_WITHDRAW" },
+    ],
+    [MENU_BUTTON],
+  ];
+}
+
+async function sendWalletMenu(chatId: number, message?: any) {
+  await editOrSend(chatId, message, "Wallet options:", {
+    inline_keyboard: buildWalletMenuKeyboard(),
+  });
 }
 
 async function editOrSend(chatId: number, message: any, text: string, replyMarkup?: any, parseMode?: string) {
@@ -2566,13 +2669,72 @@ async function handleMenuSelection(action: string, chatId: number, message?: any
     case "MENU_USER_INFO":
       return sendUserInfo(chatId, message);
     case "MENU_DEPOSIT":
-      return sendDepositInfo(chatId, message);
+      return sendDepositMenu(chatId, message);
+    case "MENU_TRANSFER":
+      return sendTransferMenu(chatId, message);
+    case "MENU_PAY_BILLS":
+      return sendPayBillsMenu(chatId, message);
     case "MENU_WALLET":
+      return sendWalletMenu(chatId, message);
+    case "DEPOSIT_MENU_BANK":
+      return sendDepositAmountSelect(chatId, "cbe");
+    case "DEPOSIT_MENU_MOBILE":
+      return sendDepositAmountSelect(chatId, "telebirr");
+    case "DEPOSIT_MENU_CARD":
+      return bot!.sendMessage(chatId, "Card deposits are not available yet.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+    case "DEPOSIT_MENU_INTL":
+      return bot!.sendMessage(chatId, "International deposits are not available yet.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+    case "TRANSFER_PHONE":
+    case "TRANSFER_CARD":
+    case "TRANSFER_USERNAME":
+    case "TRANSFER_BANK":
+      return bot!.sendMessage(chatId, "Transfers are not available yet.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+    case "BILLS_ELECTRICITY":
+      return bot!.sendMessage(chatId, "Electricity payments are not available yet.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+    case "BILLS_WATER":
+      return bot!.sendMessage(chatId, "Water payments are not available yet.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+    case "BILLS_TV":
+      return bot!.sendMessage(chatId, "TV packages are not available yet.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+    case "BILLS_MORE":
+      return bot!.sendMessage(chatId, "More bill types are coming soon.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+    case "BILLS_AIRTIME":
+      return sendAirtimePrompt(chatId, message);
+    case "BILLS_INTERNET":
+      {
+        const key = chatKey(chatId);
+        if (key) pendingActions.set(key, { type: "data_plans" });
+      }
+      return bot!.sendMessage(chatId, "Send the internet provider id (example: mtn-data).", {
+        reply_markup: { force_reply: true },
+      });
+    case "WALLET_BALANCE":
       return sendWalletSummary(chatId, message);
+    case "WALLET_MY_CARD":
+      return sendMyCards(chatId, message);
     case "WALLET_VIRTUAL_ACCOUNT":
       return sendVirtualAccount(chatId, message);
     case "WALLET_USDT_ADDRESS":
       return sendUsdtAddress(chatId, message);
+    case "WALLET_TRANSACTIONS":
+      return sendCardTransactions(chatId);
+    case "WALLET_WITHDRAW":
+      return bot!.sendMessage(chatId, "Withdraw is not available yet.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
     case "WALLET_AIRTIME":
       return sendAirtimePrompt(chatId, message);
     case "WALLET_DATA_PLANS":
