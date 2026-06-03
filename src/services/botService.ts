@@ -118,7 +118,6 @@ const DEPOSIT_ACCOUNTS: Record<PaymentMethod, { title: string; account: string; 
   cbe: { title: "CBE Deposit", account: "1000139256208", name: "Addisu melke admasu", typeLabel: "CBE" },
   telebirr: { title: "Telebirr Deposit", account: "0908025718", name: "Addisu melke admasu", typeLabel: "Telebirr" },
 };
-const CARD_REQUEST_BASE_AMOUNT_ETB = Number(process.env.CARD_REQUEST_BASE_AMOUNT_ETB || 3);
 const BOT_LOCK_KEY = "telegram-bot";
 const BOT_LOCK_TTL_MS = Number(process.env.TELEGRAM_BOT_LOCK_TTL_MS || 90000);
 const TELEGRAM_BOT_USE_DB_LOCK = String(process.env.TELEGRAM_BOT_USE_DB_LOCK ?? "true").toLowerCase() !== "false";
@@ -2615,10 +2614,6 @@ function buildCardRequestMethodKeyboard(): InlineKeyboardButton[][] {
   ];
 }
 
-function getCardRequestBaseAmount() {
-  const base = Number.isFinite(CARD_REQUEST_BASE_AMOUNT_ETB) ? CARD_REQUEST_BASE_AMOUNT_ETB : 3;
-  return base >= 3 ? base : 3;
-}
 
 function roundMoney(value: number) {
   return Math.round(value * 100) / 100;
@@ -3176,10 +3171,12 @@ async function resolveCreatedCardId(params: {
 
 async function submitCardRequest(userId: string, user: any, customer: any, message?: any, cardAmountUsd?: number) {
   const nameOnCard = [user.firstName, user.lastName].filter(Boolean).join(" ") || message?.from?.first_name || "StroWallet User";
+  const pricing = await loadPricingConfig();
+  const defaultAmountUsd = Math.max(1, Number(pricing.firstCardAmountUsd ?? 5));
   const parsedCardAmount = Number(cardAmountUsd);
-  const safeCardAmount = Number.isFinite(parsedCardAmount) && parsedCardAmount >= 3
+  const safeCardAmount = Number.isFinite(parsedCardAmount) && parsedCardAmount >= 1
     ? parsedCardAmount
-    : getCardRequestBaseAmount();
+    : defaultAmountUsd;
   const amount = String(safeCardAmount);
   const customerEmail = user?.customerEmail || customer?.email;
   if (!customerEmail) {
