@@ -27,8 +27,42 @@ type PendingAction =
   | { type: "deposit_convert_amount" }
   | { type: "card_request_verify"; method: PaymentMethod }
   | { type: "airtime" }
-  | { type: "data_plans" };
+  | { type: "data_plans" }
+  | { type: "internet_plans" };
 const pendingActions = new Map<string, PendingAction>();
+
+type BankTransferStep = "bank" | "account" | "amount" | "narration" | "confirm";
+interface BankTransferSession {
+  step: BankTransferStep;
+  data: {
+    bankCode?: string;
+    bankName?: string;
+    accountNumber?: string;
+    accountName?: string;
+    nameEnquiryReference?: string;
+    amount?: number;
+    narration?: string;
+  };
+  lastPromptStep?: BankTransferStep;
+}
+
+type ElectricityStep = "service" | "meter" | "type" | "phone" | "amount" | "confirm";
+interface ElectricitySession {
+  step: ElectricityStep;
+  data: {
+    serviceName?: string;
+    meterNumber?: string;
+    meterType?: "prepaid" | "postpaid";
+    phone?: string;
+    amount?: number;
+  };
+  lastPromptStep?: ElectricityStep;
+}
+
+type BankListItem = { code: string; name: string; raw?: any };
+const bankTransferSessions = new Map<number, BankTransferSession>();
+const electricitySessions = new Map<number, ElectricitySession>();
+const bankListCache = new Map<number, { banks: BankListItem[]; fetchedAt: number }>();
 
 function chatKey(value: number | string | undefined): string | null {
   return value != null ? String(value) : null;
@@ -299,6 +333,9 @@ const MENU_KEYBOARD: InlineKeyboardButton[][] = [
   [
     { text: "👫 Invite Friends", callback_data: "MENU_INVITE" },
     { text: "🆘 Support", url: SUPPORT_URL },
+  ],
+  [
+    { text: "📢 News", url: NEWS_URL },
   ],
 ];
 
@@ -629,6 +666,8 @@ export async function initBot() {
     cardRequestSelections.delete(msg.chat.id);
     cardProfileSessions.delete(msg.chat.id);
     createCardSessions.delete(msg.chat.id);
+    bankTransferSessions.delete(msg.chat.id);
+    electricitySessions.delete(msg.chat.id);
     await bot!.sendMessage(msg.chat.id, "Cancelled pending action.");
   });
 
@@ -650,6 +689,97 @@ export async function initBot() {
       return;
     }
     recentCallbackActions.set(chatId, { action, at: now });
+
+    if (action.startsWith("TRANSFER_BANK_CONFIRM::")) {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      const decision = action.replace("TRANSFER_BANK_CONFIRM::", "");
+      const session = bankTransferSessions.get(chatId);
+      if (!session) {
+        await bot!.sendMessage(chatId, "Transfer session expired.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+        return;
+      }
+      if (decision !== "yes") {
+        bankTransferSessions.delete(chatId);
+        await bot!.sendMessage(chatId, "Transfer cancelled.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+        return;
+      }
+
+      if (!session.data.bankCode || !session.data.accountNumber || !session.data.amount || !session.data.nameEnquiryReference) {
+        await bot!.sendMessage(chatId, "Transfer details are incomplete. Please restart the transfer.", {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        bankTransferSessions.delete(chatId);
+        return;
+      }
+
+      try {
+        const { user } = await getUserAndCustomerContext(String(chatId));
+        const senderName = [user?.firstName, user?.lastName].filter(Boolean).join(" ") || user?.username || undefined;
+        const payload = {
+          amount: toStroAmountString(session.data.amount || 0),
+          bank_code: session.data.bankCode,
+          account_number: session.data.accountNumber,
+          narration: session.data.narration || "Transfer",
+          name_enquiry_reference: session.data.nameEnquiryReference,
+          ...(senderName ? { SenderName: senderName } : {}),
+        };
+        const resp = await callStroWallet("banks/transfer", "post", payload);
+        const data: any = resp?.data ?? resp;
+        bankTransferSessions.delete(chatId);
+        await bot!.sendMessage(chatId, `✅ Transfer submitted.\n${JSON.stringify(data)}`, {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+      } catch (err: any) {
+        await bot!.sendMessage(chatId, `❌ Transfer failed: ${err?.message || "Unexpected error"}`, {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+      }
+      return;
+    }
+
+    if (action.startsWith("ELECTRICITY_CONFIRM::")) {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      const decision = action.replace("ELECTRICITY_CONFIRM::", "");
+      const session = electricitySessions.get(chatId);
+      if (!session) {
+        await bot!.sendMessage(chatId, "Electricity session expired.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+        return;
+      }
+      if (decision !== "yes") {
+        electricitySessions.delete(chatId);
+        await bot!.sendMessage(chatId, "Electricity payment cancelled.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+        return;
+      }
+
+      if (!session.data.serviceName || !session.data.meterNumber || !session.data.meterType || !session.data.phone || !session.data.amount) {
+        await bot!.sendMessage(chatId, "Electricity payment details are incomplete. Please start again.", {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        electricitySessions.delete(chatId);
+        return;
+      }
+
+      try {
+        const payload = {
+          service_name: session.data.serviceName,
+          meter_number: session.data.meterNumber,
+          meter_type: session.data.meterType,
+          phone: session.data.phone,
+          amount: toStroAmountString(session.data.amount || 0),
+        };
+        const resp = await callStroWallet("bills/electricity", "post", payload);
+        const data: any = resp?.data ?? resp;
+        electricitySessions.delete(chatId);
+        await bot!.sendMessage(chatId, `✅ Electricity payment submitted.\n${JSON.stringify(data)}`, {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+      } catch (err: any) {
+        await bot!.sendMessage(chatId, `❌ Electricity payment failed: ${err?.message || "Unexpected error"}`, {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+      }
+      return;
+    }
 
     if (action.startsWith("PROFILE_CONFIRM::")) {
       const decision = action.replace("PROFILE_CONFIRM::", "");
@@ -936,6 +1066,18 @@ export async function initBot() {
     const cardSession = createCardSessions.get(chatId);
     if (cardSession) {
       await handleCreateCardMessage(msg, cardSession);
+      return;
+    }
+
+    const transferSession = bankTransferSessions.get(chatId);
+    if (transferSession) {
+      await handleBankTransferMessage(msg, transferSession);
+      return;
+    }
+
+    const electricitySession = electricitySessions.get(chatId);
+    if (electricitySession) {
+      await handleElectricityMessage(msg, electricitySession);
       return;
     }
 
@@ -1655,6 +1797,16 @@ export async function initBot() {
         return;
       }
       await sendDataPlans(msg.chat.id, service);
+    } else if (pending.type === "internet_plans") {
+      const service = text.toLowerCase();
+      clearPendingAction(msg.chat.id);
+      if (!service) {
+        await bot!.sendMessage(msg.chat.id, "Please enter a valid internet provider id (example: spectranet).", {
+          reply_markup: { force_reply: true },
+        });
+        return;
+      }
+      await sendDataPlans(msg.chat.id, service);
     } else if (pending.type === "airtime") {
       clearPendingAction(msg.chat.id);
       await handleAirtimeRequest(msg.chat.id, text);
@@ -1995,6 +2147,344 @@ async function sendTransferMenu(chatId: number, message?: any) {
   await editOrSend(chatId, message, "Choose a transfer type:", {
     inline_keyboard: buildTransferMenuKeyboard(),
   });
+}
+
+function extractBankList(payload: any): BankListItem[] {
+  const candidates = [
+    payload?.data?.banks,
+    payload?.data?.bankList,
+    payload?.data?.data,
+    payload?.banks,
+    payload?.bankList,
+    payload?.data,
+    payload,
+  ];
+  const list = candidates.find((c) => Array.isArray(c)) || [];
+  return (list as any[])
+    .map((item) => {
+      const code = String(item?.bank_code || item?.bankCode || item?.code || "").trim();
+      const name = String(item?.bank_name || item?.bankName || item?.name || "").trim();
+      if (!code || !name) return null;
+      return { code, name, raw: item } as BankListItem;
+    })
+    .filter(Boolean) as BankListItem[];
+}
+
+async function fetchBankList(chatId: number) {
+  const cached = bankListCache.get(chatId);
+  if (cached && Date.now() - cached.fetchedAt < 5 * 60 * 1000) return cached.banks;
+  const resp = await callStroWallet("banks/list", "get", {});
+  const payload = resp?.data ?? resp;
+  const banks = extractBankList(payload);
+  bankListCache.set(chatId, { banks, fetchedAt: Date.now() });
+  return banks;
+}
+
+function findBankByInput(input: string, banks: BankListItem[]) {
+  const normalized = input.trim().toLowerCase();
+  if (!normalized) return undefined;
+  const byCode = banks.find((b) => b.code.toLowerCase() === normalized);
+  if (byCode) return byCode;
+  return banks.find((b) => b.name.toLowerCase() === normalized);
+}
+
+function formatBankListMessage(banks: BankListItem[]) {
+  if (!banks.length) return "No bank list available. Send the bank code directly.";
+  const preview = banks.slice(0, 20);
+  const lines = [
+    "🏦 Available Banks (send bank code):",
+    ...preview.map((b) => `${b.code} - ${b.name}`),
+  ];
+  if (banks.length > preview.length) lines.push("...more banks available");
+  return lines.join("\n");
+}
+
+async function startBankTransferFlow(chatId: number, message?: any) {
+  const session: BankTransferSession = { step: "bank", data: {} };
+  bankTransferSessions.set(chatId, session);
+  try {
+    const banks = await fetchBankList(chatId);
+    await editOrSend(chatId, message, formatBankListMessage(banks), { inline_keyboard: [[MENU_BUTTON]] });
+    await bot!.sendMessage(chatId, "Send the bank code (example: 058).", {
+      reply_markup: { force_reply: true },
+    });
+  } catch (err: any) {
+    bankTransferSessions.delete(chatId);
+    await bot!.sendMessage(chatId, `❌ Failed to load bank list: ${err?.message || "Unexpected error"}`);
+  }
+}
+
+async function promptBankTransferStep(chatId: number, session: BankTransferSession) {
+  if (session.lastPromptStep === session.step) return;
+  session.lastPromptStep = session.step;
+  switch (session.step) {
+    case "bank":
+      await bot!.sendMessage(chatId, "Send the bank code (example: 058).", { reply_markup: { force_reply: true } });
+      break;
+    case "account":
+      await bot!.sendMessage(chatId, "Enter the account number:", { reply_markup: { force_reply: true } });
+      break;
+    case "amount":
+      await bot!.sendMessage(chatId, "Enter amount to transfer:", { reply_markup: { force_reply: true } });
+      break;
+    case "narration":
+      await bot!.sendMessage(chatId, "Enter narration (or type skip):", { reply_markup: { force_reply: true } });
+      break;
+    case "confirm":
+      await bot!.sendMessage(chatId, "Use the buttons to confirm transfer.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      break;
+  }
+}
+
+function buildBankTransferSummary(session: BankTransferSession) {
+  const data = session.data;
+  return [
+    "💸 Bank Transfer Summary",
+    data.bankName ? `Bank: ${data.bankName}` : data.bankCode ? `Bank code: ${data.bankCode}` : undefined,
+    data.accountNumber ? `Account: ${data.accountNumber}` : undefined,
+    data.accountName ? `Account name: ${data.accountName}` : undefined,
+    data.amount != null ? `Amount: ${data.amount.toFixed(2)}` : undefined,
+    data.narration ? `Narration: ${data.narration}` : undefined,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function handleBankTransferMessage(msg: any, session: BankTransferSession) {
+  const chatId = msg.chat.id;
+  const text = String(msg.text || "").trim();
+  if (!text) {
+    await bot!.sendMessage(chatId, "Please send a text response.", { reply_markup: { force_reply: true } });
+    return;
+  }
+
+  switch (session.step) {
+    case "bank": {
+      if (text.toLowerCase() === "list") {
+        const banks = await fetchBankList(chatId);
+        await bot!.sendMessage(chatId, formatBankListMessage(banks));
+        return;
+      }
+      const banks = await fetchBankList(chatId).catch(() => [] as BankListItem[]);
+      const match = findBankByInput(text, banks);
+      session.data.bankCode = match?.code || text;
+      session.data.bankName = match?.name || undefined;
+      session.step = "account";
+      bankTransferSessions.set(chatId, session);
+      await promptBankTransferStep(chatId, session);
+      return;
+    }
+    case "account": {
+      const accountNumber = text.replace(/\s+/g, "");
+      if (!/^\d{6,}$/.test(accountNumber)) {
+        await bot!.sendMessage(chatId, "Invalid account number. Try again.", { reply_markup: { force_reply: true } });
+        return;
+      }
+      session.data.accountNumber = accountNumber;
+      try {
+        const resp = await callStroWallet("banks/resolve", "get", {
+          bank_code: session.data.bankCode,
+          account_number: accountNumber,
+        });
+        const payload = resp?.data ?? resp;
+        const accountName =
+          payload?.data?.account_name ||
+          payload?.data?.accountName ||
+          payload?.account_name ||
+          payload?.accountName ||
+          payload?.data?.name ||
+          payload?.name;
+        const nameEnquiryReference =
+          payload?.data?.name_enquiry_reference ||
+          payload?.data?.nameEnquiryReference ||
+          payload?.name_enquiry_reference ||
+          payload?.nameEnquiryReference;
+
+        if (accountName) session.data.accountName = String(accountName);
+        if (nameEnquiryReference) session.data.nameEnquiryReference = String(nameEnquiryReference);
+      } catch (err: any) {
+        await bot!.sendMessage(chatId, `❌ Failed to resolve account name: ${err?.message || "Unexpected error"}`);
+        return;
+      }
+      session.step = "amount";
+      bankTransferSessions.set(chatId, session);
+      await promptBankTransferStep(chatId, session);
+      return;
+    }
+    case "amount": {
+      const amount = Number(text.replace(/,/g, ""));
+      if (!Number.isFinite(amount) || amount <= 0) {
+        await bot!.sendMessage(chatId, "Invalid amount. Try again.", { reply_markup: { force_reply: true } });
+        return;
+      }
+      session.data.amount = amount;
+      session.step = "narration";
+      bankTransferSessions.set(chatId, session);
+      await promptBankTransferStep(chatId, session);
+      return;
+    }
+    case "narration": {
+      const narration = text.toLowerCase() === "skip" ? "Transfer" : text;
+      session.data.narration = narration || "Transfer";
+      session.step = "confirm";
+      bankTransferSessions.set(chatId, session);
+
+      const summary = buildBankTransferSummary(session);
+      await bot!.sendMessage(chatId, summary, {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "✅ Confirm Transfer", callback_data: "TRANSFER_BANK_CONFIRM::yes" },
+              { text: "❌ Cancel", callback_data: "TRANSFER_BANK_CONFIRM::no" },
+            ],
+            [MENU_BUTTON],
+          ],
+        },
+      });
+      return;
+    }
+    case "confirm": {
+      await bot!.sendMessage(chatId, "Use the buttons to confirm the transfer.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      return;
+    }
+  }
+}
+
+async function startElectricityFlow(chatId: number, message?: any) {
+  const session: ElectricitySession = { step: "service", data: {} };
+  electricitySessions.set(chatId, session);
+  const lines = [
+    "⚡️ Electricity Payment",
+    "Send the service name (example: ikeja-electric).",
+    "Options: ikeja-electric, eko-electric, kano-electric, portharcourt-electric, jos-electric, kaduna-electric, abuja-electric, ibadan-electric, enugu-electric, benin-electric, aba-electric, yola-electric",
+  ];
+  await editOrSend(chatId, message, lines.join("\n"), { inline_keyboard: [[MENU_BUTTON]] });
+  await bot!.sendMessage(chatId, "Enter service name:", { reply_markup: { force_reply: true } });
+}
+
+async function promptElectricityStep(chatId: number, session: ElectricitySession) {
+  if (session.lastPromptStep === session.step) return;
+  session.lastPromptStep = session.step;
+  switch (session.step) {
+    case "service":
+      await bot!.sendMessage(chatId, "Enter service name:", { reply_markup: { force_reply: true } });
+      break;
+    case "meter":
+      await bot!.sendMessage(chatId, "Enter meter number:", { reply_markup: { force_reply: true } });
+      break;
+    case "type":
+      await bot!.sendMessage(chatId, "Enter meter type (prepaid or postpaid):", { reply_markup: { force_reply: true } });
+      break;
+    case "phone":
+      await bot!.sendMessage(chatId, "Enter phone number:", { reply_markup: { force_reply: true } });
+      break;
+    case "amount":
+      await bot!.sendMessage(chatId, "Enter amount:", { reply_markup: { force_reply: true } });
+      break;
+    case "confirm":
+      await bot!.sendMessage(chatId, "Use the buttons to confirm payment.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      break;
+  }
+}
+
+function buildElectricitySummary(session: ElectricitySession) {
+  const data = session.data;
+  return [
+    "⚡️ Electricity Payment Summary",
+    data.serviceName ? `Service: ${data.serviceName}` : undefined,
+    data.meterNumber ? `Meter: ${data.meterNumber}` : undefined,
+    data.meterType ? `Type: ${data.meterType}` : undefined,
+    data.phone ? `Phone: ${data.phone}` : undefined,
+    data.amount != null ? `Amount: ${data.amount.toFixed(2)}` : undefined,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function handleElectricityMessage(msg: any, session: ElectricitySession) {
+  const chatId = msg.chat.id;
+  const text = String(msg.text || "").trim();
+  if (!text) {
+    await bot!.sendMessage(chatId, "Please send a text response.", { reply_markup: { force_reply: true } });
+    return;
+  }
+
+  switch (session.step) {
+    case "service": {
+      session.data.serviceName = text.toLowerCase();
+      session.step = "meter";
+      electricitySessions.set(chatId, session);
+      await promptElectricityStep(chatId, session);
+      return;
+    }
+    case "meter": {
+      session.data.meterNumber = text.replace(/\s+/g, "");
+      session.step = "type";
+      electricitySessions.set(chatId, session);
+      await promptElectricityStep(chatId, session);
+      return;
+    }
+    case "type": {
+      const normalized = text.toLowerCase();
+      if (normalized !== "prepaid" && normalized !== "postpaid") {
+        await bot!.sendMessage(chatId, "Meter type must be prepaid or postpaid.", { reply_markup: { force_reply: true } });
+        return;
+      }
+      session.data.meterType = normalized as "prepaid" | "postpaid";
+      session.step = "phone";
+      electricitySessions.set(chatId, session);
+      await promptElectricityStep(chatId, session);
+      return;
+    }
+    case "phone": {
+      const phone = text.replace(/[^\d]/g, "");
+      if (!phone) {
+        await bot!.sendMessage(chatId, "Invalid phone number.", { reply_markup: { force_reply: true } });
+        return;
+      }
+      session.data.phone = phone;
+      session.step = "amount";
+      electricitySessions.set(chatId, session);
+      await promptElectricityStep(chatId, session);
+      return;
+    }
+    case "amount": {
+      const amount = Number(text.replace(/,/g, ""));
+      if (!Number.isFinite(amount) || amount <= 0) {
+        await bot!.sendMessage(chatId, "Invalid amount. Try again.", { reply_markup: { force_reply: true } });
+        return;
+      }
+      session.data.amount = amount;
+      session.step = "confirm";
+      electricitySessions.set(chatId, session);
+
+      const summary = buildElectricitySummary(session);
+      await bot!.sendMessage(chatId, summary, {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "✅ Confirm Payment", callback_data: "ELECTRICITY_CONFIRM::yes" },
+              { text: "❌ Cancel", callback_data: "ELECTRICITY_CONFIRM::no" },
+            ],
+            [MENU_BUTTON],
+          ],
+        },
+      });
+      return;
+    }
+    case "confirm": {
+      await bot!.sendMessage(chatId, "Use the buttons to confirm the payment.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      return;
+    }
+  }
 }
 
 function buildPayBillsMenuKeyboard(): InlineKeyboardButton[][] {
@@ -2691,14 +3181,13 @@ async function handleMenuSelection(action: string, chatId: number, message?: any
     case "TRANSFER_PHONE":
     case "TRANSFER_CARD":
     case "TRANSFER_USERNAME":
+      return bot!.sendMessage(chatId, "Only bank transfers are available right now.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
     case "TRANSFER_BANK":
-      return bot!.sendMessage(chatId, "Transfers are not available yet.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
+      return startBankTransferFlow(chatId, message);
     case "BILLS_ELECTRICITY":
-      return bot!.sendMessage(chatId, "Electricity payments are not available yet.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
+      return startElectricityFlow(chatId, message);
     case "BILLS_WATER":
       return bot!.sendMessage(chatId, "Water payments are not available yet.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -2716,9 +3205,9 @@ async function handleMenuSelection(action: string, chatId: number, message?: any
     case "BILLS_INTERNET":
       {
         const key = chatKey(chatId);
-        if (key) pendingActions.set(key, { type: "data_plans" });
+        if (key) pendingActions.set(key, { type: "internet_plans" });
       }
-      return bot!.sendMessage(chatId, "Send the internet provider id (example: mtn-data).", {
+      return bot!.sendMessage(chatId, "Send the internet provider id (example: spectranet or smile-direct).", {
         reply_markup: { force_reply: true },
       });
     case "WALLET_BALANCE":

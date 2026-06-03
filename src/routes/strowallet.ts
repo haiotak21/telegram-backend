@@ -4,6 +4,11 @@ import http from "http";
 import https from "https";
 import { z } from "zod";
 import { ok, fail } from "../utils/apiResponse";
+import User from "../models/User";
+import VirtualBankAccount from "../models/VirtualBankAccount";
+import UsdtAddress from "../models/UsdtAddress";
+import prisma from "../utils/prisma";
+import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
 const router = express.Router();
 
@@ -67,6 +72,63 @@ const api = axios.create({
   },
 });
 
+const VirtualBankRequestSchema = z.object({
+  userId: z.union([z.string(), z.number()]).transform((v) => String(v)),
+  bank: z.string().optional(),
+  email: z.string().email().optional(),
+  accountName: z.string().min(1).optional(),
+  phone: z.string().min(7).optional(),
+  webhookUrl: z.string().url().optional(),
+  mode: z.string().optional(),
+  developerCode: z.string().optional(),
+  forceCreate: z.boolean().optional(),
+});
+
+const UsdtAddressSchema = z.object({
+  userId: z.union([z.string(), z.number()]).transform((v) => String(v)),
+  label: z.string().optional(),
+  email: z.string().email().optional(),
+  webhookUrl: z.string().url().optional(),
+  mode: z.string().optional(),
+  forceCreate: z.boolean().optional(),
+});
+
+const BankTransferSchema = z.object({
+  amount: z.string().min(1),
+  bank_code: z.string().min(1),
+  account_number: z.string().min(1),
+  narration: z.string().min(1),
+  name_enquiry_reference: z.string().min(1),
+  SenderName: z.string().optional(),
+  mode: z.string().optional(),
+});
+
+const AirtimeSchema = z.object({
+  amount: z.string().min(1),
+  phone: z.string().min(7),
+  service_name: z.string().min(1),
+});
+
+const DataPlanQuerySchema = z.object({
+  service_name: z.string().min(1),
+});
+
+const BuyDataSchema = z.object({
+  amount: z.string().min(1),
+  phone: z.string().min(7),
+  service_name: z.string().min(1),
+  service_id: z.string().min(1),
+  variation_code: z.string().min(1),
+});
+
+const ElectricitySchema = z.object({
+  amount: z.string().min(1),
+  phone: z.string().min(7),
+  service_name: z.string().min(1),
+  meter_number: z.string().min(1),
+  meter_type: z.enum(["prepaid", "postpaid"]),
+});
+
 function requirePublicKey() {
   const key = process.env.STROWALLET_PUBLIC_KEY;
   if (!key) {
@@ -75,6 +137,62 @@ function requirePublicKey() {
     throw err;
   }
   return key;
+}
+
+function getWebhookUrl(defaultPath: string) {
+  const direct = (process.env.STROWALLET_WEBHOOK_URL || "").trim();
+  if (direct) return direct;
+  const base = (process.env.BOT_BACKEND_BASE || "").trim();
+  if (base) return base.replace(/\/$/, "") + defaultPath;
+  const port = process.env.PORT || 3000;
+  return `http://127.0.0.1:${port}${defaultPath}`;
+}
+
+function normalizeVirtualBankProvider(raw?: string) {
+  const value = String(raw || "").trim().toLowerCase();
+  if (!value || value === "default" || value === "nombank") return "new-customer";
+  if (value === "palmpay") return "palmpay";
+  if (value === "paga") return "paga";
+  if (value === "safehaven") return "safehaven";
+  if (value === "amucha") return "amucha";
+  if (value === "fidelitybank" || value === "fidelity") return "fidelitybank";
+  return "new-customer";
+}
+
+async function findUserById(userId: string) {
+  if (isPrismaPersistenceEnabled()) {
+    return prisma.user.findUnique({ where: { userId } });
+  }
+  return User.findOne({ userId }).lean();
+}
+
+async function findExistingVirtualAccount(userId: string) {
+  if (isPrismaPersistenceEnabled()) {
+    return prisma.virtualBankAccount.findFirst({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+    });
+  }
+  return VirtualBankAccount.findOne({ userId }).sort({ createdAt: -1 }).lean();
+}
+
+async function findExistingUsdtAddress(userId: string) {
+  if (isPrismaPersistenceEnabled()) {
+    return prisma.usdtAddress.findFirst({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+    });
+  }
+  return UsdtAddress.findOne({ userId }).sort({ createdAt: -1 }).lean();
+}
+
+function extractUsdtAddress(payload: any) {
+  if (!payload || typeof payload !== "object") return undefined;
+  if (payload.address) return String(payload.address);
+  if (payload.data?.address) return String(payload.data.address);
+  if (payload.walletAddress) return String(payload.walletAddress);
+  if (payload.data?.walletAddress) return String(payload.data.walletAddress);
+  return undefined;
 }
 
 function normalizeError(e: any) {
@@ -650,6 +768,297 @@ router.get("/wallet-balance/:currency", async (req, res) => {
 
     const resp = await api.get(`wallet/balance/${currency}/`, {
       params: { public_key },
+    });
+    return ok(res, resp.data, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+// Virtual Bank Account (create or fetch)
+router.get("/virtual-bank/account", async (req, res) => {
+  try {
+    const userId = String(req.query.userId || "").trim();
+    if (!userId) return fail(res, "userId is required", 400);
+    const existing = await findExistingVirtualAccount(userId);
+    if (!existing) return ok(res, { account: null }, 200);
+    return ok(res, { account: existing }, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.post("/virtual-bank/account", async (req, res) => {
+  try {
+    const body = VirtualBankRequestSchema.parse(req.body || {});
+    if (!body.forceCreate) {
+      const existing = await findExistingVirtualAccount(body.userId);
+      if (existing) return ok(res, { account: existing }, 200);
+    }
+
+    const user = await findUserById(body.userId);
+    const accountName = body.accountName || [user?.firstName, user?.lastName].filter(Boolean).join(" ") || user?.username || body.userId;
+    const email = body.email || user?.customerEmail;
+    const phone = body.phone || user?.phoneNumber;
+    if (!email || !phone || !accountName) {
+      return fail(res, "Missing email, phone, or accountName for virtual account", 400);
+    }
+
+    const public_key = requirePublicKey();
+    const webhook_url = body.webhookUrl || getWebhookUrl("/api/webhook/strowallet");
+    const provider = normalizeVirtualBankProvider(body.bank);
+    const payload: Record<string, any> = {
+      public_key,
+      email,
+      account_name: accountName,
+      phone,
+      webhook_url,
+    };
+    if (body.mode) payload.mode = body.mode;
+    if (body.developerCode) payload.developer_code = body.developerCode;
+
+    const resp = await api.post(`virtual-bank/${provider}`, payload, {
+      headers: { "Content-Type": "application/json" },
+    });
+    const data = resp.data || {};
+    const accountNumber = String(data?.accountNumber || data?.account_number || "");
+    const sessionId = String(data?.sessionId || data?.session_id || "");
+    if (!accountNumber) {
+      return ok(res, { account: null, raw: data }, 200);
+    }
+
+    if (isPrismaPersistenceEnabled()) {
+      const saved = await prisma.virtualBankAccount.upsert({
+        where: { accountNumber },
+        create: {
+          userId: body.userId,
+          provider,
+          accountNumber,
+          accountName,
+          bankName: data?.sourceBankName || data?.bankName || null,
+          sessionId: sessionId || null,
+          currency: data?.currency || "NGN",
+          responseData: data as any,
+        },
+        update: {
+          userId: body.userId,
+          provider,
+          accountName,
+          bankName: data?.sourceBankName || data?.bankName || null,
+          sessionId: sessionId || null,
+          currency: data?.currency || "NGN",
+          responseData: data as any,
+        },
+      });
+      return ok(res, { account: saved, raw: data }, 200);
+    }
+
+    const saved = await VirtualBankAccount.findOneAndUpdate(
+      { accountNumber },
+      {
+        $set: {
+          userId: body.userId,
+          provider,
+          accountName,
+          bankName: data?.sourceBankName || data?.bankName,
+          sessionId: sessionId || undefined,
+          currency: data?.currency || "NGN",
+          responseData: data,
+        },
+      },
+      { upsert: true, new: true }
+    );
+    return ok(res, { account: saved, raw: data }, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+// Bank list + account name + transfer
+router.get("/banks/list", async (req, res) => {
+  try {
+    const public_key = requirePublicKey();
+    const resp = await api.get("banks/lists", { params: { public_key } });
+    return ok(res, resp.data, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.get("/banks/resolve", async (req, res) => {
+  try {
+    const public_key = requirePublicKey();
+    const bank_code = String(req.query.bank_code || "").trim();
+    const account_number = String(req.query.account_number || "").trim();
+    if (!bank_code || !account_number) return fail(res, "bank_code and account_number are required", 400);
+    const resp = await api.get("banks/get-customer-name", {
+      params: { public_key, bank_code, account_number },
+    });
+    return ok(res, resp.data, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.post("/banks/transfer", async (req, res) => {
+  try {
+    const body = BankTransferSchema.parse(req.body || {});
+    const public_key = requirePublicKey();
+    const params = {
+      public_key,
+      amount: body.amount,
+      bank_code: body.bank_code,
+      account_number: body.account_number,
+      narration: body.narration,
+      name_enquiry_reference: body.name_enquiry_reference,
+      SenderName: body.SenderName,
+      mode: body.mode || getDefaultMode(),
+    };
+    const resp = await api.post("banks/request", undefined, { params });
+    return ok(res, resp.data, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+// USDT address
+router.get("/usdt/address", async (req, res) => {
+  try {
+    const userId = String(req.query.userId || "").trim();
+    if (!userId) return fail(res, "userId is required", 400);
+    const existing = await findExistingUsdtAddress(userId);
+    if (!existing) return ok(res, { address: null }, 200);
+    return ok(res, { address: existing }, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.post("/usdt/address", async (req, res) => {
+  try {
+    const body = UsdtAddressSchema.parse(req.body || {});
+    if (!body.forceCreate) {
+      const existing = await findExistingUsdtAddress(body.userId);
+      if (existing) return ok(res, { address: existing }, 200);
+    }
+
+    const user = await findUserById(body.userId);
+    const email = body.email || user?.customerEmail;
+    if (!email) return fail(res, "Missing email for USDT address", 400);
+
+    const public_key = requirePublicKey();
+    const label = body.label || `user:${body.userId}`;
+    const webhook_url = body.webhookUrl || getWebhookUrl("/api/webhook/strowallet");
+    const params = {
+      public_key,
+      label,
+      email,
+      webhook_url,
+      mode: body.mode || getDefaultMode(),
+    };
+    const resp = await api.post("generate-address", undefined, { params });
+    const data = resp.data || {};
+    const address = extractUsdtAddress(data);
+    if (!address) {
+      return ok(res, { address: null, raw: data }, 200);
+    }
+
+    if (isPrismaPersistenceEnabled()) {
+      const saved = await prisma.usdtAddress.upsert({
+        where: { address },
+        create: {
+          userId: body.userId,
+          address,
+          label,
+          responseData: data as any,
+        },
+        update: {
+          userId: body.userId,
+          label,
+          responseData: data as any,
+        },
+      });
+      return ok(res, { address: saved, raw: data }, 200);
+    }
+
+    const saved = await UsdtAddress.findOneAndUpdate(
+      { address },
+      {
+        $set: {
+          userId: body.userId,
+          label,
+          responseData: data,
+        },
+      },
+      { upsert: true, new: true }
+    );
+    return ok(res, { address: saved, raw: data }, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+// Bills: electricity + airtime + data
+router.post("/bills/electricity", async (req, res) => {
+  try {
+    const body = ElectricitySchema.parse(req.body || {});
+    const public_key = requirePublicKey();
+    const payload = { public_key, ...body };
+    const resp = await api.post("electricity/request", payload, {
+      headers: { "Content-Type": "application/json" },
+    });
+    return ok(res, resp.data, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+// Bills: airtime + data
+router.post("/bills/airtime", async (req, res) => {
+  try {
+    const body = AirtimeSchema.parse(req.body || {});
+    const public_key = requirePublicKey();
+    const payload = { public_key, ...body };
+    const resp = await api.post("buyairtime/request", payload, {
+      headers: { "Content-Type": "application/json" },
+    });
+    return ok(res, resp.data, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.get("/bills/data/plans", async (req, res) => {
+  try {
+    const query = DataPlanQuerySchema.parse(req.query || {});
+    const public_key = requirePublicKey();
+    const resp = await api.get("buydata/plans", {
+      params: { public_key, service_name: query.service_name },
+    });
+    return ok(res, resp.data, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.post("/bills/data", async (req, res) => {
+  try {
+    const body = BuyDataSchema.parse(req.body || {});
+    const public_key = requirePublicKey();
+    const payload = { public_key, ...body };
+    const resp = await api.post("buydata/request", payload, {
+      headers: { "Content-Type": "application/json" },
     });
     return ok(res, resp.data, 200);
   } catch (e) {
