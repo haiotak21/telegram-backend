@@ -5,12 +5,19 @@ import https from "https";
 import { z } from "zod";
 import { ok, fail } from "../utils/apiResponse";
 import User from "../models/User";
-import VirtualBankAccount from "../models/VirtualBankAccount";
-import UsdtAddress from "../models/UsdtAddress";
 import prisma from "../utils/prisma";
 import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
 const router = express.Router();
+const prismaAny = prisma as any;
+
+function getVirtualBankAccountModel() {
+  return require("../models/VirtualBankAccount").default as any;
+}
+
+function getUsdtAddressModel() {
+  return require("../models/UsdtAddress").default as any;
+}
 
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
 const API_BASE = "https://strowallet.com/api/"; // for apicard-transactions
@@ -168,21 +175,23 @@ async function findUserById(userId: string) {
 
 async function findExistingVirtualAccount(userId: string) {
   if (isPrismaPersistenceEnabled()) {
-    return prisma.virtualBankAccount.findFirst({
+    return prismaAny.virtualBankAccount.findFirst({
       where: { userId },
       orderBy: { createdAt: "desc" },
     });
   }
+  const VirtualBankAccount = getVirtualBankAccountModel();
   return VirtualBankAccount.findOne({ userId }).sort({ createdAt: -1 }).lean();
 }
 
 async function findExistingUsdtAddress(userId: string) {
   if (isPrismaPersistenceEnabled()) {
-    return prisma.usdtAddress.findFirst({
+    return prismaAny.usdtAddress.findFirst({
       where: { userId },
       orderBy: { createdAt: "desc" },
     });
   }
+  const UsdtAddress = getUsdtAddressModel();
   return UsdtAddress.findOne({ userId }).sort({ createdAt: -1 }).lean();
 }
 
@@ -830,7 +839,7 @@ router.post("/virtual-bank/account", async (req, res) => {
     }
 
     if (isPrismaPersistenceEnabled()) {
-      const saved = await prisma.virtualBankAccount.upsert({
+      const saved = await prismaAny.virtualBankAccount.upsert({
         where: { accountNumber },
         create: {
           userId: body.userId,
@@ -855,6 +864,7 @@ router.post("/virtual-bank/account", async (req, res) => {
       return ok(res, { account: saved, raw: data }, 200);
     }
 
+    const VirtualBankAccount = getVirtualBankAccountModel();
     const saved = await VirtualBankAccount.findOneAndUpdate(
       { accountNumber },
       {
@@ -971,7 +981,7 @@ router.post("/usdt/address", async (req, res) => {
     }
 
     if (isPrismaPersistenceEnabled()) {
-      const saved = await prisma.usdtAddress.upsert({
+      const saved = await prismaAny.usdtAddress.upsert({
         where: { address },
         create: {
           userId: body.userId,
@@ -988,6 +998,7 @@ router.post("/usdt/address", async (req, res) => {
       return ok(res, { address: saved, raw: data }, 200);
     }
 
+    const UsdtAddress = getUsdtAddressModel();
     const saved = await UsdtAddress.findOneAndUpdate(
       { address },
       {
