@@ -11,6 +11,12 @@ import { notifyByCardId, notifyByEmail, notifyCardRequestApproved, notifyCardSta
 import prisma from "../utils/prisma";
 import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
+const prismaAny = prisma as any;
+
+function hasPrismaModel(modelName: string) {
+  return Boolean(prismaAny?.[modelName]);
+}
+
 function extractField(obj: any, keys: string[]): string | undefined {
   if (!obj || typeof obj !== "object") return undefined;
   for (const key of keys) {
@@ -201,8 +207,8 @@ export async function processStroWalletEvent(payload: any) {
     if (Number.isFinite(amount) && amount > 0) {
       const reference = String(payload?.reference || payload?.id || payload?.hash || "");
       let userId: string | null = null;
-      if (isPrismaPersistenceEnabled()) {
-        const record = await prisma.usdtAddress.findUnique({ where: { address } });
+      if (isPrismaPersistenceEnabled() && hasPrismaModel("usdtAddress")) {
+        const record = await prismaAny.usdtAddress.findUnique({ where: { address } });
         userId = record?.userId || null;
       } else {
         const record = await UsdtAddress.findOne({ address }).lean();
@@ -291,8 +297,8 @@ export async function processStroWalletEvent(payload: any) {
     const amountNgn = Number(settledAmountRaw);
     if (Number.isFinite(amountNgn) && amountNgn > 0) {
       let userId: string | null = null;
-      if (isPrismaPersistenceEnabled()) {
-        const record = await prisma.virtualBankAccount.findFirst({
+      if (isPrismaPersistenceEnabled() && hasPrismaModel("virtualBankAccount")) {
+        const record = await prismaAny.virtualBankAccount.findFirst({
           where: {
             OR: [
               ...(accountNumber ? [{ accountNumber: String(accountNumber) }] : []),
