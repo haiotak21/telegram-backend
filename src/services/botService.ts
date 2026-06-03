@@ -2269,6 +2269,15 @@ async function handleBankTransferMessage(msg: any, session: BankTransferSession)
       }
       const banks = await fetchBankList(chatId).catch(() => [] as BankListItem[]);
       const match = findBankByInput(text, banks);
+      if (!match && !/^\d+$/.test(text)) {
+        await bot!.sendMessage(chatId, "Invalid bank code. Please use the numeric bank code from the list.", {
+          reply_markup: { force_reply: true },
+        });
+        if (banks.length) {
+          await bot!.sendMessage(chatId, formatBankListMessage(banks));
+        }
+        return;
+      }
       session.data.bankCode = match?.code || text;
       session.data.bankName = match?.name || undefined;
       session.step = "account";
@@ -2306,6 +2315,19 @@ async function handleBankTransferMessage(msg: any, session: BankTransferSession)
         if (nameEnquiryReference) session.data.nameEnquiryReference = String(nameEnquiryReference);
       } catch (err: any) {
         await bot!.sendMessage(chatId, `❌ Failed to resolve account name: ${err?.message || "Unexpected error"}`);
+        session.step = "bank";
+        bankTransferSessions.set(chatId, session);
+        await bot!.sendMessage(chatId, "Please re-enter the bank code (numeric).", {
+          reply_markup: { force_reply: true },
+        });
+        return;
+      }
+      if (!session.data.nameEnquiryReference) {
+        await bot!.sendMessage(chatId, "Bank verification did not return a reference. Please try again.", {
+          reply_markup: { force_reply: true },
+        });
+        session.step = "bank";
+        bankTransferSessions.set(chatId, session);
         return;
       }
       session.step = "amount";
