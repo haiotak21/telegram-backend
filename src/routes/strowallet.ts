@@ -2,6 +2,7 @@ import express from "express";
 import axios, { AxiosError } from "axios";
 import http from "http";
 import https from "https";
+import mongoose from "mongoose";
 import { z } from "zod";
 import { ok, fail } from "../utils/apiResponse";
 import User from "../models/User";
@@ -21,6 +22,10 @@ function getUsdtAddressModel() {
 
 function hasPrismaModel(modelName: string) {
   return Boolean(prismaAny?.[modelName]);
+}
+
+function isMongoReady() {
+  return mongoose.connection.readyState === 1;
 }
 
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
@@ -184,6 +189,7 @@ async function findExistingVirtualAccount(userId: string) {
       orderBy: { createdAt: "desc" },
     });
   }
+  if (!isMongoReady()) return null;
   const VirtualBankAccount = getVirtualBankAccountModel();
   return VirtualBankAccount.findOne({ userId }).sort({ createdAt: -1 }).lean();
 }
@@ -195,6 +201,7 @@ async function findExistingUsdtAddress(userId: string) {
       orderBy: { createdAt: "desc" },
     });
   }
+  if (!isMongoReady()) return null;
   const UsdtAddress = getUsdtAddressModel();
   return UsdtAddress.findOne({ userId }).sort({ createdAt: -1 }).lean();
 }
@@ -868,6 +875,10 @@ router.post("/virtual-bank/account", async (req, res) => {
       return ok(res, { account: saved, raw: data }, 200);
     }
 
+    if (!isMongoReady()) {
+      return ok(res, { account: null, raw: data }, 200);
+    }
+
     const VirtualBankAccount = getVirtualBankAccountModel();
     const saved = await VirtualBankAccount.findOneAndUpdate(
       { accountNumber },
@@ -1000,6 +1011,10 @@ router.post("/usdt/address", async (req, res) => {
         },
       });
       return ok(res, { address: saved, raw: data }, 200);
+    }
+
+    if (!isMongoReady()) {
+      return ok(res, { address: null, raw: data }, 200);
     }
 
     const UsdtAddress = getUsdtAddressModel();

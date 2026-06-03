@@ -3238,8 +3238,12 @@ async function handleMenuSelection(action: string, chatId: number, message?: any
       return sendMyCards(chatId, message);
     case "WALLET_VIRTUAL_ACCOUNT":
       return sendVirtualAccount(chatId, message);
+    case "WALLET_CREATE_VIRTUAL_ACCOUNT":
+      return sendVirtualAccount(chatId, message, { forceCreate: true });
     case "WALLET_USDT_ADDRESS":
       return sendUsdtAddress(chatId, message);
+    case "WALLET_CREATE_USDT_ADDRESS":
+      return sendUsdtAddress(chatId, message, { forceCreate: true });
     case "WALLET_TRANSACTIONS":
       return sendCardTransactions(chatId);
     case "WALLET_WITHDRAW":
@@ -4489,15 +4493,19 @@ async function sendWalletSummary(chatId: number, message?: any) {
   });
 }
 
-async function sendVirtualAccount(chatId: number, message?: any) {
+async function sendVirtualAccount(chatId: number, message?: any, options?: { forceCreate?: boolean }) {
   if (!bot) return;
   try {
-    const resp = await callStroWallet("virtual-bank/account", "post", { userId: String(chatId) });
+    const payload = { userId: String(chatId), ...(options?.forceCreate ? { forceCreate: true } : {}) };
+    const resp = await callStroWallet("virtual-bank/account", "post", payload);
     const data: any = resp?.data ?? resp;
     const account = data?.account ?? data;
     if (!account || !account.accountNumber) {
-      await editOrSend(chatId, message, "No virtual account found. Please update your profile email/phone first.", {
-        inline_keyboard: [[MENU_BUTTON]],
+      await editOrSend(chatId, message, "No virtual account found yet. Tap below to create one.", {
+        inline_keyboard: [
+          [{ text: "➕ Create Virtual Account", callback_data: "WALLET_CREATE_VIRTUAL_ACCOUNT" }],
+          [MENU_BUTTON],
+        ],
       });
       return;
     }
@@ -4519,16 +4527,20 @@ async function sendVirtualAccount(chatId: number, message?: any) {
   }
 }
 
-async function sendUsdtAddress(chatId: number, message?: any) {
+async function sendUsdtAddress(chatId: number, message?: any, options?: { forceCreate?: boolean }) {
   if (!bot) return;
   try {
-    const resp = await callStroWallet("usdt/address", "post", { userId: String(chatId) });
+    const payload = { userId: String(chatId), ...(options?.forceCreate ? { forceCreate: true } : {}) };
+    const resp = await callStroWallet("usdt/address", "post", payload);
     const data: any = resp?.data ?? resp;
     const record = data?.address ?? data;
     const address = record?.address;
     if (!address) {
-      await editOrSend(chatId, message, "No USDT address found. Please update your profile email first.", {
-        inline_keyboard: [[MENU_BUTTON]],
+      await editOrSend(chatId, message, "No USDT address found yet. Tap below to create one.", {
+        inline_keyboard: [
+          [{ text: "➕ Create USDT Address", callback_data: "WALLET_CREATE_USDT_ADDRESS" }],
+          [MENU_BUTTON],
+        ],
       });
       return;
     }
