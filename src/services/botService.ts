@@ -4501,6 +4501,12 @@ async function sendVirtualAccount(chatId: number, message?: any, options?: { for
     const resp = await callStroWallet("virtual-bank/account", "post", payload);
     const data: any = resp?.data ?? resp;
     const account = data?.account ?? data;
+    if (data?.pending) {
+      await editOrSend(chatId, message, "Virtual account creation is already in progress. Please wait a moment and try again.", {
+        inline_keyboard: [[MENU_BUTTON]],
+      });
+      return;
+    }
     if (!account || !account.accountNumber) {
       await editOrSend(chatId, message, "No virtual account found yet. Tap below to create one.", {
         inline_keyboard: [
@@ -4537,6 +4543,12 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
     const data: any = resp?.data ?? resp;
     const record = data?.address ?? data;
     const address = record?.address;
+    if (data?.pending) {
+      await editOrSend(chatId, message, "USDT address creation is already in progress. Please wait a moment and try again.", {
+        inline_keyboard: [[MENU_BUTTON]],
+      });
+      return;
+    }
     if (!address) {
       await editOrSend(chatId, message, "No USDT address found yet. Tap below to create one.", {
         inline_keyboard: [

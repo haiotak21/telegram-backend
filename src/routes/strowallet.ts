@@ -11,6 +11,10 @@ import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
 const router = express.Router();
 const prismaAny = prisma as any;
+const VIRTUAL_ACCOUNT_CREATE_TTL_MS = Number(process.env.VIRTUAL_ACCOUNT_CREATE_TTL_MS || 60000);
+const USDT_ADDRESS_CREATE_TTL_MS = Number(process.env.USDT_ADDRESS_CREATE_TTL_MS || 60000);
+const virtualAccountCreateLocks = new Map<string, { startedAt: number; account?: any }>();
+const usdtAddressCreateLocks = new Map<string, { startedAt: number; address?: any }>();
 
 function getVirtualBankAccountModel() {
   return require("../models/VirtualBankAccount").default as any;
@@ -26,6 +30,14 @@ function hasPrismaModel(modelName: string) {
 
 function isMongoReady() {
   return mongoose.connection.readyState === 1;
+}
+
+function shouldSkipCreate(lock: Map<string, { startedAt: number }>, userId: string, ttlMs: number) {
+  const existing = lock.get(userId);
+  if (!existing) return false;
+  if (Date.now() - existing.startedAt <= ttlMs) return true;
+  lock.delete(userId);
+  return false;
 }
 
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
@@ -813,9 +825,17 @@ router.get("/virtual-bank/account", async (req, res) => {
 router.post("/virtual-bank/account", async (req, res) => {
   try {
     const body = VirtualBankRequestSchema.parse(req.body || {});
+    if (shouldSkipCreate(virtualAccountCreateLocks, body.userId, VIRTUAL_ACCOUNT_CREATE_TTL_MS)) {
+      const cached = virtualAccountCreateLocks.get(body.userId);
+      return ok(res, { account: cached?.account ?? null, pending: true }, 200);
+    }
     if (!body.forceCreate) {
       const existing = await findExistingVirtualAccount(body.userId);
       if (existing) return ok(res, { account: existing }, 200);
+    }
+
+    if (body.forceCreate) {
+      virtualAccountCreateLocks.set(body.userId, { startedAt: Date.now() });
     }
 
     const user = await findUserById(body.userId);
@@ -876,7 +896,9 @@ router.post("/virtual-bank/account", async (req, res) => {
     }
 
     if (!isMongoReady()) {
-      return ok(res, { account: null, raw: data }, 200);
+      const response = { account: null, raw: data };
+      if (body.forceCreate) virtualAccountCreateLocks.set(body.userId, { startedAt: Date.now(), account: response.account });
+      return ok(res, response, 200);
     }
 
     const VirtualBankAccount = getVirtualBankAccountModel();
@@ -895,8 +917,11 @@ router.post("/virtual-bank/account", async (req, res) => {
       },
       { upsert: true, new: true }
     );
-    return ok(res, { account: saved, raw: data }, 200);
+    const response = { account: saved, raw: data };
+    if (body.forceCreate) virtualAccountCreateLocks.set(body.userId, { startedAt: Date.now(), account: response.account });
+    return ok(res, response, 200);
   } catch (e) {
+    if (req?.body?.userId) virtualAccountCreateLocks.delete(String(req.body.userId));
     const { status, message } = normalizeError(e);
     return fail(res, message, status);
   }
@@ -969,9 +994,17 @@ router.get("/usdt/address", async (req, res) => {
 router.post("/usdt/address", async (req, res) => {
   try {
     const body = UsdtAddressSchema.parse(req.body || {});
+    if (shouldSkipCreate(usdtAddressCreateLocks, body.userId, USDT_ADDRESS_CREATE_TTL_MS)) {
+      const cached = usdtAddressCreateLocks.get(body.userId);
+      return ok(res, { address: cached?.address ?? null, pending: true }, 200);
+    }
     if (!body.forceCreate) {
       const existing = await findExistingUsdtAddress(body.userId);
       if (existing) return ok(res, { address: existing }, 200);
+    }
+
+    if (body.forceCreate) {
+      usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now() });
     }
 
     const user = await findUserById(body.userId);
@@ -1014,7 +1047,9 @@ router.post("/usdt/address", async (req, res) => {
     }
 
     if (!isMongoReady()) {
-      return ok(res, { address: null, raw: data }, 200);
+      const response = { address: null, raw: data };
+      if (body.forceCreate) usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: response.address });
+      return ok(res, response, 200);
     }
 
     const UsdtAddress = getUsdtAddressModel();
@@ -1029,8 +1064,11 @@ router.post("/usdt/address", async (req, res) => {
       },
       { upsert: true, new: true }
     );
-    return ok(res, { address: saved, raw: data }, 200);
+    const response = { address: saved, raw: data };
+    if (body.forceCreate) usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: response.address });
+    return ok(res, response, 200);
   } catch (e) {
+    if (req?.body?.userId) usdtAddressCreateLocks.delete(String(req.body.userId));
     const { status, message } = normalizeError(e);
     return fail(res, message, status);
   }
