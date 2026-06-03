@@ -41,8 +41,45 @@ model User {
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
   transactions        Transaction[]
+  virtualAccounts     VirtualBankAccount[]
+  usdtAddresses       UsdtAddress[]
 
   @@index([kycStatus])
+}
+
+model VirtualBankAccount {
+  id            String   @id @default(cuid())
+  userId        String
+  provider      String
+  accountNumber String   @unique
+  accountName   String?
+  bankName      String?
+  sessionId     String?
+  status        String?  @default("active")
+  currency      String?  @default("NGN")
+  responseData  Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [userId])
+
+  @@index([userId])
+}
+
+model UsdtAddress {
+  id           String   @id @default(cuid())
+  userId       String
+  address      String   @unique
+  label        String?
+  network      String?  @default("TRC20")
+  status       String?  @default("active")
+  responseData Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [userId])
+
+  @@index([userId])
 }
 
 model Transaction {

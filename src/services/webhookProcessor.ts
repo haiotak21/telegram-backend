@@ -1,11 +1,13 @@
 import { WebhookEvent } from "../models/WebhookEvent";
 import Card from "../models/Card";
 import CardRequest from "../models/CardRequest";
+import VirtualBankAccount from "../models/VirtualBankAccount";
+import UsdtAddress from "../models/UsdtAddress";
 import { TelegramLink } from "../models/TelegramLink";
 import Transaction from "../models/Transaction";
 import User from "../models/User";
 import Customer from "../models/Customer";
-import { notifyByCardId, notifyByEmail, notifyCardRequestApproved, notifyCardStatusChanged } from "./botService";
+import { notifyByCardId, notifyByEmail, notifyCardRequestApproved, notifyCardStatusChanged, notifyDepositCredited } from "./botService";
 import prisma from "../utils/prisma";
 import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
@@ -57,6 +59,13 @@ export async function processStroWalletEvent(payload: any) {
 
   const message = formatMessage(type, payload);
   const lowerType = type.toLowerCase();
+  const action = String(payload?.action || "").toLowerCase();
+  const currency = String(payload?.currency || "").toUpperCase();
+  const chain = String(payload?.chain || "").toUpperCase();
+  const address = payload?.address ? String(payload.address) : undefined;
+  const accountNumber = payload?.accountNumber || payload?.account_number;
+  const sessionId = payload?.sessionId || payload?.session_id;
+  const settledAmountRaw = payload?.settledAmount ?? payload?.transactionAmount ?? payload?.amount;
 
   // Only send generic message for non-KYC events
   if (!type.toLowerCase().includes('kyc')) {
@@ -173,6 +182,225 @@ export async function processStroWalletEvent(payload: any) {
           nameOnCard: data?.name_on_card || data?.nameOnCard || data?.name,
           raw: payload,
         }).catch(() => {});
+      }
+    }
+  }
+
+  const isUsdtIncoming =
+    action === "receive_usdt" ||
+    (String(payload?.type || "").toLowerCase() === "credit" && (currency === "USDT" || chain === "TRX"));
+
+  if (isUsdtIncoming && address) {
+    let amount = Number(payload?.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      const centAmount = Number(payload?.centAmount);
+      if (Number.isFinite(centAmount) && centAmount > 0) {
+        amount = centAmount / 100;
+      }
+    }
+    if (Number.isFinite(amount) && amount > 0) {
+      const reference = String(payload?.reference || payload?.id || payload?.hash || "");
+      let userId: string | null = null;
+      if (isPrismaPersistenceEnabled()) {
+        const record = await prisma.usdtAddress.findUnique({ where: { address } });
+        userId = record?.userId || null;
+      } else {
+        const record = await UsdtAddress.findOne({ address }).lean();
+        userId = record?.userId || null;
+      }
+
+      if (userId) {
+        if (isPrismaPersistenceEnabled()) {
+          const existing = await prisma.transaction.findFirst({
+            where: {
+              userId,
+              transactionType: "deposit",
+              OR: [
+                ...(reference ? [{ referenceNumber: reference }] : []),
+                ...(payload?.id ? [{ transactionNumber: String(payload.id) }] : []),
+              ],
+            },
+          });
+          if (!existing) {
+            const createdTx = await prisma.transaction.create({
+              data: {
+                userId,
+                transactionType: "deposit",
+                paymentMethod: "strowallet",
+                amount,
+                amountUsdt: amount,
+                currency: "USDT",
+                transactionNumber: payload?.id ? String(payload.id) : undefined,
+                referenceNumber: reference || undefined,
+                status: "completed",
+                verified: true,
+                responseData: payload as any,
+                metadata: {
+                  kind: "usdt_deposit",
+                  address,
+                  chain,
+                } as any,
+              },
+            });
+
+            const updated = await prisma.user.update({
+              where: { userId },
+              data: { balance: { increment: amount } },
+            });
+            await notifyDepositCredited(userId, amount, updated.balance).catch(() => {});
+          }
+        } else {
+          const existing = await Transaction.findOne({
+            userId,
+            transactionType: "deposit",
+            $or: [
+              ...(reference ? [{ referenceNumber: reference }] : []),
+              ...(payload?.id ? [{ transactionNumber: String(payload.id) }] : []),
+            ],
+          }).lean();
+
+          if (!existing) {
+            await Transaction.create({
+              userId,
+              transactionType: "deposit",
+              paymentMethod: "strowallet",
+              amount,
+              amountUsdt: amount,
+              currency: "USDT",
+              transactionNumber: payload?.id ? String(payload.id) : undefined,
+              referenceNumber: reference || undefined,
+              status: "completed",
+              verified: true,
+              responseData: payload,
+              metadata: { kind: "usdt_deposit", address, chain },
+            });
+            const updated = await User.findOneAndUpdate(
+              { userId },
+              { $inc: { balance: amount } },
+              { new: true }
+            ).lean();
+            await notifyDepositCredited(userId, amount, updated?.balance).catch(() => {});
+          }
+        }
+      }
+    }
+  }
+
+  const looksLikeVirtualBankWebhook = Boolean(accountNumber && (settledAmountRaw || sessionId));
+  if (looksLikeVirtualBankWebhook) {
+    const amountNgn = Number(settledAmountRaw);
+    if (Number.isFinite(amountNgn) && amountNgn > 0) {
+      let userId: string | null = null;
+      if (isPrismaPersistenceEnabled()) {
+        const record = await prisma.virtualBankAccount.findFirst({
+          where: {
+            OR: [
+              ...(accountNumber ? [{ accountNumber: String(accountNumber) }] : []),
+              ...(sessionId ? [{ sessionId: String(sessionId) }] : []),
+            ],
+          },
+        });
+        userId = record?.userId || null;
+      } else {
+        const record = await VirtualBankAccount.findOne({
+          $or: [
+            ...(accountNumber ? [{ accountNumber: String(accountNumber) }] : []),
+            ...(sessionId ? [{ sessionId: String(sessionId) }] : []),
+          ],
+        }).lean();
+        userId = record?.userId || null;
+      }
+
+      if (userId) {
+        const rate = Number(process.env.VIRTUAL_BANK_USDT_RATE || 0);
+        const autoCredit = String(process.env.VIRTUAL_BANK_AUTO_CREDIT || "false").toLowerCase() === "true" && rate > 0;
+        const creditedUsdt = autoCredit ? amountNgn / rate : null;
+        const reference = String(payload?.settlementId || payload?.reference || sessionId || payload?.id || "");
+
+        if (isPrismaPersistenceEnabled()) {
+          const existing = await prisma.transaction.findFirst({
+            where: {
+              userId,
+              transactionType: "deposit",
+              OR: [
+                ...(reference ? [{ referenceNumber: reference }] : []),
+                ...(sessionId ? [{ transactionNumber: String(sessionId) }] : []),
+              ],
+            },
+          });
+          if (!existing) {
+            const created = await prisma.transaction.create({
+              data: {
+                userId,
+                transactionType: "deposit",
+                paymentMethod: "strowallet",
+                amount: autoCredit && creditedUsdt != null ? creditedUsdt : amountNgn,
+                amountUsdt: autoCredit && creditedUsdt != null ? creditedUsdt : undefined,
+                currency: autoCredit ? "USDT" : "NGN",
+                transactionNumber: sessionId ? String(sessionId) : undefined,
+                referenceNumber: reference || undefined,
+                status: autoCredit ? "completed" : "pending",
+                verified: autoCredit,
+                responseData: payload as any,
+                metadata: {
+                  kind: "virtual_account",
+                  ngnAmount: amountNgn,
+                  rate,
+                  creditedUsdt,
+                  accountNumber: accountNumber ? String(accountNumber) : undefined,
+                } as any,
+              },
+            });
+
+            if (autoCredit && creditedUsdt != null) {
+              const updated = await prisma.user.update({
+                where: { userId },
+                data: { balance: { increment: creditedUsdt } },
+              });
+              await notifyDepositCredited(userId, creditedUsdt, updated.balance).catch(() => {});
+            }
+          }
+        } else {
+          const existing = await Transaction.findOne({
+            userId,
+            transactionType: "deposit",
+            $or: [
+              ...(reference ? [{ referenceNumber: reference }] : []),
+              ...(sessionId ? [{ transactionNumber: String(sessionId) }] : []),
+            ],
+          }).lean();
+          if (!existing) {
+            await Transaction.create({
+              userId,
+              transactionType: "deposit",
+              paymentMethod: "strowallet",
+              amount: autoCredit && creditedUsdt != null ? creditedUsdt : amountNgn,
+              amountUsdt: autoCredit && creditedUsdt != null ? creditedUsdt : undefined,
+              currency: autoCredit ? "USDT" : "NGN",
+              transactionNumber: sessionId ? String(sessionId) : undefined,
+              referenceNumber: reference || undefined,
+              status: autoCredit ? "completed" : "pending",
+              verified: autoCredit,
+              responseData: payload,
+              metadata: {
+                kind: "virtual_account",
+                ngnAmount: amountNgn,
+                rate,
+                creditedUsdt,
+                accountNumber: accountNumber ? String(accountNumber) : undefined,
+              },
+            });
+
+            if (autoCredit && creditedUsdt != null) {
+              const updated = await User.findOneAndUpdate(
+                { userId },
+                { $inc: { balance: creditedUsdt } },
+                { new: true }
+              ).lean();
+              await notifyDepositCredited(userId, creditedUsdt, updated?.balance).catch(() => {});
+            }
+          }
+        }
       }
     }
   }
