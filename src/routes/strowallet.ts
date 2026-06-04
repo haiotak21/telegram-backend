@@ -121,6 +121,17 @@ const UsdtAddressSchema = z.object({
   forceCreate: z.boolean().optional(),
 });
 
+const UsdtHistoryQuerySchema = z.object({
+  address: z.string().min(5),
+});
+
+const UsdtSendSchema = z.object({
+  address: z.string().min(5),
+  amount: z.union([z.string(), z.number()]).transform((v) => String(v)),
+  vipKey: z.string().optional(),
+  mode: z.string().optional(),
+});
+
 const BankTransferSchema = z.object({
   amount: z.string().min(1),
   bank_code: z.string().min(1),
@@ -811,6 +822,7 @@ router.get("/wallet-balance/:currency", async (req, res) => {
 // Virtual Bank Account (create or fetch)
 router.get("/virtual-bank/account", async (req, res) => {
   try {
+    return fail(res, "Virtual bank accounts are available for Nigerian users only", 403);
     const userId = String(req.query.userId || "").trim();
     if (!userId) return fail(res, "userId is required", 400);
     const existing = await findExistingVirtualAccount(userId);
@@ -824,6 +836,7 @@ router.get("/virtual-bank/account", async (req, res) => {
 
 router.post("/virtual-bank/account", async (req, res) => {
   try {
+    return fail(res, "Virtual bank accounts are available for Nigerian users only", 403);
     const body = VirtualBankRequestSchema.parse(req.body || {});
     if (shouldSkipCreate(virtualAccountCreateLocks, body.userId, VIRTUAL_ACCOUNT_CREATE_TTL_MS)) {
       const cached = virtualAccountCreateLocks.get(body.userId);
@@ -1069,6 +1082,63 @@ router.post("/usdt/address", async (req, res) => {
     return ok(res, response, 200);
   } catch (e) {
     if (req?.body?.userId) usdtAddressCreateLocks.delete(String(req.body.userId));
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+// USDT history by address
+router.get("/usdt/history", async (req, res) => {
+  try {
+    const query = UsdtHistoryQuerySchema.parse(req.query || {});
+    const public_key = requirePublicKey();
+    const resp = await api.get("get-usdt-history", {
+      params: {
+        public_key,
+        address: query.address,
+      },
+    });
+    return ok(res, resp.data, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+// USDT balance (platform wallet)
+router.get("/usdt/balance", async (req, res) => {
+  try {
+    const public_key = requirePublicKey();
+    const currencyRaw = String(req.query.currency || "USDT").trim().toUpperCase();
+    const currency = /^[A-Z]{3,5}$/.test(currencyRaw) ? currencyRaw : "USDT";
+    const resp = await api.get(`wallet/balance/${currency}/`, {
+      params: { public_key },
+    });
+    return ok(res, resp.data, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+// Send USDT
+router.post("/usdt/send", async (req, res) => {
+  try {
+    const body = UsdtSendSchema.parse(req.body || {});
+    const public_key = requirePublicKey();
+    const vip_key = body.vipKey || process.env.STROWALLET_VIP_KEY;
+    if (!vip_key) return fail(res, "Missing STROWALLET_VIP_KEY env", 400);
+    const params: Record<string, any> = {
+      public_key,
+      vip_key,
+      amount: body.amount,
+      address: body.address,
+    };
+    const mode = normalizeMode(body.mode || getDefaultMode());
+    if (mode) params.mode = mode;
+    const resp = await api.post("send-usdt", undefined, { params });
+    return ok(res, resp.data, 200);
+  } catch (e) {
     const { status, message } = normalizeError(e);
     return fail(res, message, status);
   }

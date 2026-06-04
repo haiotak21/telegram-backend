@@ -26,6 +26,8 @@ type PendingAction =
   | { type: "deposit_amount"; method: PaymentMethod }
   | { type: "deposit_convert_amount" }
   | { type: "card_request_verify"; method: PaymentMethod }
+  | { type: "usdt_history" }
+  | { type: "usdt_send" }
   | { type: "airtime" }
   | { type: "data_plans" }
   | { type: "internet_plans" };
@@ -424,8 +426,10 @@ export async function initBot() {
     { command: "start", description: "Show welcome message" },
     { command: "menu", description: "Show main menu" },
     { command: "help", description: "Show available commands" },
-    { command: "virtualaccount", description: "Show your virtual account" },
     { command: "usdt", description: "Show your USDT address" },
+    { command: "usdtbalance", description: "Show USDT wallet balance" },
+    { command: "usdthistory", description: "Show USDT transaction history" },
+    { command: "sendusdt", description: "Send USDT (/sendusdt address amount)" },
     { command: "airtime", description: "Buy airtime (provider phone amount)" },
     { command: "dataplans", description: "List data plans (/dataplans mtn-data)" },
     { command: "buydata", description: "Buy data (/buydata mtn-data variation phone amount)" },
@@ -489,7 +493,7 @@ export async function initBot() {
     if (shouldSkipCommand(msg, "help")) return;
     await bot!.sendMessage(
       msg.chat.id,
-      "Commands:\n/card_request\n/requestcard\n/mycard\n/cardstatus\n/transactions\n/freeze\n/unfreeze\n/linkemail your@example.com\n/linkcard CARD_ID\n/unlink (remove all links)\n/status\n/verify\n/deposit\n/virtualaccount\n/usdt\n/airtime\n/dataplans\n/buydata"
+      "Commands:\n/card_request\n/requestcard\n/mycard\n/cardstatus\n/transactions\n/freeze\n/unfreeze\n/linkemail your@example.com\n/linkcard CARD_ID\n/unlink (remove all links)\n/status\n/verify\n/deposit\n/usdt\n/usdtbalance\n/usdthistory\n/sendusdt address amount\n/airtime\n/dataplans\n/buydata"
     );
   });
 
@@ -500,12 +504,45 @@ export async function initBot() {
 
   botRef.onText(/^\/virtualaccount$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "virtualaccount")) return;
-    await sendVirtualAccount(msg.chat.id);
+    await bot!.sendMessage(
+      msg.chat.id,
+      "Virtual accounts are available for Nigerian users only. Use the USDT wallet instead.",
+      { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+    );
   });
 
   botRef.onText(/^\/usdt$/i, async (msg: any) => {
     if (shouldSkipCommand(msg, "usdt")) return;
     await sendUsdtAddress(msg.chat.id);
+  });
+
+  botRef.onText(/^\/usdtbalance$/i, async (msg: any) => {
+    if (shouldSkipCommand(msg, "usdtbalance")) return;
+    await sendUsdtBalance(msg.chat.id);
+  });
+
+  botRef.onText(/^\/usdthistory(?:\s+(.+))?$/i, async (msg: any, match?: RegExpExecArray | null) => {
+    if (shouldSkipCommand(msg, "usdthistory")) return;
+    const address = match?.[1] ? String(match[1]).trim() : "";
+    if (address) {
+      await sendUsdtHistory(msg.chat.id, address);
+      return;
+    }
+    await sendUsdtHistory(msg.chat.id);
+  });
+
+  botRef.onText(/^\/sendusdt(?:\s+(.+))?$/i, async (msg: any, match?: RegExpExecArray | null) => {
+    if (shouldSkipCommand(msg, "sendusdt")) return;
+    const args = match?.[1];
+    if (!args) {
+      const key = chatKey(msg.chat.id);
+      if (key) pendingActions.set(key, { type: "usdt_send" });
+      await bot!.sendMessage(msg.chat.id, "Send USDT in this format: address amount", {
+        reply_markup: { force_reply: true },
+      });
+      return;
+    }
+    await handleUsdtSendRequest(msg.chat.id, args);
   });
 
   botRef.onText(/^\/airtime(?:\s+(.+))?$/i, async (msg: any, match?: RegExpExecArray | null) => {
@@ -1112,6 +1149,12 @@ export async function initBot() {
       );
       clearPendingAction(msg.chat.id);
       await bot!.sendMessage(msg.chat.id, `Linked card ${cardId}.`);
+    } else if (pending.type === "usdt_history") {
+      clearPendingAction(msg.chat.id);
+      await sendUsdtHistory(msg.chat.id, text);
+    } else if (pending.type === "usdt_send") {
+      clearPendingAction(msg.chat.id);
+      await handleUsdtSendRequest(msg.chat.id, text);
     } else if (pending.type === "verify") {
       const method = pending.method;
       if (!text) {
@@ -2540,8 +2583,14 @@ function buildWalletMenuKeyboard(): InlineKeyboardButton[][] {
       { text: "🔍 My Card", callback_data: "WALLET_MY_CARD" },
     ],
     [
-      { text: "🏦 Virtual Account", callback_data: "WALLET_VIRTUAL_ACCOUNT" },
       { text: "💵 Usdt Wallet", callback_data: "WALLET_USDT_ADDRESS" },
+    ],
+    [
+      { text: "📊 USDT Balance", callback_data: "WALLET_USDT_BALANCE" },
+      { text: "🧾 USDT History", callback_data: "WALLET_USDT_HISTORY" },
+    ],
+    [
+      { text: "💸 Send USDT", callback_data: "WALLET_USDT_SEND" },
     ],
     [
       { text: "📊 Transaction History", callback_data: "WALLET_TRANSACTIONS" },
@@ -3237,13 +3286,23 @@ async function handleMenuSelection(action: string, chatId: number, message?: any
     case "WALLET_MY_CARD":
       return sendMyCards(chatId, message);
     case "WALLET_VIRTUAL_ACCOUNT":
-      return sendVirtualAccount(chatId, message);
+      return bot!.sendMessage(chatId, "Virtual accounts are available for Nigerian users only.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
     case "WALLET_CREATE_VIRTUAL_ACCOUNT":
-      return sendVirtualAccount(chatId, message, { forceCreate: true });
+      return bot!.sendMessage(chatId, "Virtual accounts are available for Nigerian users only.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
     case "WALLET_USDT_ADDRESS":
       return sendUsdtAddress(chatId, message);
     case "WALLET_CREATE_USDT_ADDRESS":
       return sendUsdtAddress(chatId, message, { forceCreate: true });
+    case "WALLET_USDT_BALANCE":
+      return sendUsdtBalance(chatId, message);
+    case "WALLET_USDT_HISTORY":
+      return sendUsdtHistory(chatId, undefined, message);
+    case "WALLET_USDT_SEND":
+      return sendUsdtSendPrompt(chatId, message);
     case "WALLET_TRANSACTIONS":
       return sendCardTransactions(chatId);
     case "WALLET_WITHDRAW":
@@ -4482,8 +4541,12 @@ async function sendWalletSummary(chatId: number, message?: any) {
   await editOrSend(chatId, message, lines.join("\n"), {
     inline_keyboard: [
       [{ text: "🔍 My Cards", callback_data: "MENU_MY_CARDS" }],
-      [{ text: "🏦 Virtual Account", callback_data: "WALLET_VIRTUAL_ACCOUNT" }],
       [{ text: "🪙 USDT Wallet", callback_data: "WALLET_USDT_ADDRESS" }],
+      [
+        { text: "📊 USDT Balance", callback_data: "WALLET_USDT_BALANCE" },
+        { text: "🧾 USDT History", callback_data: "WALLET_USDT_HISTORY" },
+      ],
+      [{ text: "💸 Send USDT", callback_data: "WALLET_USDT_SEND" }],
       [
         { text: "📱 Buy Airtime", callback_data: "WALLET_AIRTIME" },
         { text: "📶 Data Plans", callback_data: "WALLET_DATA_PLANS" },
@@ -4553,6 +4616,11 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
       await editOrSend(chatId, message, "No USDT address found yet. Tap below to create one.", {
         inline_keyboard: [
           [{ text: "➕ Create USDT Address", callback_data: "WALLET_CREATE_USDT_ADDRESS" }],
+          [
+            { text: "📊 USDT Balance", callback_data: "WALLET_USDT_BALANCE" },
+            { text: "🧾 USDT History", callback_data: "WALLET_USDT_HISTORY" },
+          ],
+          [{ text: "💸 Send USDT", callback_data: "WALLET_USDT_SEND" }],
           [MENU_BUTTON],
         ],
       });
@@ -4564,11 +4632,148 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
       `Address: ${address}`,
       "Send USDT (TRC20) to this address to fund your wallet.",
     ];
-    await editOrSend(chatId, message, lines.join("\n"), { inline_keyboard: [[MENU_BUTTON]] });
-  } catch (err: any) {
-    await bot.sendMessage(chatId, `❌ Failed to load USDT address: ${err?.message || "Unexpected error"}`, {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    await editOrSend(chatId, message, lines.join("\n"), {
+      inline_keyboard: [
+        [
+          { text: "📊 USDT Balance", callback_data: "WALLET_USDT_BALANCE" },
+          { text: "🧾 USDT History", callback_data: "WALLET_USDT_HISTORY" },
+        ],
+        [{ text: "💸 Send USDT", callback_data: "WALLET_USDT_SEND" }],
+        [MENU_BUTTON],
+      ],
     });
+  } catch (err: any) {
+    const message = err?.response?.data?.error || err?.response?.data?.message || err?.message || "Unexpected error";
+    if (String(message).toLowerCase().includes("email")) {
+      await bot.sendMessage(
+        chatId,
+        "Please link your email first: /linkemail your@email.com",
+        { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+      );
+      return;
+    }
+    await bot.sendMessage(chatId, `❌ Failed to load USDT address: ${message}`,
+      { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+    );
+  }
+}
+
+async function resolveUsdtAddress(chatId: number) {
+  try {
+    const resp = await callStroWallet("usdt/address", "get", { userId: String(chatId) });
+    const data: any = resp?.data ?? resp;
+    const record = data?.address ?? data;
+    const address = record?.address;
+    return address ? String(address) : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatUsdtHistoryItem(item: any) {
+  const amount = item?.amount || item?.centAmount || item?.value;
+  const action = item?.action || item?.type || item?.event;
+  const status = item?.status || item?.state;
+  const time = item?.timestamp || item?.created_at || item?.createdAt || item?.date;
+  const parts = [
+    amount ? `Amount: ${amount}` : undefined,
+    action ? `Action: ${action}` : undefined,
+    status ? `Status: ${status}` : undefined,
+    time ? `Time: ${time}` : undefined,
+  ].filter(Boolean) as string[];
+  return parts.length ? parts.join(" | ") : JSON.stringify(item);
+}
+
+async function sendUsdtBalance(chatId: number, message?: any) {
+  if (!bot) return;
+  try {
+    const resp = await callStroWallet("usdt/balance", "get", { currency: "USDT" });
+    const data: any = resp?.data ?? resp;
+    const payload = data?.data ?? data;
+    const balance = payload?.balance ?? payload?.available_balance ?? payload?.availableBalance;
+    const currency = payload?.currency || "USDT";
+    const lines = [
+      "USDT Wallet Balance",
+      balance != null ? `Balance: ${balance} ${currency}` : `Response: ${JSON.stringify(payload)}`,
+    ];
+    await editOrSend(chatId, message, lines.join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+  } catch (err: any) {
+    await bot.sendMessage(chatId, `❌ Failed to load USDT balance: ${err?.message || "Unexpected error"}`,
+      { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+    );
+  }
+}
+
+async function sendUsdtHistory(chatId: number, addressInput?: string, message?: any) {
+  if (!bot) return;
+  try {
+    const address = addressInput?.trim() || (await resolveUsdtAddress(chatId));
+    if (!address) {
+      const key = chatKey(chatId);
+      if (key) pendingActions.set(key, { type: "usdt_history" });
+      await editOrSend(chatId, message, "No USDT address found. Send the address to view history or create one first.", {
+        inline_keyboard: [
+          [{ text: "➕ Create USDT Address", callback_data: "WALLET_CREATE_USDT_ADDRESS" }],
+          [MENU_BUTTON],
+        ],
+      });
+      return;
+    }
+
+    const resp = await callStroWallet("usdt/history", "get", { address });
+    const data: any = resp?.data ?? resp;
+    const payload = data?.data ?? data;
+    let items: any[] = [];
+    if (Array.isArray(payload)) items = payload;
+    else if (Array.isArray(payload?.data)) items = payload.data;
+    else if (Array.isArray(payload?.history)) items = payload.history;
+
+    const lines = [
+      "USDT History",
+      `Address: ${address}`,
+      items.length ? "Latest transactions:" : "No history found yet.",
+      ...items.slice(0, 5).map(formatUsdtHistoryItem),
+    ].filter(Boolean) as string[];
+
+    await editOrSend(chatId, message, lines.join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+  } catch (err: any) {
+    await bot.sendMessage(chatId, `❌ Failed to load USDT history: ${err?.message || "Unexpected error"}`,
+      { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+    );
+  }
+}
+
+async function sendUsdtSendPrompt(chatId: number, message?: any) {
+  if (!bot) return;
+  const key = chatKey(chatId);
+  if (key) pendingActions.set(key, { type: "usdt_send" });
+  await editOrSend(chatId, message, "Send USDT in this format: address amount", {
+    inline_keyboard: [[MENU_BUTTON]],
+  });
+}
+
+async function handleUsdtSendRequest(chatId: number, text: string) {
+  if (!bot) return;
+  const parts = String(text || "").trim().split(/\s+/);
+  if (parts.length < 2) {
+    await bot.sendMessage(chatId, "Usage: /sendusdt address amount", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+    return;
+  }
+  const [address, amount] = parts;
+  if (!address || !amount) {
+    await bot.sendMessage(chatId, "Usage: /sendusdt address amount", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+    return;
+  }
+  try {
+    const resp = await callStroWallet("usdt/send", "post", { address, amount });
+    const data: any = resp?.data ?? resp;
+    await bot.sendMessage(chatId, `✅ USDT send initiated.\n${JSON.stringify(data)}`,
+      { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+    );
+  } catch (err: any) {
+    await bot.sendMessage(chatId, `❌ Failed to send USDT: ${err?.message || "Unexpected error"}`,
+      { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
+    );
   }
 }
 
@@ -4712,7 +4917,6 @@ async function sendMyCards(chatId: number, message?: any) {
       await editOrSend(chatId, message, [
         "💳 Your Virtual Card",
         "Status: ✅ None",
-        "Card Number: /card_request",
       ].join("\n"), {
         inline_keyboard: [[MENU_BUTTON]],
       });
@@ -4721,53 +4925,36 @@ async function sendMyCards(chatId: number, message?: any) {
 
     const remoteDetail = await fetchCardDetailSafe(String(card.cardId));
 
-    if (remoteDetail) {
-      card = await prisma.card.update({
-        where: { cardId: String(card.cardId) },
-        data: {
-          status: remoteDetail.status || card.status || undefined,
-          last4: remoteDetail.last4 || card.last4 || null,
-          currency: remoteDetail.currency || card.currency || null,
-          balance:
-            remoteDetail.balance != null
-              ? String(remoteDetail.balance)
-              : remoteDetail.available_balance != null
-                ? String(remoteDetail.available_balance)
-                : card.balance,
-          availableBalance:
-            remoteDetail.available_balance != null
-              ? String(remoteDetail.available_balance)
-              : card.availableBalance,
-        },
-      });
-    }
-
-    const statusText = isFrozenStatus(card.status || undefined) ? "❄️ Frozen" : "✅ Active";
-    const cardName = String(remoteDetail?.name_on_card || card.nameOnCard || "").trim();
-    const fullCardNumberRaw = String(remoteDetail?.card_number || "").replace(/\s+/g, "").trim();
+    const mergedDetail = remoteDetail || null;
+    const last4 = mergedDetail?.last4 || card.last4 || (card as any)?.cardNumber?.slice(-4);
+    const cardType = String(mergedDetail?.card_type || card.cardType || "virtual").toLowerCase();
+    const cvc = (mergedDetail?.cvc || (card as any)?.cvc || "").toString();
+    const cardName = String(mergedDetail?.name_on_card || (card as any)?.nameOnCard || "").trim();
+    const fullCardNumberRaw = String(mergedDetail?.card_number || (card as any)?.cardNumber || "").replace(/\s+/g, "").trim();
     const fullCardNumber = fullCardNumberRaw.length >= 12
       ? fullCardNumberRaw.replace(/(.{4})/g, "$1 ").trim()
       : undefined;
-    const cvc = String(remoteDetail?.cvc || "").trim();
-    const validThru = extractExpiry(remoteDetail || card);
+    const statusText = isFrozenStatus(card.status || undefined) ? "❄️ Frozen" : "✅ Active";
     const balanceLabel = formatCardMoney(
-      (remoteDetail?.balance ?? remoteDetail?.available_balance ?? card.balance ?? user?.balance),
-      remoteDetail?.currency || card.currency || user?.currency || "USD"
+      mergedDetail?.balance ?? mergedDetail?.available_balance ?? card.balance,
+      mergedDetail?.currency || card.currency || "USD"
     );
-    const billing = remoteDetail?.billing;
-    const address = remoteDetail?.address;
+    const expiry = extractExpiry(mergedDetail);
+    const billing = mergedDetail?.billing;
+    const address = mergedDetail?.address;
     const lines = [
       "💳 Your Virtual Card",
-      `Card Type: ${String(card.cardType || "virtual").toLowerCase()}`,
+      `Card Type: ${cardType}`,
       `Status: ${statusText}`,
       cardName ? `Name: ${cardName}` : undefined,
-      `Card Number: ${fullCardNumber || formatMaskedCard((remoteDetail?.last4 || card.last4) || undefined)}`,
-      cvc ? `CVV: ${cvc}` : undefined,
-      validThru ? `Valid Thru: ${validThru}` : undefined,
+      `Card Number: ${fullCardNumber || formatMaskedCard(last4)}`,
+      `CVV: ${cvc || "None"}`,
       `Billing: ${billing || "None"}`,
       `Address: ${address || "None"}`,
+      expiry ? `Valid Thru: ${expiry}` : undefined,
       balanceLabel ? `Balance: ${balanceLabel}` : undefined,
     ].filter(Boolean) as string[];
+
     const freezeAction = isFrozenStatus(card.status || undefined) ? "CARD_UNFREEZE" : "CARD_FREEZE";
     const freezeLabel = isFrozenStatus(card.status || undefined) ? "🔥 Unfreeze Card" : "❄️ Freeze Card";
     await editOrSend(chatId, message, lines.join("\n"), {
