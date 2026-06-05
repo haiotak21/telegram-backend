@@ -1137,8 +1137,9 @@ router.get("/usdt/history", async (req, res) => {
 router.get("/usdt/balance", async (req, res) => {
   try {
     const public_key = requirePublicKey();
-    const currencyRaw = String(req.query.currency || "USDT").trim().toUpperCase();
-    const currency = /^[A-Z]{3,5}$/.test(currencyRaw) ? currencyRaw : "USDT";
+    const currencyRaw = String(req.query.currency || "USD").trim().toUpperCase();
+    const normalized = currencyRaw === "USDT" ? "USD" : currencyRaw;
+    const currency = /^[A-Z]{3,5}$/.test(normalized) ? normalized : "USD";
     const resp = await api.get(`wallet/balance/${currency}/`, {
       params: { public_key },
     });
