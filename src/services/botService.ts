@@ -4690,7 +4690,7 @@ function formatUsdtHistoryItem(item: any) {
 async function sendUsdtBalance(chatId: number, message?: any) {
   if (!bot) return;
   try {
-    const resp = await callStroWallet("usdt/balance", "get", { currency: "USDT" });
+    const resp = await callStroWallet("usdt/balance", "get", { userId: String(chatId) });
     const data: any = resp?.data ?? resp;
     const payload = data?.data ?? data;
     const balance = payload?.balance ?? payload?.available_balance ?? payload?.availableBalance;

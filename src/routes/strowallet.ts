@@ -1136,6 +1136,19 @@ router.get("/usdt/history", async (req, res) => {
 // USDT balance (platform wallet)
 router.get("/usdt/balance", async (req, res) => {
   try {
+    const userId = String(req.query.userId || "").trim();
+    if (userId) {
+      if (isPrismaPersistenceEnabled()) {
+        const user = await prisma.user.findUnique({ where: { userId } });
+        const balance = Number(user?.balance ?? 0);
+        return ok(res, { balance, currency: "USDT", source: "user" }, 200);
+      }
+      if (!isMongoReady()) return ok(res, { balance: 0, currency: "USDT", source: "user" }, 200);
+      const user = await User.findOne({ userId }).lean();
+      const balance = Number(user?.balance ?? 0);
+      return ok(res, { balance, currency: "USDT", source: "user" }, 200);
+    }
+
     const public_key = requirePublicKey();
     const currencyRaw = String(req.query.currency || "USD").trim().toUpperCase();
     const normalized = currencyRaw === "USDT" ? "USD" : currencyRaw;
