@@ -233,8 +233,14 @@ function extractUsdtAddress(payload: any) {
   if (!payload || typeof payload !== "object") return undefined;
   if (payload.address) return String(payload.address);
   if (payload.data?.address) return String(payload.data.address);
+  if (payload.data?.wallet?.address) return String(payload.data.wallet.address);
+  if (payload.wallet?.address) return String(payload.wallet.address);
   if (payload.walletAddress) return String(payload.walletAddress);
   if (payload.data?.walletAddress) return String(payload.data.walletAddress);
+  if (payload.data?.wallet_address) return String(payload.data.wallet_address);
+  if (payload.result?.address) return String(payload.result.address);
+  if (payload.result?.walletAddress) return String(payload.result.walletAddress);
+  if (payload.data?.result?.address) return String(payload.data.result.address);
   return undefined;
 }
 
@@ -1034,10 +1040,26 @@ router.post("/usdt/address", async (req, res) => {
       webhook_url,
       mode: body.mode || getDefaultMode(),
     };
+    if (shouldDebugStroWallet()) {
+      console.log("[strowallet] usdt address request", {
+        userId: body.userId,
+        label,
+        email: maskValue(email, 3, 3),
+        webhook_url,
+        mode: params.mode,
+        public_key: maskValue(public_key, 4, 4),
+      });
+    }
     const resp = await api.post("generate-address", undefined, { params });
     const data = resp.data || {};
+    if (shouldDebugStroWallet()) {
+      console.log("[strowallet] usdt address response", data);
+    }
     const address = extractUsdtAddress(data);
     if (!address) {
+      if (shouldDebugStroWallet()) {
+        console.warn("[strowallet] usdt address missing from response", data);
+      }
       return ok(res, { address: null, raw: data }, 200);
     }
 
@@ -1127,7 +1149,7 @@ router.post("/usdt/send", async (req, res) => {
     const body = UsdtSendSchema.parse(req.body || {});
     const public_key = requirePublicKey();
     const vip_key = body.vipKey || process.env.STROWALLET_VIP_KEY;
-    if (!vip_key) return fail(res, "Missing STROWALLET_VIP_KEY env", 400);
+    if (!vip_key) return fail(res, "Send USDT is available on VIP plan only", 403);
     const params: Record<string, any> = {
       public_key,
       vip_key,

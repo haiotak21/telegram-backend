@@ -4745,6 +4745,12 @@ async function sendUsdtHistory(chatId: number, addressInput?: string, message?: 
 
 async function sendUsdtSendPrompt(chatId: number, message?: any) {
   if (!bot) return;
+  if (!process.env.STROWALLET_VIP_KEY) {
+    await editOrSend(chatId, message, "Send USDT is available on VIP plan only. Receiving USDT still works.", {
+      inline_keyboard: [[MENU_BUTTON]],
+    });
+    return;
+  }
   const key = chatKey(chatId);
   if (key) pendingActions.set(key, { type: "usdt_send" });
   await editOrSend(chatId, message, "Send USDT in this format: address amount", {
@@ -4754,6 +4760,12 @@ async function sendUsdtSendPrompt(chatId: number, message?: any) {
 
 async function handleUsdtSendRequest(chatId: number, text: string) {
   if (!bot) return;
+  if (!process.env.STROWALLET_VIP_KEY) {
+    await bot.sendMessage(chatId, "Send USDT is available on VIP plan only. Receiving USDT still works.", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+    return;
+  }
   const parts = String(text || "").trim().split(/\s+/);
   if (parts.length < 2) {
     await bot.sendMessage(chatId, "Usage: /sendusdt address amount", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
