@@ -4604,6 +4604,7 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
     const payload = { userId: String(chatId), ...(options?.forceCreate ? { forceCreate: true } : {}) };
     const resp = await callStroWallet("usdt/address", "post", payload);
     const data: any = resp?.data ?? resp;
+    const created = Boolean(data?.created);
     const record = data?.address ?? data;
     const address = record?.address;
     if (data?.pending) {
@@ -4628,9 +4629,11 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
     }
 
     const lines = [
-      "🪙 USDT Wallet (TRC20)",
+      created ? "🎉 USDT Address Created" : "🪙 USDT Wallet (TRC20)",
       `Address: ${address}`,
-      "Send USDT (TRC20) to this address to fund your wallet.",
+      created
+        ? "Your wallet is ready. Send USDT (TRC20) to this address to fund your wallet."
+        : "Send USDT (TRC20) to this address to fund your wallet.",
     ];
     await editOrSend(chatId, message, lines.join("\n"), {
       inline_keyboard: [

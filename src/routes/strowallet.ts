@@ -1002,6 +1002,10 @@ router.get("/usdt/address", async (req, res) => {
     const userId = String(req.query.userId || "").trim();
     if (!userId) return fail(res, "userId is required", 400);
     const existing = await findExistingUsdtAddress(userId);
+    if (!existing) {
+      const cached = usdtAddressCreateLocks.get(userId);
+      if (cached?.address) return ok(res, { address: cached.address }, 200);
+    }
     if (!existing) return ok(res, { address: null }, 200);
     return ok(res, { address: existing }, 200);
   } catch (e) {
@@ -1017,10 +1021,10 @@ router.post("/usdt/address", async (req, res) => {
       const cached = usdtAddressCreateLocks.get(body.userId);
       return ok(res, { address: cached?.address ?? null, pending: true }, 200);
     }
-    if (!body.forceCreate) {
-      const existing = await findExistingUsdtAddress(body.userId);
-      if (existing) return ok(res, { address: existing }, 200);
-    }
+    const existing = await findExistingUsdtAddress(body.userId);
+    if (existing) return ok(res, { address: existing, created: false }, 200);
+    const cachedExisting = usdtAddressCreateLocks.get(body.userId);
+    if (cachedExisting?.address) return ok(res, { address: cachedExisting.address, created: false }, 200);
 
     if (body.forceCreate) {
       usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now() });
@@ -1078,12 +1082,14 @@ router.post("/usdt/address", async (req, res) => {
           responseData: data as any,
         },
       });
-      return ok(res, { address: saved, raw: data }, 200);
+      const response = { address: saved, raw: data, created: true };
+      usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: response.address });
+      return ok(res, response, 200);
     }
 
     if (!isMongoReady()) {
-      const response = { address: null, raw: data };
-      if (body.forceCreate) usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: response.address });
+      const response = { address: { address, userId: body.userId, label, network: "TRC20", status: "active" }, raw: data, created: true };
+      usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: response.address });
       return ok(res, response, 200);
     }
 
@@ -1099,8 +1105,8 @@ router.post("/usdt/address", async (req, res) => {
       },
       { upsert: true, new: true }
     );
-    const response = { address: saved, raw: data };
-    if (body.forceCreate) usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: response.address });
+    const response = { address: saved, raw: data, created: true };
+    usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: response.address });
     return ok(res, response, 200);
   } catch (e) {
     if (req?.body?.userId) usdtAddressCreateLocks.delete(String(req.body.userId));
