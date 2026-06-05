@@ -4602,7 +4602,7 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
   if (options?.forceCreate && shouldSuppressOutgoing(chatId, "usdt_address_create", 3000)) return;
   try {
     const payload = { userId: String(chatId), ...(options?.forceCreate ? { forceCreate: true } : {}) };
-    const resp = await callStroWallet("usdt/address", "post", payload);
+    const resp = await callStroWallet("usdt/address", options?.forceCreate ? "post" : "get", payload);
     const data: any = resp?.data ?? resp;
     const created = Boolean(data?.created);
     const record = data?.address ?? data;
