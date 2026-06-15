@@ -97,7 +97,13 @@ async function listUserUsdtDeposits(userId: string, limit = 10) {
 function extractUsdtHistoryItems(payload: any): any[] {
   const candidates = [
     payload?.data?.history,
+    payload?.data?.transactions,
+    payload?.data?.records,
+    payload?.data?.items,
     payload?.history,
+    payload?.transactions,
+    payload?.records,
+    payload?.items,
     payload?.data?.data,
     payload?.data,
     payload,
@@ -105,35 +111,95 @@ function extractUsdtHistoryItems(payload: any): any[] {
   for (const candidate of candidates) {
     if (Array.isArray(candidate)) return candidate;
   }
+
+  const queue = [payload];
+  const seen = new Set<any>();
+  while (queue.length) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    if (Array.isArray(current)) {
+      if (current.some((item) => item && typeof item === "object")) return current;
+      continue;
+    }
+    for (const value of Object.values(current)) {
+      if (Array.isArray(value) && value.some((item) => item && typeof item === "object")) return value;
+      if (value && typeof value === "object") queue.push(value);
+    }
+  }
   return [];
+}
+
+function parseNumericAmount(value: any) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : NaN;
+  const raw = String(value ?? "").trim();
+  if (!raw) return NaN;
+  const normalized = raw.replace(/[^0-9.-]/g, "");
+  if (!normalized) return NaN;
+  return Number(normalized);
+}
+
+function collectAddressCandidates(item: any): string[] {
+  if (!item || typeof item !== "object") return [];
+  const values = [
+    item?.to,
+    item?.toAddress,
+    item?.address,
+    item?.walletAddress,
+    item?.receiverAddress,
+    item?.depositAddress,
+    item?.destination,
+    item?.recipient,
+    item?.data?.to,
+    item?.data?.toAddress,
+    item?.data?.address,
+    item?.data?.walletAddress,
+    item?.data?.receiverAddress,
+    item?.data?.depositAddress,
+    item?.data?.destination,
+    item?.data?.recipient,
+  ];
+  return values.map((value) => String(value || "").trim()).filter(Boolean);
 }
 
 function parseIncomingUsdtHistoryItem(item: any, address: string) {
   const amountRaw =
     item?.amount ??
+    item?.creditAmount ??
+    item?.credit_amount ??
     item?.value ??
     item?.usdtAmount ??
     item?.settledAmount ??
+    item?.quantityReceived ??
+    item?.receivedAmount ??
     item?.quantity ??
     item?.data?.amount;
-  let amount = Number(amountRaw);
+  let amount = parseNumericAmount(amountRaw);
   if (!Number.isFinite(amount) || amount <= 0) {
-    const centAmount = Number(item?.centAmount ?? item?.data?.centAmount);
+    const centAmount = parseNumericAmount(item?.centAmount ?? item?.data?.centAmount);
     if (Number.isFinite(centAmount) && centAmount > 0) amount = centAmount / 100;
   }
 
   const typeText = String(item?.action || item?.type || item?.event || item?.direction || "").toLowerCase();
-  const statusText = String(item?.status || item?.state || item?.txStatus || "").toLowerCase();
-  const toAddress = String(item?.to || item?.toAddress || item?.address || item?.walletAddress || "").trim();
+  const statusRaw = item?.status ?? item?.state ?? item?.txStatus ?? item?.confirmed ?? item?.success;
+  const statusText = String(statusRaw ?? "").toLowerCase();
+  const addressCandidates = collectAddressCandidates(item);
   const looksIncoming =
+    !(typeText.includes("send") || typeText.includes("withdraw") || typeText.includes("debit") || typeText.includes("outgoing")) &&
+    (
     typeText.includes("receive") ||
     typeText.includes("deposit") ||
     typeText.includes("credit") ||
     typeText.includes("incoming") ||
-    !typeText;
-  const matchesAddress = !toAddress || toAddress.toLowerCase() === address.toLowerCase();
+    !typeText
+    );
+  const matchesAddress =
+    !addressCandidates.length ||
+    addressCandidates.some((candidate) => candidate.toLowerCase() === address.toLowerCase());
   const isSuccessful =
     !statusText ||
+    statusText === "1" ||
+    statusText === "true" ||
     statusText.includes("success") ||
     statusText.includes("complete") ||
     statusText.includes("confirm") ||
@@ -168,6 +234,14 @@ async function syncUserUsdtDepositsFromProvider(userId: string, address: string,
 
   const payload = resp?.data ?? {};
   const items = extractUsdtHistoryItems(payload).slice(0, Math.max(1, Math.min(limit, 100)));
+  if (shouldDebugStroWallet()) {
+    console.log("[strowallet] usdt history sync scan", {
+      userId,
+      address,
+      itemsFound: items.length,
+      sampleKeys: items[0] && typeof items[0] === "object" ? Object.keys(items[0]).slice(0, 12) : [],
+    });
+  }
   let creditedCount = 0;
 
   for (const rawItem of items) {
