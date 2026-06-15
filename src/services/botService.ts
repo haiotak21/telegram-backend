@@ -4731,6 +4731,19 @@ function formatUsdtHistoryItem(item: any) {
   return parts.length ? parts.join(" | ") : JSON.stringify(item);
 }
 
+function formatUsdtHistoryTime(value: any) {
+  const raw = String(value || "").trim();
+  if (!raw) return "Unknown time";
+  const date = new Date(raw);
+  if (!Number.isFinite(date.getTime())) return raw;
+  const month = date.toLocaleString("en-US", { month: "short", timeZone: "UTC" });
+  const day = date.toLocaleString("en-US", { day: "2-digit", timeZone: "UTC" });
+  const year = date.toLocaleString("en-US", { year: "numeric", timeZone: "UTC" });
+  const hour = date.toLocaleString("en-US", { hour: "2-digit", hour12: false, timeZone: "UTC" });
+  const minute = date.toLocaleString("en-US", { minute: "2-digit", hour12: false, timeZone: "UTC" });
+  return `${month} ${day}, ${year} · ${hour}:${minute} UTC`;
+}
+
 async function sendUsdtBalance(chatId: number, message?: any) {
   if (!bot) return;
   try {
@@ -4773,24 +4786,46 @@ async function sendUsdtHistory(chatId: number, addressInput?: string, message?: 
 
     let lines: string[] = ["USDT History", `Address: ${address}`];
     if (userItems.length) {
-      lines = lines.concat([
-        "Recent wallet deposits:",
-        ...userItems.map((item: any) => {
-          const amount = Number(item?.amountUsdt ?? item?.amount ?? 0);
-          const status = item?.status || "completed";
-          const ref = item?.referenceNumber || item?.transactionNumber || item?.responseData?.hash || item?.responseData?.id || "-";
-          const date = item?.createdAt || item?.updatedAt || item?.responseData?.timestamp || item?.responseData?.createdAt || "";
-          const balanceSnapshot = item?.metadata?.balanceAfter || item?.metadata?.walletBalance || undefined;
-          const details = [
-            `+ ${amount.toFixed(2)} USDT`,
-            `Status: ${status}`,
-            ref ? `Ref: ${ref}` : undefined,
-            date ? `Time: ${date}` : undefined,
-            balanceSnapshot != null ? `Balance after: ${balanceSnapshot} USDT` : undefined,
-          ].filter(Boolean).join(" | ");
-          return details;
-        }),
-      ]);
+      const depositRows = userItems.map((item: any) => {
+        const amount = Number(item?.amountUsdt ?? item?.amount ?? 0);
+        const ref = item?.referenceNumber || item?.transactionNumber || item?.responseData?.hash || item?.responseData?.id || "-";
+        const date = item?.createdAt || item?.updatedAt || item?.responseData?.timestamp || item?.responseData?.createdAt || "";
+        return {
+          amount,
+          ref: String(ref),
+          time: formatUsdtHistoryTime(date),
+        };
+      });
+      const totalAmount = depositRows.reduce((sum: number, row: { amount: number }) => {
+        return sum + (Number.isFinite(row.amount) ? row.amount : 0);
+      }, 0);
+
+      lines = [
+        "💼 USDT Wallet History",
+        "",
+        "📍 Address:",
+        address,
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "📥 Recent Deposits",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+      ];
+
+      depositRows.forEach((row: { amount: number; ref: string; time: string }, index: number) => {
+        lines.push(`✅ + ${row.amount.toFixed(2)} USDT`);
+        lines.push(`🕐 ${row.time}`);
+        lines.push(`🔖 ${row.ref}`);
+        lines.push("");
+        if (index < depositRows.length - 1) {
+          lines.push("──────────────────────────────");
+          lines.push("");
+        }
+      });
+
+      lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      lines.push(`📊 Total Shown: ${depositRows.length} deposits · ${totalAmount.toFixed(2)} USDT`);
+      lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     } else {
       const resp = await callStroWallet("usdt/history", "get", { address });
       const data: any = resp?.data ?? resp;
