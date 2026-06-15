@@ -4602,11 +4602,36 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
   if (options?.forceCreate && shouldSuppressOutgoing(chatId, "usdt_address_create", 3000)) return;
   try {
     const payload = { userId: String(chatId), ...(options?.forceCreate ? { forceCreate: true } : {}) };
-    const resp = await callStroWallet("usdt/address", options?.forceCreate ? "post" : "get", payload);
+    const existingResp = await callStroWallet("usdt/address", "get", { userId: String(chatId) });
+    const existingData: any = existingResp?.data ?? existingResp;
+    const existingRecord = existingData?.address ?? existingData;
+    const existingAddress = existingRecord?.address ? String(existingRecord.address) : null;
+    if (existingAddress) {
+      const lines = [
+        options?.forceCreate ? "🎉 USDT Address Already Created" : "🪙 USDT Wallet (TRC20)",
+        `Address: ${existingAddress}`,
+        options?.forceCreate
+          ? "Your address is already ready. Send USDT (TRC20) to this address to fund your wallet."
+          : "Send USDT (TRC20) to this address to fund your wallet.",
+      ];
+      await editOrSend(chatId, message, lines.join("\n"), {
+        inline_keyboard: [
+          [
+            { text: "📊 USDT Balance", callback_data: "WALLET_USDT_BALANCE" },
+            { text: "🧾 USDT History", callback_data: "WALLET_USDT_HISTORY" },
+          ],
+          [{ text: "💸 Send USDT", callback_data: "WALLET_USDT_SEND" }],
+          [MENU_BUTTON],
+        ],
+      });
+      return;
+    }
+
+    const resp = await callStroWallet("usdt/address", "post", payload);
     const data: any = resp?.data ?? resp;
-    const created = Boolean(data?.created);
+    const created = Boolean(data?.created) || !existingAddress;
     const record = data?.address ?? data;
-    const address = record?.address;
+    const address = record?.address ? String(record.address) : existingAddress;
     if (data?.pending) {
       await editOrSend(chatId, message, "USDT address creation is already in progress. Please wait a moment and try again.", {
         inline_keyboard: [[MENU_BUTTON]],

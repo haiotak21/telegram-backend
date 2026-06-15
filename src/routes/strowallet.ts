@@ -28,6 +28,42 @@ function hasPrismaModel(modelName: string) {
   return Boolean(prismaAny?.[modelName]);
 }
 
+async function queryLatestUsdtAddressRow(userId: string) {
+  if (!isPrismaPersistenceEnabled()) return null;
+  const rows = await prismaAny.$queryRawUnsafe(
+    'SELECT * FROM "UsdtAddress" WHERE "userId" = $1 ORDER BY "createdAt" DESC LIMIT 1',
+    userId
+  );
+  return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+
+async function upsertUsdtAddressRow(params: {
+  userId: string;
+  address: string;
+  label?: string;
+  responseData: any;
+}) {
+  if (!isPrismaPersistenceEnabled()) return null;
+  const responseDataJson = JSON.stringify(params.responseData ?? {});
+  const rows = await prismaAny.$queryRawUnsafe(
+    `INSERT INTO "UsdtAddress" ("userId", "address", "label", "network", "status", "responseData", "createdAt", "updatedAt")
+     VALUES ($1, $2, $3, 'TRC20', 'active', $4::jsonb, NOW(), NOW())
+     ON CONFLICT ("address") DO UPDATE SET
+       "userId" = EXCLUDED."userId",
+       "label" = EXCLUDED."label",
+       "network" = EXCLUDED."network",
+       "status" = EXCLUDED."status",
+       "responseData" = EXCLUDED."responseData",
+       "updatedAt" = NOW()
+     RETURNING *`,
+    params.userId,
+    params.address,
+    params.label || null,
+    responseDataJson
+  );
+  return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+
 function isMongoReady() {
   return mongoose.connection.readyState === 1;
 }
@@ -218,12 +254,8 @@ async function findExistingVirtualAccount(userId: string) {
 }
 
 async function findExistingUsdtAddress(userId: string) {
-  if (isPrismaPersistenceEnabled() && hasPrismaModel("usdtAddress")) {
-    return prismaAny.usdtAddress.findFirst({
-      where: { userId },
-      orderBy: { createdAt: "desc" },
-    });
-  }
+  const prismaRow = await queryLatestUsdtAddressRow(userId);
+  if (prismaRow) return prismaRow;
   if (!isMongoReady()) return null;
   const UsdtAddress = getUsdtAddressModel();
   return UsdtAddress.findOne({ userId }).sort({ createdAt: -1 }).lean();
@@ -1054,8 +1086,20 @@ router.post("/usdt/address", async (req, res) => {
         public_key: maskValue(public_key, 4, 4),
       });
     }
-    const resp = await api.post("generate-address", undefined, { params });
-    const data = resp.data || {};
+    let data: any = {};
+    try {
+      const resp = await api.post("generate-address", undefined, { params });
+      data = resp.data || {};
+    } catch (providerErr: any) {
+      const providerMessage = String(providerErr?.response?.data?.message || providerErr?.response?.data?.error || providerErr?.message || "");
+      if (providerMessage.toLowerCase().includes("address already exists")) {
+        const existing = await findExistingUsdtAddress(body.userId);
+        if (existing) {
+          return ok(res, { address: existing, raw: providerErr?.response?.data || null, created: false }, 200);
+        }
+      }
+      throw providerErr;
+    }
     if (shouldDebugStroWallet()) {
       console.log("[strowallet] usdt address response", data);
     }
@@ -1067,22 +1111,14 @@ router.post("/usdt/address", async (req, res) => {
       return ok(res, { address: null, raw: data }, 200);
     }
 
-    if (isPrismaPersistenceEnabled() && hasPrismaModel("usdtAddress")) {
-      const saved = await prismaAny.usdtAddress.upsert({
-        where: { address },
-        create: {
-          userId: body.userId,
-          address,
-          label,
-          responseData: data as any,
-        },
-        update: {
-          userId: body.userId,
-          label,
-          responseData: data as any,
-        },
+    if (isPrismaPersistenceEnabled()) {
+      const saved = await upsertUsdtAddressRow({
+        userId: body.userId,
+        address,
+        label,
+        responseData: data,
       });
-      const response = { address: saved, raw: data, created: true };
+      const response = { address: saved ?? { userId: body.userId, address, label, network: "TRC20", status: "active" }, raw: data, created: true };
       usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: response.address });
       return ok(res, response, 200);
     }
