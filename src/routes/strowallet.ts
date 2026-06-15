@@ -1,5 +1,6 @@
 import express from "express";
 import axios, { AxiosError } from "axios";
+import crypto from "crypto";
 import http from "http";
 import https from "https";
 import mongoose from "mongoose";
@@ -46,8 +47,8 @@ async function upsertUsdtAddressRow(params: {
   if (!isPrismaPersistenceEnabled()) return null;
   const responseDataJson = JSON.stringify(params.responseData ?? {});
   const rows = await prismaAny.$queryRawUnsafe(
-    `INSERT INTO "UsdtAddress" ("userId", "address", "label", "network", "status", "responseData", "createdAt", "updatedAt")
-     VALUES ($1, $2, $3, 'TRC20', 'active', $4::jsonb, NOW(), NOW())
+    `INSERT INTO "UsdtAddress" ("id", "userId", "address", "label", "network", "status", "responseData", "createdAt", "updatedAt")
+     VALUES ($1, $2, $3, $4, 'TRC20', 'active', $5::jsonb, NOW(), NOW())
      ON CONFLICT ("address") DO UPDATE SET
        "userId" = EXCLUDED."userId",
        "label" = EXCLUDED."label",
@@ -56,6 +57,7 @@ async function upsertUsdtAddressRow(params: {
        "responseData" = EXCLUDED."responseData",
        "updatedAt" = NOW()
      RETURNING *`,
+    crypto.randomUUID(),
     params.userId,
     params.address,
     params.label || null,
