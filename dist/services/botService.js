@@ -12,6 +12,7 @@ exports.notifyCardRequestApproved = notifyCardRequestApproved;
 exports.notifyCardLinkedToUser = notifyCardLinkedToUser;
 exports.notifyCardRequestDeclined = notifyCardRequestDeclined;
 exports.notifyDepositCredited = notifyDepositCredited;
+exports.notifyDepositFailed = notifyDepositFailed;
 exports.notifyDepositReviewDeclined = notifyDepositReviewDeclined;
 exports.sendBroadcastToUser = sendBroadcastToUser;
 exports.sendFriendlyError = sendFriendlyError;
@@ -1817,6 +1818,20 @@ async function notifyDepositCredited(userId, amountUsdt, newBalance) {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
 }
+async function notifyDepositFailed(userId, amountUsdt, reason) {
+    if (!bot)
+        return;
+    const lines = [
+        "❌ Deposit failed",
+        amountUsdt != null ? `Amount: ${amountUsdt} USDT` : undefined,
+        reason ? `Reason: ${reason}` : undefined,
+        "Please retry the deposit or contact support if funds were deducted.",
+    ].filter(Boolean);
+    await bot.sendMessage(Number(userId), lines.join("\n"), {
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+}
 async function notifyDepositReviewDeclined(userId, reason) {
     if (!bot)
         return;
@@ -1971,10 +1986,6 @@ function buildDepositMenuKeyboard() {
         [
             { text: "🏦 Bank Transfer", callback_data: "DEPOSIT_MENU_BANK" },
             { text: "📱 Mobile Money", callback_data: "DEPOSIT_MENU_MOBILE" },
-        ],
-        [
-            { text: "💳 Card Deposit", callback_data: "DEPOSIT_MENU_CARD" },
-            { text: "🌍 International", callback_data: "DEPOSIT_MENU_INTL" },
         ],
         [{ text: "🧮 Conversion", callback_data: "DEPOSIT_CONVERT" }],
         [MENU_BUTTON],

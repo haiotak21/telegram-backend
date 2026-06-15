@@ -7,7 +7,7 @@ import { TelegramLink } from "../models/TelegramLink";
 import Transaction from "../models/Transaction";
 import User from "../models/User";
 import Customer from "../models/Customer";
-import { notifyByCardId, notifyByEmail, notifyCardRequestApproved, notifyCardStatusChanged, notifyDepositCredited } from "./botService";
+import { notifyByCardId, notifyByEmail, notifyCardRequestApproved, notifyCardStatusChanged, notifyDepositCredited, notifyDepositFailed } from "./botService";
 import prisma from "../utils/prisma";
 import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
@@ -195,6 +195,35 @@ export async function processStroWalletEvent(payload: any) {
   const isUsdtIncoming =
     action === "receive_usdt" ||
     (String(payload?.type || "").toLowerCase() === "credit" && (currency === "USDT" || chain === "TRX"));
+
+  const usdtStatusText = String(payload?.status || payload?.state || payload?.txStatus || "").toLowerCase();
+  const isUsdtFailed =
+    usdtStatusText.includes("fail") ||
+    usdtStatusText.includes("declin") ||
+    usdtStatusText.includes("reject") ||
+    usdtStatusText.includes("revers") ||
+    usdtStatusText.includes("cancel") ||
+    usdtStatusText.includes("error");
+
+  if (isUsdtIncoming && address && isUsdtFailed) {
+    let failedUserId: string | null = null;
+    if (isPrismaPersistenceEnabled() && hasPrismaModel("usdtAddress")) {
+      const record = await prismaAny.usdtAddress.findUnique({ where: { address } });
+      failedUserId = record?.userId || null;
+    } else {
+      const record = await UsdtAddress.findOne({ address }).lean();
+      failedUserId = record?.userId || null;
+    }
+
+    if (failedUserId) {
+      const failedAmountRaw = Number(payload?.amount ?? payload?.centAmount);
+      const failedAmount = Number.isFinite(failedAmountRaw)
+        ? (payload?.centAmount != null && payload?.amount == null ? failedAmountRaw / 100 : failedAmountRaw)
+        : undefined;
+      const reason = String(payload?.message || payload?.error || payload?.reason || payload?.status || "Deposit could not be processed");
+      await notifyDepositFailed(failedUserId, failedAmount, reason).catch(() => {});
+    }
+  }
 
   if (isUsdtIncoming && address) {
     let amount = Number(payload?.amount);

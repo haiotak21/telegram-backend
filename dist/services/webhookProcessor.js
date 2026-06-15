@@ -173,6 +173,32 @@ async function processStroWalletEvent(payload) {
     }
     const isUsdtIncoming = action === "receive_usdt" ||
         (String(payload?.type || "").toLowerCase() === "credit" && (currency === "USDT" || chain === "TRX"));
+    const usdtStatusText = String(payload?.status || payload?.state || payload?.txStatus || "").toLowerCase();
+    const isUsdtFailed = usdtStatusText.includes("fail") ||
+        usdtStatusText.includes("declin") ||
+        usdtStatusText.includes("reject") ||
+        usdtStatusText.includes("revers") ||
+        usdtStatusText.includes("cancel") ||
+        usdtStatusText.includes("error");
+    if (isUsdtIncoming && address && isUsdtFailed) {
+        let failedUserId = null;
+        if ((0, persistence_1.isPrismaPersistenceEnabled)() && hasPrismaModel("usdtAddress")) {
+            const record = await prismaAny.usdtAddress.findUnique({ where: { address } });
+            failedUserId = record?.userId || null;
+        }
+        else {
+            const record = await UsdtAddress_1.default.findOne({ address }).lean();
+            failedUserId = record?.userId || null;
+        }
+        if (failedUserId) {
+            const failedAmountRaw = Number(payload?.amount ?? payload?.centAmount);
+            const failedAmount = Number.isFinite(failedAmountRaw)
+                ? (payload?.centAmount != null && payload?.amount == null ? failedAmountRaw / 100 : failedAmountRaw)
+                : undefined;
+            const reason = String(payload?.message || payload?.error || payload?.reason || payload?.status || "Deposit could not be processed");
+            await (0, botService_1.notifyDepositFailed)(failedUserId, failedAmount, reason).catch(() => { });
+        }
+    }
     if (isUsdtIncoming && address) {
         let amount = Number(payload?.amount);
         if (!Number.isFinite(amount) || amount <= 0) {

@@ -7,6 +7,7 @@ import mongoose from "mongoose";
 import { z } from "zod";
 import { ok, fail } from "../utils/apiResponse";
 import User from "../models/User";
+import { notifyDepositCredited } from "../services/botService";
 import prisma from "../utils/prisma";
 import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
@@ -91,6 +92,182 @@ async function listUserUsdtDeposits(userId: string, limit = 10) {
     .sort({ createdAt: -1 })
     .limit(safeLimit)
     .lean();
+}
+
+function extractUsdtHistoryItems(payload: any): any[] {
+  const candidates = [
+    payload?.data?.history,
+    payload?.history,
+    payload?.data?.data,
+    payload?.data,
+    payload,
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate;
+  }
+  return [];
+}
+
+function parseIncomingUsdtHistoryItem(item: any, address: string) {
+  const amountRaw =
+    item?.amount ??
+    item?.value ??
+    item?.usdtAmount ??
+    item?.settledAmount ??
+    item?.quantity ??
+    item?.data?.amount;
+  let amount = Number(amountRaw);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    const centAmount = Number(item?.centAmount ?? item?.data?.centAmount);
+    if (Number.isFinite(centAmount) && centAmount > 0) amount = centAmount / 100;
+  }
+
+  const typeText = String(item?.action || item?.type || item?.event || item?.direction || "").toLowerCase();
+  const statusText = String(item?.status || item?.state || item?.txStatus || "").toLowerCase();
+  const toAddress = String(item?.to || item?.toAddress || item?.address || item?.walletAddress || "").trim();
+  const looksIncoming =
+    typeText.includes("receive") ||
+    typeText.includes("deposit") ||
+    typeText.includes("credit") ||
+    typeText.includes("incoming") ||
+    !typeText;
+  const matchesAddress = !toAddress || toAddress.toLowerCase() === address.toLowerCase();
+  const isSuccessful =
+    !statusText ||
+    statusText.includes("success") ||
+    statusText.includes("complete") ||
+    statusText.includes("confirm") ||
+    statusText.includes("paid");
+
+  const reference = String(
+    item?.reference || item?.referenceNumber || item?.hash || item?.txHash || item?.id || item?.transactionId || ""
+  ).trim();
+  const transactionNumber = String(item?.id || item?.transactionId || item?.txid || item?.txHash || "").trim();
+
+  return {
+    amount,
+    looksIncoming,
+    matchesAddress,
+    isSuccessful,
+    reference,
+    transactionNumber,
+    createdAt: item?.createdAt || item?.timestamp || item?.time || item?.date,
+    raw: item,
+    statusText,
+  };
+}
+
+async function syncUserUsdtDepositsFromProvider(userId: string, address: string, limit = 20) {
+  if (!address) return 0;
+  const public_key = requirePublicKey();
+  const resp = await api.get("get-usdt-history", {
+    params: { public_key, address },
+  });
+
+  const payload = resp?.data ?? {};
+  const items = extractUsdtHistoryItems(payload).slice(0, Math.max(1, Math.min(limit, 100)));
+  let creditedCount = 0;
+
+  for (const rawItem of items) {
+    const parsed = parseIncomingUsdtHistoryItem(rawItem, address);
+    if (!Number.isFinite(parsed.amount) || parsed.amount <= 0) continue;
+    if (!parsed.looksIncoming || !parsed.matchesAddress || !parsed.isSuccessful) continue;
+    if (!parsed.reference && !parsed.transactionNumber) continue;
+
+    if (isPrismaPersistenceEnabled()) {
+      const existing = await prisma.transaction.findFirst({
+        where: {
+          userId,
+          transactionType: "deposit",
+          OR: [
+            ...(parsed.reference ? [{ referenceNumber: parsed.reference }] : []),
+            ...(parsed.transactionNumber ? [{ transactionNumber: parsed.transactionNumber }] : []),
+          ],
+        },
+      });
+      if (existing) continue;
+
+      try {
+        let nextBalance: number | undefined;
+        await prisma.$transaction(async (tx) => {
+          await tx.transaction.create({
+            data: {
+              userId,
+              transactionType: "deposit",
+              paymentMethod: "strowallet",
+              amount: parsed.amount,
+              amountUsdt: parsed.amount,
+              currency: "USDT",
+              transactionNumber: parsed.transactionNumber || undefined,
+              referenceNumber: parsed.reference || undefined,
+              status: "completed",
+              verified: true,
+              responseData: parsed.raw,
+              metadata: {
+                kind: "usdt_history_sync",
+                address,
+                sourceStatus: parsed.statusText || undefined,
+                sourceCreatedAt: parsed.createdAt || undefined,
+              } as any,
+            },
+          });
+          const updated = await tx.user.update({
+            where: { userId },
+            data: { balance: { increment: parsed.amount } },
+          });
+          nextBalance = Number(updated?.balance ?? 0);
+        });
+        await notifyDepositCredited(userId, parsed.amount, nextBalance).catch(() => {});
+        creditedCount += 1;
+      } catch (e: any) {
+        const msg = String(e?.message || "").toLowerCase();
+        if (!msg.includes("unique") && !msg.includes("duplicate")) {
+          throw e;
+        }
+      }
+      continue;
+    }
+
+    if (!isMongoReady()) continue;
+    const Transaction = require("../models/Transaction").default as any;
+    const existing = await Transaction.findOne({
+      userId,
+      transactionType: "deposit",
+      $or: [
+        ...(parsed.reference ? [{ referenceNumber: parsed.reference }] : []),
+        ...(parsed.transactionNumber ? [{ transactionNumber: parsed.transactionNumber }] : []),
+      ],
+    }).lean();
+    if (existing) continue;
+
+    await Transaction.create({
+      userId,
+      transactionType: "deposit",
+      paymentMethod: "strowallet",
+      amount: parsed.amount,
+      amountUsdt: parsed.amount,
+      currency: "USDT",
+      transactionNumber: parsed.transactionNumber || undefined,
+      referenceNumber: parsed.reference || undefined,
+      status: "completed",
+      verified: true,
+      responseData: parsed.raw,
+      metadata: {
+        kind: "usdt_history_sync",
+        address,
+        sourceStatus: parsed.statusText || undefined,
+        sourceCreatedAt: parsed.createdAt || undefined,
+      },
+    });
+    const updated = await User.findOneAndUpdate({ userId }, { $inc: { balance: parsed.amount } }, { new: true }).lean();
+    await notifyDepositCredited(userId, parsed.amount, Number(updated?.balance ?? 0)).catch(() => {});
+    creditedCount += 1;
+  }
+
+  if (shouldDebugStroWallet() && creditedCount > 0) {
+    console.log("[strowallet] usdt history sync credited", { userId, address, creditedCount });
+  }
+  return creditedCount;
 }
 
 function isMongoReady() {
@@ -1203,6 +1380,23 @@ router.get("/usdt/balance", async (req, res) => {
   try {
     const userId = String(req.query.userId || "").trim();
     if (userId) {
+      const shouldSync = String(req.query.sync ?? "true").toLowerCase() !== "false";
+      if (shouldSync) {
+        const addressRow = await findExistingUsdtAddress(userId);
+        const address = addressRow?.address ? String(addressRow.address) : "";
+        if (address) {
+          await syncUserUsdtDepositsFromProvider(userId, address, 30).catch((err) => {
+            if (shouldDebugStroWallet()) {
+              console.warn("[strowallet] usdt balance sync failed", {
+                userId,
+                address,
+                message: err?.message || String(err),
+              });
+            }
+          });
+        }
+      }
+
       if (isPrismaPersistenceEnabled()) {
         const user = await prisma.user.findUnique({ where: { userId } });
         const balance = Number(user?.balance ?? 0);
@@ -1257,6 +1451,23 @@ router.get("/usdt/transactions", async (req, res) => {
     const userId = String(req.query.userId || "").trim();
     if (!userId) return fail(res, "userId is required", 400);
     const limit = Number(req.query.limit || 10);
+    const shouldSync = String(req.query.sync ?? "true").toLowerCase() !== "false";
+    if (shouldSync) {
+      const addressRow = await findExistingUsdtAddress(userId);
+      const address = addressRow?.address ? String(addressRow.address) : "";
+      if (address) {
+        await syncUserUsdtDepositsFromProvider(userId, address, Math.max(20, Number(limit) || 10)).catch((err) => {
+          if (shouldDebugStroWallet()) {
+            console.warn("[strowallet] usdt transactions sync failed", {
+              userId,
+              address,
+              message: err?.message || String(err),
+            });
+          }
+        });
+      }
+    }
+
     const items = await listUserUsdtDeposits(userId, limit);
     return ok(res, { items, total: items.length }, 200);
   } catch (e) {

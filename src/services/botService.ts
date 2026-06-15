@@ -2012,6 +2012,20 @@ export async function notifyDepositCredited(userId: string, amountUsdt: number, 
   });
 }
 
+export async function notifyDepositFailed(userId: string, amountUsdt?: number, reason?: string) {
+  if (!bot) return;
+  const lines = [
+    "❌ Deposit failed",
+    amountUsdt != null ? `Amount: ${amountUsdt} USDT` : undefined,
+    reason ? `Reason: ${reason}` : undefined,
+    "Please retry the deposit or contact support if funds were deducted.",
+  ].filter(Boolean) as string[];
+  await bot.sendMessage(Number(userId), lines.join("\n"), {
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+  });
+}
+
 export async function notifyDepositReviewDeclined(userId: string, reason?: string) {
   if (!bot) return;
   const lines = [
@@ -2178,10 +2192,6 @@ function buildDepositMenuKeyboard(): InlineKeyboardButton[][] {
     [
       { text: "🏦 Bank Transfer", callback_data: "DEPOSIT_MENU_BANK" },
       { text: "📱 Mobile Money", callback_data: "DEPOSIT_MENU_MOBILE" },
-    ],
-    [
-      { text: "💳 Card Deposit", callback_data: "DEPOSIT_MENU_CARD" },
-      { text: "🌍 International", callback_data: "DEPOSIT_MENU_INTL" },
     ],
     [{ text: "🧮 Conversion", callback_data: "DEPOSIT_CONVERT" }],
     [MENU_BUTTON],
