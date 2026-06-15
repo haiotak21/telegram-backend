@@ -70,6 +70,29 @@ function chatKey(value: number | string | undefined): string | null {
   return value != null ? String(value) : null;
 }
 
+function escapeHtml(value: string) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function buildUsdtAddressMessage(address: string, created: boolean) {
+  const heading = created ? "🎉 USDT Address Created" : "🪙 USDT Wallet (TRC20)";
+  const tip = "Tap and hold the address to copy it.";
+  const body = created
+    ? "Your wallet is ready. Send USDT (TRC20) to this address to fund your wallet."
+    : "Send USDT (TRC20) to this address to fund your wallet.";
+  return [
+    heading,
+    `Address: <code>${escapeHtml(address)}</code>`,
+    tip,
+    body,
+  ].join("\n");
+}
+
 function clearPendingAction(value: number | string | undefined) {
   const key = chatKey(value);
   if (key) pendingActions.delete(key);
@@ -4607,14 +4630,7 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
     const existingRecord = existingData?.address ?? existingData;
     const existingAddress = existingRecord?.address ? String(existingRecord.address) : null;
     if (existingAddress) {
-      const lines = [
-        options?.forceCreate ? "🎉 USDT Address Already Created" : "🪙 USDT Wallet (TRC20)",
-        `Address: ${existingAddress}`,
-        options?.forceCreate
-          ? "Your address is already ready. Send USDT (TRC20) to this address to fund your wallet."
-          : "Send USDT (TRC20) to this address to fund your wallet.",
-      ];
-      await editOrSend(chatId, message, lines.join("\n"), {
+      await editOrSend(chatId, message, buildUsdtAddressMessage(existingAddress, Boolean(options?.forceCreate)), {
         inline_keyboard: [
           [
             { text: "📊 USDT Balance", callback_data: "WALLET_USDT_BALANCE" },
@@ -4623,7 +4639,7 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
           [{ text: "💸 Send USDT", callback_data: "WALLET_USDT_SEND" }],
           [MENU_BUTTON],
         ],
-      });
+      }, "HTML");
       return;
     }
 
@@ -4653,14 +4669,7 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
       return;
     }
 
-    const lines = [
-      created ? "🎉 USDT Address Created" : "🪙 USDT Wallet (TRC20)",
-      `Address: ${address}`,
-      created
-        ? "Your wallet is ready. Send USDT (TRC20) to this address to fund your wallet."
-        : "Send USDT (TRC20) to this address to fund your wallet.",
-    ];
-    await editOrSend(chatId, message, lines.join("\n"), {
+    await editOrSend(chatId, message, buildUsdtAddressMessage(address, created), {
       inline_keyboard: [
         [
           { text: "📊 USDT Balance", callback_data: "WALLET_USDT_BALANCE" },
@@ -4669,7 +4678,7 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
         [{ text: "💸 Send USDT", callback_data: "WALLET_USDT_SEND" }],
         [MENU_BUTTON],
       ],
-    });
+    }, "HTML");
   } catch (err: any) {
     const message = err?.response?.data?.error || err?.response?.data?.message || err?.message || "Unexpected error";
     if (String(message).toLowerCase().includes("email")) {
@@ -4748,22 +4757,45 @@ async function sendUsdtHistory(chatId: number, addressInput?: string, message?: 
       return;
     }
 
-    const resp = await callStroWallet("usdt/history", "get", { address });
-    const data: any = resp?.data ?? resp;
-    const payload = data?.data ?? data;
-    let items: any[] = [];
-    if (Array.isArray(payload)) items = payload;
-    else if (Array.isArray(payload?.data)) items = payload.data;
-    else if (Array.isArray(payload?.history)) items = payload.history;
+    const userHistoryResp = await callStroWallet("usdt/transactions", "get", { userId: String(chatId), limit: 5 });
+    const userHistoryData: any = userHistoryResp?.data ?? userHistoryResp;
+    const userItems = Array.isArray(userHistoryData?.items) ? userHistoryData.items : [];
 
-    const lines = [
-      "USDT History",
-      `Address: ${address}`,
-      items.length ? "Latest transactions:" : "No history found yet.",
-      ...items.slice(0, 5).map(formatUsdtHistoryItem),
-    ].filter(Boolean) as string[];
+    let lines: string[] = ["USDT History", `Address: ${address}`];
+    if (userItems.length) {
+      lines = lines.concat([
+        "Recent wallet deposits:",
+        ...userItems.map((item: any) => {
+          const amount = Number(item?.amountUsdt ?? item?.amount ?? 0);
+          const status = item?.status || "completed";
+          const ref = item?.referenceNumber || item?.transactionNumber || item?.responseData?.hash || item?.responseData?.id || "-";
+          const date = item?.createdAt || item?.updatedAt || item?.responseData?.timestamp || item?.responseData?.createdAt || "";
+          const balanceSnapshot = item?.metadata?.balanceAfter || item?.metadata?.walletBalance || undefined;
+          const details = [
+            `+ ${amount.toFixed(2)} USDT`,
+            `Status: ${status}`,
+            ref ? `Ref: ${ref}` : undefined,
+            date ? `Time: ${date}` : undefined,
+            balanceSnapshot != null ? `Balance after: ${balanceSnapshot} USDT` : undefined,
+          ].filter(Boolean).join(" | ");
+          return details;
+        }),
+      ]);
+    } else {
+      const resp = await callStroWallet("usdt/history", "get", { address });
+      const data: any = resp?.data ?? resp;
+      const payload = data?.data ?? data;
+      let items: any[] = [];
+      if (Array.isArray(payload)) items = payload;
+      else if (Array.isArray(payload?.data)) items = payload.data;
+      else if (Array.isArray(payload?.history)) items = payload.history;
+      lines = lines.concat([
+        items.length ? "Latest transactions:" : "No history found yet.",
+        ...items.slice(0, 5).map(formatUsdtHistoryItem),
+      ]);
+    }
 
-    await editOrSend(chatId, message, lines.join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
+    await editOrSend(chatId, message, lines.filter(Boolean).join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
   } catch (err: any) {
     await bot.sendMessage(chatId, `❌ Failed to load USDT history: ${err?.message || "Unexpected error"}`,
       { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }

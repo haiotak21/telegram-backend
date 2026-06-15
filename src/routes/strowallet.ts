@@ -66,6 +66,33 @@ async function upsertUsdtAddressRow(params: {
   return Array.isArray(rows) && rows.length ? rows[0] : null;
 }
 
+async function listUserUsdtDeposits(userId: string, limit = 10) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 10, 50));
+  if (isPrismaPersistenceEnabled()) {
+    return prismaAny.transaction.findMany({
+      where: {
+        userId,
+        transactionType: { in: ["deposit", "manual_deposit"] },
+        paymentMethod: "strowallet",
+        currency: "USDT",
+      },
+      orderBy: { createdAt: "desc" },
+      take: safeLimit,
+    });
+  }
+  if (!isMongoReady()) return [];
+  const Transaction = require("../models/Transaction").default as any;
+  return Transaction.find({
+    userId,
+    transactionType: { $in: ["deposit", "manual_deposit"] },
+    paymentMethod: "strowallet",
+    currency: "USDT",
+  })
+    .sort({ createdAt: -1 })
+    .limit(safeLimit)
+    .lean();
+}
+
 function isMongoReady() {
   return mongoose.connection.readyState === 1;
 }
@@ -1218,6 +1245,20 @@ router.post("/usdt/send", async (req, res) => {
     if (mode) params.mode = mode;
     const resp = await api.post("send-usdt", undefined, { params });
     return ok(res, resp.data, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+// User-level USDT deposit history (internal ledger)
+router.get("/usdt/transactions", async (req, res) => {
+  try {
+    const userId = String(req.query.userId || "").trim();
+    if (!userId) return fail(res, "userId is required", 400);
+    const limit = Number(req.query.limit || 10);
+    const items = await listUserUsdtDeposits(userId, limit);
+    return ok(res, { items, total: items.length }, 200);
   } catch (e) {
     const { status, message } = normalizeError(e);
     return fail(res, message, status);

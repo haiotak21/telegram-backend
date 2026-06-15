@@ -1,5 +1,6 @@
 import express from "express";
 import axios, { AxiosError } from "axios";
+import crypto from "crypto";
 import http from "http";
 import https from "https";
 import mongoose from "mongoose";
@@ -19,6 +20,7 @@ import prisma from "../utils/prisma";
 import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
 const router = express.Router();
+const prismaAny = prisma as any;
 
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
 const API_BASE = "https://strowallet.com/api/";
@@ -195,6 +197,13 @@ const BroadcastUploadSchema = z.object({
   mimeType: z.string().optional(),
 });
 
+const UsdtRecoverySchema = z.object({
+  userId: z.string().min(1),
+  address: z.string().min(5),
+  label: z.string().optional(),
+  responseData: z.any().optional(),
+});
+
 function ensureCloudinary() {
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
   const apiKey = process.env.CLOUDINARY_API_KEY;
@@ -290,6 +299,57 @@ router.post("/broadcast", requireAdmin, async (req, res) => {
       },
       201
     );
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.post("/usdt/recover", requireAdmin, async (req, res) => {
+  try {
+    const body = UsdtRecoverySchema.parse(req.body || {});
+    const address = body.address.trim();
+    const label = body.label || `user:${body.userId}`;
+    const responseData = body.responseData ?? { recovered: true, address };
+
+    if (isPrismaPersistenceEnabled()) {
+      const saved = await prismaAny.usdtAddress.upsert({
+        where: { address },
+        create: {
+          id: crypto.randomUUID(),
+          userId: body.userId,
+          address,
+          label,
+          network: "TRC20",
+          status: "active",
+          responseData,
+        },
+        update: {
+          userId: body.userId,
+          label,
+          network: "TRC20",
+          status: "active",
+          responseData,
+        },
+      });
+      return ok(res, { address: saved }, 200);
+    }
+
+    const UsdtAddress = require("../models/UsdtAddress").default as any;
+    const saved = await UsdtAddress.findOneAndUpdate(
+      { address },
+      {
+        $set: {
+          userId: body.userId,
+          label,
+          network: "TRC20",
+          status: "active",
+          responseData,
+        },
+      },
+      { upsert: true, new: true }
+    );
+    return ok(res, { address: saved }, 200);
   } catch (e) {
     const { status, message } = normalizeError(e);
     return fail(res, message, status);

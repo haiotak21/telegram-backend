@@ -5,11 +5,91 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const axios_1 = __importDefault(require("axios"));
+const crypto_1 = __importDefault(require("crypto"));
 const http_1 = __importDefault(require("http"));
 const https_1 = __importDefault(require("https"));
+const mongoose_1 = __importDefault(require("mongoose"));
 const zod_1 = require("zod");
 const apiResponse_1 = require("../utils/apiResponse");
+const User_1 = __importDefault(require("../models/User"));
+const prisma_1 = __importDefault(require("../utils/prisma"));
+const persistence_1 = require("../utils/persistence");
 const router = express_1.default.Router();
+const prismaAny = prisma_1.default;
+const VIRTUAL_ACCOUNT_CREATE_TTL_MS = Number(process.env.VIRTUAL_ACCOUNT_CREATE_TTL_MS || 60000);
+const USDT_ADDRESS_CREATE_TTL_MS = Number(process.env.USDT_ADDRESS_CREATE_TTL_MS || 60000);
+const virtualAccountCreateLocks = new Map();
+const usdtAddressCreateLocks = new Map();
+function getVirtualBankAccountModel() {
+    return require("../models/VirtualBankAccount").default;
+}
+function getUsdtAddressModel() {
+    return require("../models/UsdtAddress").default;
+}
+function hasPrismaModel(modelName) {
+    return Boolean(prismaAny?.[modelName]);
+}
+async function queryLatestUsdtAddressRow(userId) {
+    if (!(0, persistence_1.isPrismaPersistenceEnabled)())
+        return null;
+    const rows = await prismaAny.$queryRawUnsafe('SELECT * FROM "UsdtAddress" WHERE "userId" = $1 ORDER BY "createdAt" DESC LIMIT 1', userId);
+    return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+async function upsertUsdtAddressRow(params) {
+    if (!(0, persistence_1.isPrismaPersistenceEnabled)())
+        return null;
+    const responseDataJson = JSON.stringify(params.responseData ?? {});
+    const rows = await prismaAny.$queryRawUnsafe(`INSERT INTO "UsdtAddress" ("id", "userId", "address", "label", "network", "status", "responseData", "createdAt", "updatedAt")
+     VALUES ($1, $2, $3, $4, 'TRC20', 'active', $5::jsonb, NOW(), NOW())
+     ON CONFLICT ("address") DO UPDATE SET
+       "userId" = EXCLUDED."userId",
+       "label" = EXCLUDED."label",
+       "network" = EXCLUDED."network",
+       "status" = EXCLUDED."status",
+       "responseData" = EXCLUDED."responseData",
+       "updatedAt" = NOW()
+     RETURNING *`, crypto_1.default.randomUUID(), params.userId, params.address, params.label || null, responseDataJson);
+    return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+async function listUserUsdtDeposits(userId, limit = 10) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 10, 50));
+    if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+        return prismaAny.transaction.findMany({
+            where: {
+                userId,
+                transactionType: { in: ["deposit", "manual_deposit"] },
+                paymentMethod: "strowallet",
+                currency: "USDT",
+            },
+            orderBy: { createdAt: "desc" },
+            take: safeLimit,
+        });
+    }
+    if (!isMongoReady())
+        return [];
+    const Transaction = require("../models/Transaction").default;
+    return Transaction.find({
+        userId,
+        transactionType: { $in: ["deposit", "manual_deposit"] },
+        paymentMethod: "strowallet",
+        currency: "USDT",
+    })
+        .sort({ createdAt: -1 })
+        .limit(safeLimit)
+        .lean();
+}
+function isMongoReady() {
+    return mongoose_1.default.connection.readyState === 1;
+}
+function shouldSkipCreate(lock, userId, ttlMs) {
+    const existing = lock.get(userId);
+    if (!existing)
+        return false;
+    if (Date.now() - existing.startedAt <= ttlMs)
+        return true;
+    lock.delete(userId);
+    return false;
+}
 const BITVCARD_BASE = "https://strowallet.com/api/bitvcard/";
 const API_BASE = "https://strowallet.com/api/"; // for apicard-transactions
 const STROWALLET_PREFER_IPV4 = String(process.env.STROWALLET_PREFER_IPV4 || "true").toLowerCase() !== "false";
@@ -65,6 +145,65 @@ const api = axios_1.default.create({
         Authorization: process.env.STROWALLET_API_KEY ? `Bearer ${process.env.STROWALLET_API_KEY}` : undefined,
     },
 });
+const VirtualBankRequestSchema = zod_1.z.object({
+    userId: zod_1.z.union([zod_1.z.string(), zod_1.z.number()]).transform((v) => String(v)),
+    bank: zod_1.z.string().optional(),
+    email: zod_1.z.string().email().optional(),
+    accountName: zod_1.z.string().min(1).optional(),
+    phone: zod_1.z.string().min(7).optional(),
+    webhookUrl: zod_1.z.string().url().optional(),
+    mode: zod_1.z.string().optional(),
+    developerCode: zod_1.z.string().optional(),
+    forceCreate: zod_1.z.boolean().optional(),
+});
+const UsdtAddressSchema = zod_1.z.object({
+    userId: zod_1.z.union([zod_1.z.string(), zod_1.z.number()]).transform((v) => String(v)),
+    label: zod_1.z.string().optional(),
+    email: zod_1.z.string().email().optional(),
+    webhookUrl: zod_1.z.string().url().optional(),
+    mode: zod_1.z.string().optional(),
+    forceCreate: zod_1.z.boolean().optional(),
+});
+const UsdtHistoryQuerySchema = zod_1.z.object({
+    address: zod_1.z.string().min(5),
+});
+const UsdtSendSchema = zod_1.z.object({
+    address: zod_1.z.string().min(5),
+    amount: zod_1.z.union([zod_1.z.string(), zod_1.z.number()]).transform((v) => String(v)),
+    vipKey: zod_1.z.string().optional(),
+    mode: zod_1.z.string().optional(),
+});
+const BankTransferSchema = zod_1.z.object({
+    amount: zod_1.z.string().min(1),
+    bank_code: zod_1.z.string().min(1),
+    account_number: zod_1.z.string().min(1),
+    narration: zod_1.z.string().min(1),
+    name_enquiry_reference: zod_1.z.string().min(1),
+    SenderName: zod_1.z.string().optional(),
+    mode: zod_1.z.string().optional(),
+});
+const AirtimeSchema = zod_1.z.object({
+    amount: zod_1.z.string().min(1),
+    phone: zod_1.z.string().min(7),
+    service_name: zod_1.z.string().min(1),
+});
+const DataPlanQuerySchema = zod_1.z.object({
+    service_name: zod_1.z.string().min(1),
+});
+const BuyDataSchema = zod_1.z.object({
+    amount: zod_1.z.string().min(1),
+    phone: zod_1.z.string().min(7),
+    service_name: zod_1.z.string().min(1),
+    service_id: zod_1.z.string().min(1),
+    variation_code: zod_1.z.string().min(1),
+});
+const ElectricitySchema = zod_1.z.object({
+    amount: zod_1.z.string().min(1),
+    phone: zod_1.z.string().min(7),
+    service_name: zod_1.z.string().min(1),
+    meter_number: zod_1.z.string().min(1),
+    meter_type: zod_1.z.enum(["prepaid", "postpaid"]),
+});
 function requirePublicKey() {
     const key = process.env.STROWALLET_PUBLIC_KEY;
     if (!key) {
@@ -73,6 +212,84 @@ function requirePublicKey() {
         throw err;
     }
     return key;
+}
+function getWebhookUrl(defaultPath) {
+    const direct = (process.env.STROWALLET_WEBHOOK_URL || "").trim();
+    if (direct)
+        return direct;
+    const base = (process.env.BOT_BACKEND_BASE || "").trim();
+    if (base)
+        return base.replace(/\/$/, "") + defaultPath;
+    const port = process.env.PORT || 3000;
+    return `http://127.0.0.1:${port}${defaultPath}`;
+}
+function normalizeVirtualBankProvider(raw) {
+    const value = String(raw || "").trim().toLowerCase();
+    if (!value || value === "default" || value === "nombank")
+        return "new-customer";
+    if (value === "palmpay")
+        return "palmpay";
+    if (value === "paga")
+        return "paga";
+    if (value === "safehaven")
+        return "safehaven";
+    if (value === "amucha")
+        return "amucha";
+    if (value === "fidelitybank" || value === "fidelity")
+        return "fidelitybank";
+    return "new-customer";
+}
+async function findUserById(userId) {
+    if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+        return prisma_1.default.user.findUnique({ where: { userId } });
+    }
+    return User_1.default.findOne({ userId }).lean();
+}
+async function findExistingVirtualAccount(userId) {
+    if ((0, persistence_1.isPrismaPersistenceEnabled)() && hasPrismaModel("virtualBankAccount")) {
+        return prismaAny.virtualBankAccount.findFirst({
+            where: { userId },
+            orderBy: { createdAt: "desc" },
+        });
+    }
+    if (!isMongoReady())
+        return null;
+    const VirtualBankAccount = getVirtualBankAccountModel();
+    return VirtualBankAccount.findOne({ userId }).sort({ createdAt: -1 }).lean();
+}
+async function findExistingUsdtAddress(userId) {
+    const prismaRow = await queryLatestUsdtAddressRow(userId);
+    if (prismaRow)
+        return prismaRow;
+    if (!isMongoReady())
+        return null;
+    const UsdtAddress = getUsdtAddressModel();
+    return UsdtAddress.findOne({ userId }).sort({ createdAt: -1 }).lean();
+}
+function extractUsdtAddress(payload) {
+    if (!payload || typeof payload !== "object")
+        return undefined;
+    if (payload.address)
+        return String(payload.address);
+    if (payload.data?.address)
+        return String(payload.data.address);
+    if (payload.data?.wallet?.address)
+        return String(payload.data.wallet.address);
+    if (payload.wallet?.address)
+        return String(payload.wallet.address);
+    if (payload.walletAddress)
+        return String(payload.walletAddress);
+    if (payload.data?.walletAddress)
+        return String(payload.data.walletAddress);
+    if (payload.data?.wallet_address)
+        return String(payload.data.wallet_address);
+    if (payload.result?.address)
+        return String(payload.result.address);
+    if (payload.result?.walletAddress)
+        return String(payload.result.walletAddress);
+    if (payload.data?.result?.address)
+        return String(payload.data.result.address);
+    return undefined;
 }
 function normalizeError(e) {
     // Axios error normalization
@@ -634,6 +851,445 @@ router.get("/wallet-balance/:currency", async (req, res) => {
         const currency = /^[A-Z]{3,5}$/.test(currencyRaw) ? currencyRaw : "USD";
         const resp = await api.get(`wallet/balance/${currency}/`, {
             params: { public_key },
+        });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
+    }
+    catch (e) {
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
+    }
+});
+// Virtual Bank Account (create or fetch)
+router.get("/virtual-bank/account", async (req, res) => {
+    try {
+        return (0, apiResponse_1.fail)(res, "Virtual bank accounts are available for Nigerian users only", 403);
+        const userId = String(req.query.userId || "").trim();
+        if (!userId)
+            return (0, apiResponse_1.fail)(res, "userId is required", 400);
+        const existing = await findExistingVirtualAccount(userId);
+        if (!existing)
+            return (0, apiResponse_1.ok)(res, { account: null }, 200);
+        return (0, apiResponse_1.ok)(res, { account: existing }, 200);
+    }
+    catch (e) {
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
+    }
+});
+router.post("/virtual-bank/account", async (req, res) => {
+    try {
+        return (0, apiResponse_1.fail)(res, "Virtual bank accounts are available for Nigerian users only", 403);
+        const body = VirtualBankRequestSchema.parse(req.body || {});
+        if (shouldSkipCreate(virtualAccountCreateLocks, body.userId, VIRTUAL_ACCOUNT_CREATE_TTL_MS)) {
+            const cached = virtualAccountCreateLocks.get(body.userId);
+            return (0, apiResponse_1.ok)(res, { account: cached?.account ?? null, pending: true }, 200);
+        }
+        if (!body.forceCreate) {
+            const existing = await findExistingVirtualAccount(body.userId);
+            if (existing)
+                return (0, apiResponse_1.ok)(res, { account: existing }, 200);
+        }
+        if (body.forceCreate) {
+            virtualAccountCreateLocks.set(body.userId, { startedAt: Date.now() });
+        }
+        const user = await findUserById(body.userId);
+        const accountName = body.accountName || [user?.firstName, user?.lastName].filter(Boolean).join(" ") || user?.username || body.userId;
+        const email = body.email || user?.customerEmail;
+        const phone = body.phone || user?.phoneNumber;
+        if (!email || !phone || !accountName) {
+            return (0, apiResponse_1.fail)(res, "Missing email, phone, or accountName for virtual account", 400);
+        }
+        const public_key = requirePublicKey();
+        const webhook_url = body.webhookUrl || getWebhookUrl("/api/webhook/strowallet");
+        const provider = normalizeVirtualBankProvider(body.bank);
+        const payload = {
+            public_key,
+            email,
+            account_name: accountName,
+            phone,
+            webhook_url,
+        };
+        if (body.mode)
+            payload.mode = body.mode;
+        if (body.developerCode)
+            payload.developer_code = body.developerCode;
+        const resp = await api.post(`virtual-bank/${provider}`, payload, {
+            headers: { "Content-Type": "application/json" },
+        });
+        const data = resp.data || {};
+        const accountNumber = String(data?.accountNumber || data?.account_number || "");
+        const sessionId = String(data?.sessionId || data?.session_id || "");
+        if (!accountNumber) {
+            return (0, apiResponse_1.ok)(res, { account: null, raw: data }, 200);
+        }
+        if ((0, persistence_1.isPrismaPersistenceEnabled)() && hasPrismaModel("virtualBankAccount")) {
+            const saved = await prismaAny.virtualBankAccount.upsert({
+                where: { accountNumber },
+                create: {
+                    userId: body.userId,
+                    provider,
+                    accountNumber,
+                    accountName,
+                    bankName: data?.sourceBankName || data?.bankName || null,
+                    sessionId: sessionId || null,
+                    currency: data?.currency || "NGN",
+                    responseData: data,
+                },
+                update: {
+                    userId: body.userId,
+                    provider,
+                    accountName,
+                    bankName: data?.sourceBankName || data?.bankName || null,
+                    sessionId: sessionId || null,
+                    currency: data?.currency || "NGN",
+                    responseData: data,
+                },
+            });
+            return (0, apiResponse_1.ok)(res, { account: saved, raw: data }, 200);
+        }
+        if (!isMongoReady()) {
+            const response = { account: null, raw: data };
+            if (body.forceCreate)
+                virtualAccountCreateLocks.set(body.userId, { startedAt: Date.now(), account: response.account });
+            return (0, apiResponse_1.ok)(res, response, 200);
+        }
+        const VirtualBankAccount = getVirtualBankAccountModel();
+        const saved = await VirtualBankAccount.findOneAndUpdate({ accountNumber }, {
+            $set: {
+                userId: body.userId,
+                provider,
+                accountName,
+                bankName: data?.sourceBankName || data?.bankName,
+                sessionId: sessionId || undefined,
+                currency: data?.currency || "NGN",
+                responseData: data,
+            },
+        }, { upsert: true, new: true });
+        const response = { account: saved, raw: data };
+        if (body.forceCreate)
+            virtualAccountCreateLocks.set(body.userId, { startedAt: Date.now(), account: response.account });
+        return (0, apiResponse_1.ok)(res, response, 200);
+    }
+    catch (e) {
+        if (req?.body?.userId)
+            virtualAccountCreateLocks.delete(String(req.body.userId));
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
+    }
+});
+// Bank list + account name + transfer
+router.get("/banks/list", async (req, res) => {
+    try {
+        const public_key = requirePublicKey();
+        const resp = await api.get("banks/lists", { params: { public_key } });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
+    }
+    catch (e) {
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
+    }
+});
+router.get("/banks/resolve", async (req, res) => {
+    try {
+        const public_key = requirePublicKey();
+        const bank_code = String(req.query.bank_code || "").trim();
+        const account_number = String(req.query.account_number || "").trim();
+        if (!bank_code || !account_number)
+            return (0, apiResponse_1.fail)(res, "bank_code and account_number are required", 400);
+        const resp = await api.get("banks/get-customer-name", {
+            params: { public_key, bank_code, account_number },
+        });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
+    }
+    catch (e) {
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
+    }
+});
+router.post("/banks/transfer", async (req, res) => {
+    try {
+        const body = BankTransferSchema.parse(req.body || {});
+        const public_key = requirePublicKey();
+        const params = {
+            public_key,
+            amount: body.amount,
+            bank_code: body.bank_code,
+            account_number: body.account_number,
+            narration: body.narration,
+            name_enquiry_reference: body.name_enquiry_reference,
+            SenderName: body.SenderName,
+            mode: body.mode || getDefaultMode(),
+        };
+        const resp = await api.post("banks/request", undefined, { params });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
+    }
+    catch (e) {
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
+    }
+});
+// USDT address
+router.get("/usdt/address", async (req, res) => {
+    try {
+        const userId = String(req.query.userId || "").trim();
+        if (!userId)
+            return (0, apiResponse_1.fail)(res, "userId is required", 400);
+        const existing = await findExistingUsdtAddress(userId);
+        if (!existing) {
+            const cached = usdtAddressCreateLocks.get(userId);
+            if (cached?.address)
+                return (0, apiResponse_1.ok)(res, { address: cached.address }, 200);
+        }
+        if (!existing)
+            return (0, apiResponse_1.ok)(res, { address: null }, 200);
+        return (0, apiResponse_1.ok)(res, { address: existing }, 200);
+    }
+    catch (e) {
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
+    }
+});
+router.post("/usdt/address", async (req, res) => {
+    try {
+        const body = UsdtAddressSchema.parse(req.body || {});
+        if (shouldSkipCreate(usdtAddressCreateLocks, body.userId, USDT_ADDRESS_CREATE_TTL_MS)) {
+            const cached = usdtAddressCreateLocks.get(body.userId);
+            return (0, apiResponse_1.ok)(res, { address: cached?.address ?? null, pending: true }, 200);
+        }
+        const existing = await findExistingUsdtAddress(body.userId);
+        if (existing)
+            return (0, apiResponse_1.ok)(res, { address: existing, created: false }, 200);
+        const cachedExisting = usdtAddressCreateLocks.get(body.userId);
+        if (cachedExisting?.address)
+            return (0, apiResponse_1.ok)(res, { address: cachedExisting.address, created: false }, 200);
+        if (body.forceCreate) {
+            usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now() });
+        }
+        const user = await findUserById(body.userId);
+        const email = body.email || user?.customerEmail;
+        if (!email)
+            return (0, apiResponse_1.fail)(res, "Missing email for USDT address", 400);
+        const public_key = requirePublicKey();
+        const label = body.label || `user:${body.userId}`;
+        const webhook_url = body.webhookUrl || getWebhookUrl("/api/webhook/strowallet");
+        const params = {
+            public_key,
+            label,
+            email,
+            webhook_url,
+            mode: body.mode || getDefaultMode(),
+        };
+        if (shouldDebugStroWallet()) {
+            console.log("[strowallet] usdt address request", {
+                userId: body.userId,
+                label,
+                email: maskValue(email, 3, 3),
+                webhook_url,
+                mode: params.mode,
+                public_key: maskValue(public_key, 4, 4),
+            });
+        }
+        let data = {};
+        try {
+            const resp = await api.post("generate-address", undefined, { params });
+            data = resp.data || {};
+        }
+        catch (providerErr) {
+            const providerMessage = String(providerErr?.response?.data?.message || providerErr?.response?.data?.error || providerErr?.message || "");
+            if (providerMessage.toLowerCase().includes("address already exists")) {
+                const existing = await findExistingUsdtAddress(body.userId);
+                if (existing) {
+                    return (0, apiResponse_1.ok)(res, { address: existing, raw: providerErr?.response?.data || null, created: false }, 200);
+                }
+            }
+            throw providerErr;
+        }
+        if (shouldDebugStroWallet()) {
+            console.log("[strowallet] usdt address response", data);
+        }
+        const address = extractUsdtAddress(data);
+        if (!address) {
+            if (shouldDebugStroWallet()) {
+                console.warn("[strowallet] usdt address missing from response", data);
+            }
+            return (0, apiResponse_1.ok)(res, { address: null, raw: data }, 200);
+        }
+        if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+            const saved = await upsertUsdtAddressRow({
+                userId: body.userId,
+                address,
+                label,
+                responseData: data,
+            });
+            const response = { address: saved ?? { userId: body.userId, address, label, network: "TRC20", status: "active" }, raw: data, created: true };
+            usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: response.address });
+            return (0, apiResponse_1.ok)(res, response, 200);
+        }
+        if (!isMongoReady()) {
+            const response = { address: { address, userId: body.userId, label, network: "TRC20", status: "active" }, raw: data, created: true };
+            usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: response.address });
+            return (0, apiResponse_1.ok)(res, response, 200);
+        }
+        const UsdtAddress = getUsdtAddressModel();
+        const saved = await UsdtAddress.findOneAndUpdate({ address }, {
+            $set: {
+                userId: body.userId,
+                label,
+                responseData: data,
+            },
+        }, { upsert: true, new: true });
+        const response = { address: saved, raw: data, created: true };
+        usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: response.address });
+        return (0, apiResponse_1.ok)(res, response, 200);
+    }
+    catch (e) {
+        if (req?.body?.userId)
+            usdtAddressCreateLocks.delete(String(req.body.userId));
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
+    }
+});
+// USDT history by address
+router.get("/usdt/history", async (req, res) => {
+    try {
+        const query = UsdtHistoryQuerySchema.parse(req.query || {});
+        const public_key = requirePublicKey();
+        const resp = await api.get("get-usdt-history", {
+            params: {
+                public_key,
+                address: query.address,
+            },
+        });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
+    }
+    catch (e) {
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
+    }
+});
+// USDT balance (platform wallet)
+router.get("/usdt/balance", async (req, res) => {
+    try {
+        const userId = String(req.query.userId || "").trim();
+        if (userId) {
+            if ((0, persistence_1.isPrismaPersistenceEnabled)()) {
+                const user = await prisma_1.default.user.findUnique({ where: { userId } });
+                const balance = Number(user?.balance ?? 0);
+                return (0, apiResponse_1.ok)(res, { balance, currency: "USDT", source: "user" }, 200);
+            }
+            if (!isMongoReady())
+                return (0, apiResponse_1.ok)(res, { balance: 0, currency: "USDT", source: "user" }, 200);
+            const user = await User_1.default.findOne({ userId }).lean();
+            const balance = Number(user?.balance ?? 0);
+            return (0, apiResponse_1.ok)(res, { balance, currency: "USDT", source: "user" }, 200);
+        }
+        const public_key = requirePublicKey();
+        const currencyRaw = String(req.query.currency || "USD").trim().toUpperCase();
+        const normalized = currencyRaw === "USDT" ? "USD" : currencyRaw;
+        const currency = /^[A-Z]{3,5}$/.test(normalized) ? normalized : "USD";
+        const resp = await api.get(`wallet/balance/${currency}/`, {
+            params: { public_key },
+        });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
+    }
+    catch (e) {
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
+    }
+});
+// Send USDT
+router.post("/usdt/send", async (req, res) => {
+    try {
+        const body = UsdtSendSchema.parse(req.body || {});
+        const public_key = requirePublicKey();
+        const vip_key = body.vipKey || process.env.STROWALLET_VIP_KEY;
+        if (!vip_key)
+            return (0, apiResponse_1.fail)(res, "Send USDT is available on VIP plan only", 403);
+        const params = {
+            public_key,
+            vip_key,
+            amount: body.amount,
+            address: body.address,
+        };
+        const mode = normalizeMode(body.mode || getDefaultMode());
+        if (mode)
+            params.mode = mode;
+        const resp = await api.post("send-usdt", undefined, { params });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
+    }
+    catch (e) {
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
+    }
+});
+// User-level USDT deposit history (internal ledger)
+router.get("/usdt/transactions", async (req, res) => {
+    try {
+        const userId = String(req.query.userId || "").trim();
+        if (!userId)
+            return (0, apiResponse_1.fail)(res, "userId is required", 400);
+        const limit = Number(req.query.limit || 10);
+        const items = await listUserUsdtDeposits(userId, limit);
+        return (0, apiResponse_1.ok)(res, { items, total: items.length }, 200);
+    }
+    catch (e) {
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
+    }
+});
+// Bills: electricity + airtime + data
+router.post("/bills/electricity", async (req, res) => {
+    try {
+        const body = ElectricitySchema.parse(req.body || {});
+        const public_key = requirePublicKey();
+        const payload = { public_key, ...body };
+        const resp = await api.post("electricity/request", payload, {
+            headers: { "Content-Type": "application/json" },
+        });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
+    }
+    catch (e) {
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
+    }
+});
+// Bills: airtime + data
+router.post("/bills/airtime", async (req, res) => {
+    try {
+        const body = AirtimeSchema.parse(req.body || {});
+        const public_key = requirePublicKey();
+        const payload = { public_key, ...body };
+        const resp = await api.post("buyairtime/request", payload, {
+            headers: { "Content-Type": "application/json" },
+        });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
+    }
+    catch (e) {
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
+    }
+});
+router.get("/bills/data/plans", async (req, res) => {
+    try {
+        const query = DataPlanQuerySchema.parse(req.query || {});
+        const public_key = requirePublicKey();
+        const resp = await api.get("buydata/plans", {
+            params: { public_key, service_name: query.service_name },
+        });
+        return (0, apiResponse_1.ok)(res, resp.data, 200);
+    }
+    catch (e) {
+        const { status, message } = normalizeError(e);
+        return (0, apiResponse_1.fail)(res, message, status);
+    }
+});
+router.post("/bills/data", async (req, res) => {
+    try {
+        const body = BuyDataSchema.parse(req.body || {});
+        const public_key = requirePublicKey();
+        const payload = { public_key, ...body };
+        const resp = await api.post("buydata/request", payload, {
+            headers: { "Content-Type": "application/json" },
         });
         return (0, apiResponse_1.ok)(res, resp.data, 200);
     }
