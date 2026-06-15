@@ -143,6 +143,7 @@ function parseIncomingUsdtHistoryItem(item: any, address: string) {
     item?.reference || item?.referenceNumber || item?.hash || item?.txHash || item?.id || item?.transactionId || ""
   ).trim();
   const transactionNumber = String(item?.id || item?.transactionId || item?.txid || item?.txHash || "").trim();
+  const syntheticKey = crypto.createHash("sha1").update(JSON.stringify(item || {})).digest("hex");
 
   return {
     amount,
@@ -151,6 +152,7 @@ function parseIncomingUsdtHistoryItem(item: any, address: string) {
     isSuccessful,
     reference,
     transactionNumber,
+    syntheticKey,
     createdAt: item?.createdAt || item?.timestamp || item?.time || item?.date,
     raw: item,
     statusText,
@@ -172,7 +174,7 @@ async function syncUserUsdtDepositsFromProvider(userId: string, address: string,
     const parsed = parseIncomingUsdtHistoryItem(rawItem, address);
     if (!Number.isFinite(parsed.amount) || parsed.amount <= 0) continue;
     if (!parsed.looksIncoming || !parsed.matchesAddress || !parsed.isSuccessful) continue;
-    if (!parsed.reference && !parsed.transactionNumber) continue;
+    const fallbackKey = parsed.reference || parsed.transactionNumber || parsed.syntheticKey;
 
     if (isPrismaPersistenceEnabled()) {
       const existing = await prisma.transaction.findFirst({
@@ -182,6 +184,7 @@ async function syncUserUsdtDepositsFromProvider(userId: string, address: string,
           OR: [
             ...(parsed.reference ? [{ referenceNumber: parsed.reference }] : []),
             ...(parsed.transactionNumber ? [{ transactionNumber: parsed.transactionNumber }] : []),
+            ...(parsed.syntheticKey ? [{ referenceNumber: parsed.syntheticKey }] : []),
           ],
         },
       });
@@ -198,8 +201,8 @@ async function syncUserUsdtDepositsFromProvider(userId: string, address: string,
               amount: parsed.amount,
               amountUsdt: parsed.amount,
               currency: "USDT",
-              transactionNumber: parsed.transactionNumber || undefined,
-              referenceNumber: parsed.reference || undefined,
+              transactionNumber: parsed.transactionNumber || fallbackKey || undefined,
+              referenceNumber: parsed.reference || fallbackKey || undefined,
               status: "completed",
               verified: true,
               responseData: parsed.raw,
@@ -236,6 +239,7 @@ async function syncUserUsdtDepositsFromProvider(userId: string, address: string,
       $or: [
         ...(parsed.reference ? [{ referenceNumber: parsed.reference }] : []),
         ...(parsed.transactionNumber ? [{ transactionNumber: parsed.transactionNumber }] : []),
+        ...(parsed.syntheticKey ? [{ referenceNumber: parsed.syntheticKey }] : []),
       ],
     }).lean();
     if (existing) continue;
@@ -247,8 +251,8 @@ async function syncUserUsdtDepositsFromProvider(userId: string, address: string,
       amount: parsed.amount,
       amountUsdt: parsed.amount,
       currency: "USDT",
-      transactionNumber: parsed.transactionNumber || undefined,
-      referenceNumber: parsed.reference || undefined,
+      transactionNumber: parsed.transactionNumber || fallbackKey || undefined,
+      referenceNumber: parsed.reference || fallbackKey || undefined,
       status: "completed",
       verified: true,
       responseData: parsed.raw,
