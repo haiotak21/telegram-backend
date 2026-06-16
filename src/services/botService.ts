@@ -250,6 +250,11 @@ const cardRequestSelections = new Map<number, {
   totalEtb: number;
   rate: number;
 }>();
+const walletCardPaymentSessions = new Map<number, {
+  walletBalance: number;
+  feeUsd: number;
+  loadAmountUsd: number;
+}>();
 const recentCallbackActions = new Map<number, { action: string; at: number }>();
 const recentOutgoing = new Map<number, { key: string; at: number }>();
 const recentUpdates = new Map<string, number>();
@@ -724,6 +729,7 @@ export async function initBot() {
     if (shouldSkipCommand(msg, "cancel")) return;
     clearPendingAction(msg.chat.id);
     cardRequestSelections.delete(msg.chat.id);
+    walletCardPaymentSessions.delete(msg.chat.id);
     cardProfileSessions.delete(msg.chat.id);
     createCardSessions.delete(msg.chat.id);
     bankTransferSessions.delete(msg.chat.id);
@@ -917,6 +923,7 @@ export async function initBot() {
 
     if (action === "CANCEL") {
       clearPendingAction(chatId);
+      walletCardPaymentSessions.delete(chatId);
       cardProfileSessions.delete(chatId);
       createCardSessions.delete(chatId);
       await bot!.answerCallbackQuery(query.id, { text: "Cancelled" }).catch(() => { });
@@ -1072,8 +1079,7 @@ export async function initBot() {
     }
 
     if (action.startsWith("CARDPAY_METHOD::")) {
-      const method = action.replace("CARDPAY_METHOD::", "") as PaymentMethod;
-      if (method !== "telebirr" && method !== "cbe") return;
+      const methodRaw = action.replace("CARDPAY_METHOD::", "");
       await bot!.answerCallbackQuery(query.id).catch(() => { });
       const selection = cardRequestSelections.get(chatId);
       if (!selection) {
@@ -1082,6 +1088,65 @@ export async function initBot() {
         });
         return;
       }
+
+      if (methodRaw === "wallet") {
+        const userId = String(chatId);
+        const walletBalance = roundMoney(await getUserWalletBalanceUsd(userId));
+        const feeUsd = getWalletCardFee(walletBalance);
+        const loadAmountUsd = roundMoney(walletBalance - feeUsd);
+
+        if (walletBalance < feeUsd) {
+          await bot!.sendMessage(chatId, [
+            "❌ Insufficient Wallet Balance",
+            "",
+            `Your wallet balance: $${walletBalance.toFixed(2)}`,
+            `Minimum required:   $${feeUsd.toFixed(2)} (includes card fee)`,
+            "",
+            "You don't have enough to pay via wallet.",
+          ].join("\n"), {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "💳 Pay via Telebirr", callback_data: "CARDPAY_METHOD::telebirr" },
+                  { text: "🏦 Pay via CBE", callback_data: "CARDPAY_METHOD::cbe" },
+                ],
+                [
+                  { text: "💰 Deposit First", callback_data: "WALLET_USDT_ADDRESS" },
+                  MENU_BUTTON,
+                ],
+              ],
+            },
+          });
+          return;
+        }
+
+        walletCardPaymentSessions.set(chatId, { walletBalance, feeUsd, loadAmountUsd });
+        await bot!.sendMessage(chatId, [
+          "💰 Pay via Wallet Balance",
+          "",
+          `Your wallet balance:     $${walletBalance.toFixed(2)}`,
+          "",
+          "📋 Fee Breakdown:",
+          `   Card creation fee:   - $${feeUsd.toFixed(2)}`,
+          `   Loaded on card:        $${loadAmountUsd.toFixed(2)}`,
+          "",
+          `💡 $${feeUsd.toFixed(2)} will be deducted from your wallet.`,
+          `   Your card will be funded with $${loadAmountUsd.toFixed(2)}.`,
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "✅ Confirm & Create Card", callback_data: "CARDPAY_WALLET_CONFIRM_CREATE" },
+                { text: "❌ Cancel", callback_data: "CARDPAY_WALLET_CANCEL" },
+              ],
+            ],
+          },
+        });
+        return;
+      }
+
+      const method = methodRaw as PaymentMethod;
+      if (method !== "telebirr" && method !== "cbe") return;
       {
         const key = chatKey(chatId);
         if (key) pendingActions.set(key, { type: "card_request_verify", method });
@@ -1100,6 +1165,235 @@ export async function initBot() {
       ];
       await bot!.sendMessage(chatId, lines.join("\n"), {
         reply_markup: { force_reply: true },
+      });
+      return;
+    }
+
+    if (action === "CARDPAY_WALLET_CONFIRM_CREATE") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      const session = walletCardPaymentSessions.get(chatId);
+      if (!session) {
+        await bot!.sendMessage(chatId, "Wallet payment session expired. Please choose payment method again.", {
+          reply_markup: { inline_keyboard: buildCardRequestMethodKeyboard() },
+        });
+        return;
+      }
+      await bot!.sendMessage(chatId, [
+        "📋 Final Confirmation",
+        "",
+        `Wallet balance:       $${session.walletBalance.toFixed(2)}`,
+        `Card creation fee:   - $${session.feeUsd.toFixed(2)}`,
+        `Amount on card:        $${session.loadAmountUsd.toFixed(2)}`,
+        "",
+        "⚠️ This cannot be undone.",
+      ].join("\n"), {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: "Confirm ✅", callback_data: "CARDPAY_WALLET_FINAL_CONFIRM" },
+            { text: "❌ Cancel", callback_data: "CARDPAY_WALLET_CANCEL" },
+          ]],
+        },
+      });
+      return;
+    }
+
+    if (action === "CARDPAY_WALLET_CANCEL") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      walletCardPaymentSessions.delete(chatId);
+      const selection = cardRequestSelections.get(chatId);
+      if (!selection) {
+        await bot!.sendMessage(chatId, "Card request payment session expired. Please request a card again.", {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+      }
+      await bot!.sendMessage(chatId, "Choose a payment method:", {
+        reply_markup: { inline_keyboard: buildCardRequestMethodKeyboard() },
+      });
+      return;
+    }
+
+    if (action === "CARDPAY_WALLET_FINAL_CONFIRM") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      const selection = cardRequestSelections.get(chatId);
+      if (!selection) {
+        await bot!.sendMessage(chatId, "Card request payment session expired. Please request a card again.", {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+      }
+
+      const userId = String(chatId);
+      const walletBalance = roundMoney(await getUserWalletBalanceUsd(userId));
+      const feeUsd = getWalletCardFee(walletBalance);
+      const loadAmountUsd = roundMoney(walletBalance - feeUsd);
+      if (walletBalance < feeUsd || loadAmountUsd <= 0) {
+        walletCardPaymentSessions.delete(chatId);
+        await bot!.sendMessage(chatId, [
+          "❌ Insufficient Wallet Balance",
+          "",
+          `Your wallet balance: $${walletBalance.toFixed(2)}`,
+          `Minimum required:   $${feeUsd.toFixed(2)} (includes card fee)`,
+          "",
+          "You don't have enough to pay via wallet.",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "💳 Pay via Telebirr", callback_data: "CARDPAY_METHOD::telebirr" },
+                { text: "🏦 Pay via CBE", callback_data: "CARDPAY_METHOD::cbe" },
+              ],
+              [
+                { text: "💰 Deposit First", callback_data: "WALLET_USDT_ADDRESS" },
+                MENU_BUTTON,
+              ],
+            ],
+          },
+        });
+        return;
+      }
+
+      const { user, customer } = await getUserAndCustomerContext(userId);
+      const result = await submitCardRequest(userId, user, customer, undefined, loadAmountUsd, { silent: true });
+      if (!result.ok || !result.created) {
+        walletCardPaymentSessions.delete(chatId);
+        await bot!.sendMessage(chatId, [
+          "❌ Card Request Failed",
+          "",
+          "Something went wrong while creating your card.",
+          "Your wallet has NOT been debited.",
+          "",
+          "Please try again or contact support.",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "🔄 Try Again", callback_data: "CARDPAY_METHOD::wallet" },
+              { text: "🆘 Support", url: SUPPORT_URL },
+              MENU_BUTTON,
+            ]],
+          },
+        });
+        await bot!.sendMessage(chatId, [
+          "❌ Card Request Failed",
+          "",
+          "Your wallet was not charged.",
+          "Please try again or contact support.",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+      }
+
+      const totalDebit = roundMoney(feeUsd + loadAmountUsd);
+      let updatedBalance = walletBalance;
+      try {
+        if (isPrismaPersistenceEnabled()) {
+          const debit = await prisma.user.updateMany({
+            where: { userId, balance: { gte: totalDebit } },
+            data: { balance: { decrement: totalDebit } },
+          });
+          if (!debit.count) throw new Error("Wallet deduction failed");
+          const updatedUser = await prisma.user.findUnique({ where: { userId } });
+          updatedBalance = Number(updatedUser?.balance ?? 0);
+          await prisma.transaction.create({
+            data: {
+              userId,
+              transactionType: "card",
+              paymentMethod: "wallet",
+              amount: totalDebit,
+              amountUsdt: totalDebit,
+              currency: "USDT",
+              transactionNumber: `CARD_WALLET_${Date.now()}`,
+              referenceNumber: `CARD_WALLET_${Date.now()}_${userId}`,
+              status: "completed",
+              verified: true,
+              metadata: {
+                kind: "card_wallet_payment",
+                feeUsd,
+                loadedUsd: loadAmountUsd,
+                cardId: result.cardId,
+              } as any,
+            },
+          });
+        } else {
+          const updatedUser = await User.findOneAndUpdate(
+            { userId, balance: { $gte: totalDebit } },
+            { $inc: { balance: -totalDebit } },
+            { new: true }
+          ).lean();
+          if (!updatedUser) throw new Error("Wallet deduction failed");
+          updatedBalance = Number(updatedUser?.balance ?? 0);
+          await Transaction.create({
+            userId,
+            transactionType: "card",
+            paymentMethod: "wallet",
+            amount: totalDebit,
+            amountUsdt: totalDebit,
+            currency: "USDT",
+            transactionNumber: `CARD_WALLET_${Date.now()}`,
+            referenceNumber: `CARD_WALLET_${Date.now()}_${userId}`,
+            status: "completed",
+            verified: true,
+            metadata: {
+              kind: "card_wallet_payment",
+              feeUsd,
+              loadedUsd: loadAmountUsd,
+              cardId: result.cardId,
+            },
+          });
+        }
+      } catch {
+        walletCardPaymentSessions.delete(chatId);
+        await bot!.sendMessage(chatId, [
+          "❌ Card Request Failed",
+          "",
+          "Something went wrong while creating your card.",
+          "Your wallet has NOT been debited.",
+          "",
+          "Please try again or contact support.",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "🔄 Try Again", callback_data: "CARDPAY_METHOD::wallet" },
+              { text: "🆘 Support", url: SUPPORT_URL },
+              MENU_BUTTON,
+            ]],
+          },
+        });
+        return;
+      }
+
+      walletCardPaymentSessions.delete(chatId);
+      cardRequestSelections.delete(chatId);
+      const nowLabel = formatUtcDateTime(new Date());
+      await bot!.sendMessage(chatId, [
+        "✅ Card Created Successfully!",
+        "",
+        "💳 Your new card has been created.",
+        `💰 Amount loaded:   $${loadAmountUsd.toFixed(2)}`,
+        `🧾 Fee charged:     $${feeUsd.toFixed(2)}`,
+        `💼 Remaining wallet: $${updatedBalance.toFixed(2)}`,
+        `📅 ${nowLabel}`,
+        "",
+        "Your wallet balance has been updated.",
+      ].join("\n"), {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: "📋 View My Cards", callback_data: "MENU_MY_CARDS" },
+            { text: "🏠 Main Menu", callback_data: "MENU" },
+          ]],
+        },
+      });
+
+      await bot!.sendMessage(chatId, [
+        "✅ Card Created via Wallet!",
+        "",
+        "💳 Your card has been created.",
+        `💰 Loaded: $${loadAmountUsd.toFixed(2)}`,
+        `🧾 Fee deducted: $${feeUsd.toFixed(2)}`,
+        `📅 ${nowLabel}`,
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
       return;
     }
@@ -3379,6 +3673,7 @@ function buildCardRequestMethodKeyboard(): InlineKeyboardButton[][] {
       { text: "Telebirr", callback_data: "CARDPAY_METHOD::telebirr" },
       { text: "CBE", callback_data: "CARDPAY_METHOD::cbe" },
     ],
+    [{ text: "💰 Pay via Wallet Balance", callback_data: "CARDPAY_METHOD::wallet" }],
     [MENU_BUTTON],
   ];
 }
@@ -3386,6 +3681,30 @@ function buildCardRequestMethodKeyboard(): InlineKeyboardButton[][] {
 
 function roundMoney(value: number) {
   return Math.round(value * 100) / 100;
+}
+
+function getWalletCardFee(balanceUsd: number) {
+  if (balanceUsd >= 50) return 5;
+  if (balanceUsd >= 20) return 3;
+  return 2;
+}
+
+function formatUtcDateTime(value: Date) {
+  const month = value.toLocaleString("en-US", { month: "short", timeZone: "UTC" });
+  const day = value.toLocaleString("en-US", { day: "2-digit", timeZone: "UTC" });
+  const year = value.toLocaleString("en-US", { year: "numeric", timeZone: "UTC" });
+  const hour = value.toLocaleString("en-US", { hour: "2-digit", hour12: false, timeZone: "UTC" });
+  const minute = value.toLocaleString("en-US", { minute: "2-digit", hour12: false, timeZone: "UTC" });
+  return `${month} ${day}, ${year} · ${hour}:${minute} UTC`;
+}
+
+async function getUserWalletBalanceUsd(userId: string) {
+  if (isPrismaPersistenceEnabled()) {
+    const user = await prisma.user.findUnique({ where: { userId } });
+    return Number(user?.balance ?? 0);
+  }
+  const user = await User.findOne({ userId }).lean();
+  return Number(user?.balance ?? 0);
 }
 
 function computeDepositQuoteByEtb(amountEtb: number, rate: number) {
@@ -3938,7 +4257,29 @@ async function resolveCreatedCardId(params: {
   return undefined;
 }
 
-async function submitCardRequest(userId: string, user: any, customer: any, message?: any, cardAmountUsd?: number) {
+interface CardRequestSubmissionResult {
+  ok: boolean;
+  created: boolean;
+  cardId?: string;
+  message?: string;
+}
+
+async function submitCardRequest(
+  userId: string,
+  user: any,
+  customer: any,
+  message?: any,
+  cardAmountUsd?: number,
+  options?: { silent?: boolean }
+): Promise<CardRequestSubmissionResult> {
+  const silent = Boolean(options?.silent);
+  const sendUserMessage = async (text: string) => {
+    if (silent) return;
+    await bot!.sendMessage(Number(userId), text, {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+  };
+
   const nameOnCard = [user.firstName, user.lastName].filter(Boolean).join(" ") || message?.from?.first_name || "StroWallet User";
   const pricing = await loadPricingConfig();
   const defaultAmountUsd = Math.max(1, Number(pricing.firstCardAmountUsd ?? 5));
@@ -3949,10 +4290,8 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
   const amount = String(safeCardAmount);
   const customerEmail = user?.customerEmail || customer?.email;
   if (!customerEmail) {
-    await bot!.sendMessage(Number(userId), "❌ Missing email. Please update your card profile and try again.", {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
-    return;
+    await sendUserMessage("❌ Missing email. Please update your card profile and try again.");
+    return { ok: false, created: false, message: "Missing email" };
   }
 
   if (isPrismaPersistenceEnabled()) {
@@ -4001,14 +4340,12 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
           },
         });
 
-        await bot!.sendMessage(Number(userId), [
+        await sendUserMessage([
           "✅ Payment Verified",
           "Card request was accepted and is provisioning.",
           "Please check My Cards again in a moment.",
-        ].join("\n"), {
-          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-        });
-        return;
+        ].join("\n"));
+        return { ok: true, created: false, message: "Provisioning pending" };
       }
 
       await prisma.cardRequest.create({
@@ -4054,32 +4391,26 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
         },
       });
 
-      await bot!.sendMessage(Number(userId), [
+      await sendUserMessage([
         "✅ Payment Verified",
         "Your virtual card has been created successfully.",
         `Card ID: ${cardId}`,
-      ].join("\n"), {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
+      ].join("\n"));
+      return { ok: true, created: true, cardId };
     } catch (e: any) {
       const rawMessageText = e?.response?.data?.error || e?.message || "Your card request could not be approved.";
       const messageText = typeof rawMessageText === "string" ? rawMessageText : JSON.stringify(rawMessageText);
       if (isLowBalanceErrorMessage(messageText)) {
         await notifyAdminLowBalanceIssue(messageText).catch(() => {});
-        await bot!.sendMessage(Number(userId), [
+        await sendUserMessage([
           "✅ Payment received.",
           "Your card request is being processed.",
           "Provisioning may take a little longer than usual.",
-        ].join("\n"), {
-          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-        });
-        return;
+        ].join("\n"));
+        return { ok: false, created: false, message: messageText };
       }
-      await bot!.sendMessage(Number(userId), `❌ ${messageText}`, {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
+      await sendUserMessage(`❌ ${messageText}`);
+      return { ok: false, created: false, message: messageText };
     }
   }
 
@@ -4092,35 +4423,31 @@ async function submitCardRequest(userId: string, user: any, customer: any, messa
       customerEmail,
     });
     if (resp?.data?.ok) {
-      await bot!.sendMessage(Number(userId), [
+      const cardId = resp?.data?.data?.cardId ? String(resp.data.data.cardId) : undefined;
+      await sendUserMessage([
         "✅ Payment Verified",
         "Your virtual card has been created successfully.",
-        resp?.data?.data?.cardId ? `Card ID: ${resp.data.data.cardId}` : undefined,
-      ].filter(Boolean).join("\n"), {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
+        cardId ? `Card ID: ${cardId}` : undefined,
+      ].filter(Boolean).join("\n"));
+      return { ok: true, created: true, cardId };
     } else {
-      await bot!.sendMessage(Number(userId), "❌ Your card request could not be approved.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
+      await sendUserMessage("❌ Your card request could not be approved.");
+      return { ok: false, created: false, message: "Card request not approved" };
     }
   } catch (e: any) {
     const rawMessageText = e?.response?.data?.error || "Your card request could not be approved.";
     const messageText = typeof rawMessageText === "string" ? rawMessageText : JSON.stringify(rawMessageText);
     if (isLowBalanceErrorMessage(messageText)) {
       await notifyAdminLowBalanceIssue(messageText).catch(() => {});
-      await bot!.sendMessage(Number(userId), [
+      await sendUserMessage([
         "✅ Payment received.",
         "Your card request is being processed.",
         "Provisioning may take a little longer than usual.",
-      ].join("\n"), {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
-      return;
+      ].join("\n"));
+      return { ok: false, created: false, message: messageText };
     }
-    await bot!.sendMessage(Number(userId), `❌ ${messageText}`, {
-      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-    });
+    await sendUserMessage(`❌ ${messageText}`);
+    return { ok: false, created: false, message: messageText };
   }
 }
 

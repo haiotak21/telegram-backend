@@ -5,6 +5,9 @@ jest.mock('../src/services/pricingService', () => ({
 jest.mock('../src/services/paymentVerification', () => ({
   verifyPayment: jest.fn(),
 }));
+jest.mock('../src/utils/persistence', () => ({
+  isPrismaPersistenceEnabled: jest.fn(() => false),
+}));
 jest.mock('../src/models/Transaction', () => ({
   create: jest.fn(),
   findOne: jest.fn(),
