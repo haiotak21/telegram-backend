@@ -213,6 +213,11 @@ const UsdtBindAddressSchema = z.object({
   message: "At least one network address is required",
 });
 
+const UsdtResetAddressSchema = z.object({
+  userId: z.string().min(1),
+  networks: z.array(z.enum(["TRC20", "BEP20", "POLYGON"])).optional(),
+});
+
 function tokenFingerprint(token?: string) {
   const raw = String(token || "").trim();
   if (!raw) return "none";
@@ -516,6 +521,66 @@ router.post("/usdt/bind-address", requireAdmin, async (req, res) => {
       bound: saved,
       count: saved.length,
       message: "USDT addresses bound successfully",
+    }, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.post("/usdt/reset-addresses", requireAdmin, async (req, res) => {
+  try {
+    const body = UsdtResetAddressSchema.parse(req.body || {});
+    const userId = body.userId.trim();
+    const networks = Array.isArray(body.networks) ? body.networks : [];
+    const nowIso = new Date().toISOString();
+    const providedToken = req.headers["x-admin-token"] as string | undefined;
+
+    let deleted = 0;
+
+    if (isPrismaPersistenceEnabled()) {
+      if (networks.length) {
+        for (const network of networks) {
+          const rows = await prismaAny.$queryRawUnsafe(
+            `DELETE FROM "UsdtAddress"
+             WHERE "userId" = $1
+               AND UPPER(COALESCE("network", 'TRC20')) = $2
+             RETURNING "id"`,
+            userId,
+            network
+          );
+          deleted += Array.isArray(rows) ? rows.length : 0;
+        }
+      } else {
+        const rows = await prismaAny.$queryRawUnsafe(
+          `DELETE FROM "UsdtAddress"
+           WHERE "userId" = $1
+           RETURNING "id"`,
+          userId
+        );
+        deleted += Array.isArray(rows) ? rows.length : 0;
+      }
+    } else {
+      const UsdtAddress = require("../models/UsdtAddress").default as any;
+      const filter: any = { userId };
+      if (networks.length) filter.network = { $in: networks };
+      const result = await UsdtAddress.deleteMany(filter);
+      deleted = Number(result?.deletedCount || 0);
+    }
+
+    console.log("[admin] usdt reset-addresses", {
+      userId,
+      networks: networks.length ? networks : "all",
+      deleted,
+      token: tokenFingerprint(providedToken),
+      at: nowIso,
+    });
+
+    return ok(res, {
+      userId,
+      networks: networks.length ? networks : ["TRC20", "BEP20", "POLYGON"],
+      deleted,
+      message: "USDT addresses reset successfully",
     }, 200);
   } catch (e) {
     const { status, message } = normalizeError(e);

@@ -782,7 +782,22 @@
 
             <div class="toolbar">
               <button type="submit">Save & Bind Addresses</button>
+              <button id="usdtResetBtn" type="button" class="secondary">Reset User Addresses</button>
               <span class="tag">Admin action</span>
+            </div>
+            <div class="row inline">
+              <label style="display:flex;align-items:center;gap:8px;">
+                <input id="usdtResetTrc20" type="checkbox" checked />
+                Reset TRC20
+              </label>
+              <label style="display:flex;align-items:center;gap:8px;">
+                <input id="usdtResetBep20" type="checkbox" checked />
+                Reset BEP20
+              </label>
+              <label style="display:flex;align-items:center;gap:8px;">
+                <input id="usdtResetPolygon" type="checkbox" checked />
+                Reset POLYGON
+              </label>
             </div>
             <div id="usdtBindStatus" class="status">—</div>
           </form>
@@ -1097,6 +1112,7 @@
         recentStatus: document.getElementById("recentStatus"),
         usdtBindForm: document.getElementById("usdtBindForm"),
         usdtBindStatus: document.getElementById("usdtBindStatus"),
+        usdtResetBtn: document.getElementById("usdtResetBtn"),
         recentLimit: document.getElementById("recentLimit"),
         requestList: document.getElementById("requestList"),
         requestStatusText: document.getElementById("requestStatusText"),
@@ -1184,6 +1200,9 @@
         usdtBindTrc20: document.getElementById("usdtBindTrc20"),
         usdtBindBep20: document.getElementById("usdtBindBep20"),
         usdtBindPolygon: document.getElementById("usdtBindPolygon"),
+        usdtResetTrc20: document.getElementById("usdtResetTrc20"),
+        usdtResetBep20: document.getElementById("usdtResetBep20"),
+        usdtResetPolygon: document.getElementById("usdtResetPolygon"),
       };
 
       let lastConfig = null;
@@ -2203,12 +2222,61 @@
         }
       }
 
+      async function resetUsdtAddresses() {
+        if (!hasToken()) {
+          if (els.usdtBindStatus)
+            els.usdtBindStatus.textContent = "Missing admin token";
+          return showToast("Missing admin token", "error");
+        }
+
+        const userId = (inputs.usdtBindUserId?.value || "").trim();
+        if (!userId) {
+          if (els.usdtBindStatus)
+            els.usdtBindStatus.textContent = "Telegram User ID is required";
+          return;
+        }
+
+        const networks = [];
+        if (inputs.usdtResetTrc20?.checked) networks.push("TRC20");
+        if (inputs.usdtResetBep20?.checked) networks.push("BEP20");
+        if (inputs.usdtResetPolygon?.checked) networks.push("POLYGON");
+        const scopeLabel = networks.length ? networks.join(", ") : "all networks";
+        const confirmed = confirm(`Reset ${scopeLabel} USDT addresses for user ${userId}?`);
+        if (!confirmed) return;
+
+        if (els.usdtBindStatus) els.usdtBindStatus.textContent = "Resetting addresses...";
+        setLoading(els.usdtResetBtn, true);
+        try {
+          const payload = {
+            userId,
+            ...(networks.length ? { networks } : {}),
+          };
+          const data = await safeFetch("/api/admin/usdt/reset-addresses", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+          if (els.usdtBindStatus) {
+            els.usdtBindStatus.textContent = `Reset complete. Deleted ${Number(data?.deleted || 0)} record(s) for user ${userId}.`;
+          }
+          showToast("USDT addresses reset", "success");
+        } catch (err) {
+          const msg = err?.message || "Failed to reset USDT addresses";
+          if (els.usdtBindStatus) els.usdtBindStatus.textContent = msg;
+          showToast(msg, "error");
+        } finally {
+          setLoading(els.usdtResetBtn, false);
+        }
+      }
+
       els.refreshConfig.addEventListener("click", loadConfig);
       if (els.cardTxnRefresh) {
         els.cardTxnRefresh.addEventListener("click", loadCardTransactions);
       }
       if (els.usdtBindForm) {
         els.usdtBindForm.addEventListener("submit", bindUsdtAddresses);
+      }
+      if (els.usdtResetBtn) {
+        els.usdtResetBtn.addEventListener("click", resetUsdtAddresses);
       }
       if (els.declineFeeLoad) {
         els.declineFeeLoad.addEventListener("click", loadDeclineFeeReport);
