@@ -146,13 +146,16 @@ function buildUsdtWalletAddressesMessage(addresses: Array<{ network?: string; ad
   const lines = ["🌐 Your USDT Wallet Addresses", ""];
   for (const network of order) {
     const item = addresses.find((entry) => String(entry.network || "TRC20").toUpperCase() === network);
-    if (!item?.address) continue;
     const meta = networkMeta[network];
     lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     lines.push(`${meta.icon} ${meta.label}`);
     lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    lines.push(String(item.address));
-    lines.push("👆 Tap to copy");
+    if (item?.address) {
+      lines.push(String(item.address));
+      lines.push("👆 Tap to copy");
+    } else {
+      lines.push("Address unavailable right now.");
+    }
     lines.push("");
   }
   lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -161,6 +164,22 @@ function buildUsdtWalletAddressesMessage(addresses: Array<{ network?: string; ad
   lines.push("Sending to wrong network = lost funds.");
   lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
   return lines.join("\n");
+}
+
+function buildUsdtAddressCopyKeyboard(addresses: Array<{ network?: string; address?: string }>) {
+  const rows: InlineKeyboardButton[][] = [];
+  const order = ["TRC20", "BEP20", "POLYGON"];
+  for (const network of order) {
+    const item = addresses.find((entry) => String(entry.network || "TRC20").toUpperCase() === network);
+    if (!item?.address) continue;
+    rows.push([{ text: `📋 Copy ${network}`, copy_text: { text: String(item.address) } }]);
+  }
+  rows.push([
+    { text: "📊 USDT Balance", callback_data: "WALLET_USDT_BALANCE" },
+    { text: "🧾 USDT History", callback_data: "WALLET_USDT_HISTORY" },
+  ]);
+  rows.push([MENU_BUTTON]);
+  return rows;
 }
 
 function clearPendingAction(value: number | string | undefined) {
@@ -450,6 +469,7 @@ const MENU_KEYBOARD: InlineKeyboardButton[][] = [
     { text: "🆘 Support", url: SUPPORT_URL },
   ],
   [
+    { text: "👤 My Info", callback_data: "MENU_USER_INFO" },
     { text: "📢 News", url: NEWS_URL },
   ],
 ];
@@ -2644,14 +2664,12 @@ function buildTransferMenuKeyboard(): InlineKeyboardButton[][] {
       { text: "@Username", callback_data: "TRANSFER_USERNAME" },
       { text: "📱 Phone Number", callback_data: "TRANSFER_PHONE" },
     ],
-    [{ text: "🏦 To Bank Account", callback_data: "TRANSFER_BANK" }],
-    [{ text: "💳 To Card Number", callback_data: "TRANSFER_CARD" }],
     [MENU_BUTTON],
   ];
 }
 
 async function sendTransferMenu(chatId: number, message?: any) {
-  await editOrSend(chatId, message, "Choose a transfer type:", {
+  await editOrSend(chatId, message, "Choose how to find the recipient:", {
     inline_keyboard: buildTransferMenuKeyboard(),
   });
 }
@@ -3718,11 +3736,9 @@ async function handleMenuSelection(action: string, chatId: number, message?: any
     case "TRANSFER_USERNAME":
       return startWalletTransferRecipientPrompt(chatId, "username");
     case "TRANSFER_CARD":
-      return bot!.sendMessage(chatId, "Card-number transfers are not available yet.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
+      return sendTransferMenu(chatId, message);
     case "TRANSFER_BANK":
-      return startBankTransferFlow(chatId, message);
+      return sendTransferMenu(chatId, message);
     case "BILLS_ELECTRICITY":
       return startElectricityFlow(chatId, message);
     case "BILLS_WATER":
@@ -5583,48 +5599,139 @@ async function sendUserInfo(chatId: number, message?: any) {
     getPrimaryCardForUser(String(chatId)),
   ]);
   const { user, customer } = profile;
-  const baseBalance = user?.balance ?? 0;
-  const currency = user?.currency || "USDT";
-  const email = user?.customerEmail || link?.customerEmail;
+  const userId = String(chatId);
+  const baseBalance = Number(user?.balance ?? 0);
+  const email = user?.customerEmail || link?.customerEmail || customer?.email;
+  const phone = user?.phoneNumber || (customer as any)?.phoneNumber;
   const cardId = primaryCard?.cardId;
   const remoteDetail = cardId ? await fetchCardDetailSafe(cardId) : null;
   const walletBalance = Number(baseBalance);
   const cardBalance = Number(remoteDetail?.balance ?? remoteDetail?.available_balance ?? NaN);
-  const last4 = remoteDetail?.last4 || primaryCard?.last4 || (primaryCard as any)?.cardNumber?.slice(-4);
-  const cardStatusRaw = remoteDetail?.status || primaryCard?.status;
-  const cardStatus = cardStatusRaw ? String(cardStatusRaw) : undefined;
-  const cardStatusLabel = cardStatus ? cardStatus.charAt(0).toUpperCase() + cardStatus.slice(1) : undefined;
-  const username = user?.username ? `@${String(user.username)}` : undefined;
+  const cardStatusRaw = String(remoteDetail?.status || primaryCard?.status || "").toLowerCase();
+  const usernameRaw = user?.username || message?.from?.username || "";
+  const username = usernameRaw ? `@${String(usernameRaw).replace(/^@+/, "")}` : "N/A";
+  const fallbackName = [message?.from?.first_name, message?.from?.last_name].filter(Boolean).join(" ").trim();
   const nameSource = user?.firstName || user?.lastName
     ? `${user?.firstName || ""} ${user?.lastName || ""}`.trim()
-    : (user?.username ? String(user.username) : "User");
-  const hasProfile = getCardProfileMissingFields(user, customer).length === 0;
+    : (fallbackName || (usernameRaw ? String(usernameRaw).replace(/^@+/, "") : "User"));
   const hasCard = Boolean(primaryCard);
+  const cardActive = hasCard && !["failed", "terminated", "inactive", "cancelled", "closed"].includes(cardStatusRaw);
+  const cardBalanceUsd = Number.isFinite(cardBalance) ? cardBalance : 0;
+
+  const allTxns = isPrismaPersistenceEnabled()
+    ? await prisma.transaction.findMany({
+        where: { userId },
+        orderBy: { createdAt: "desc" },
+        take: 2000,
+      })
+    : await Transaction.find({ userId }).sort({ createdAt: -1 }).limit(2000).lean();
+
+  let deposits = 0;
+  let transfers = 0;
+  let billsPaid = 0;
+  let topups = 0;
+
+  for (const tx of allTxns as any[]) {
+    const txType = String(tx?.transactionType || "").toLowerCase();
+    const metadata = (tx?.metadata || {}) as any;
+    const source = String(metadata?.source || "").toLowerCase();
+    const kind = String(metadata?.kind || "").toLowerCase();
+    const direction = String(metadata?.direction || "").toLowerCase();
+
+    if (kind === "p2p_transfer" && direction === "debit") {
+      transfers += 1;
+      continue;
+    }
+    if (source === "wallet_card_topup" || source === "auto_deposit_topup") {
+      topups += 1;
+      continue;
+    }
+    if (kind === "bill_payment" || source.startsWith("bill_")) {
+      billsPaid += 1;
+      continue;
+    }
+    if (txType === "deposit" && kind !== "p2p_transfer") {
+      deposits += 1;
+      continue;
+    }
+  }
+
+  const invitedLinks = isPrismaOnlyMode()
+    ? []
+    : await TelegramLink.find({ referrerUserId: userId }).select({ chatId: 1 }).lean();
+  const invitedCount = invitedLinks.length;
+  const invitedIds = invitedLinks.map((item: any) => String(item.chatId));
+
+  let verifiedInvites = 0;
+  if (invitedIds.length) {
+    if (isPrismaPersistenceEnabled()) {
+      const referredUsers = await prisma.user.findMany({
+        where: { userId: { in: invitedIds } },
+        select: { kycStatus: true },
+      });
+      verifiedInvites = referredUsers.filter((item: any) => {
+        const status = String(item?.kycStatus || "").toLowerCase();
+        return status === "approved" || status === "pending";
+      }).length;
+    } else {
+      const referredUsers = await User.find({ userId: { $in: invitedIds } }).select({ kycStatus: 1 }).lean();
+      verifiedInvites = referredUsers.filter((item: any) => {
+        const status = String(item?.kycStatus || "").toLowerCase();
+        return status === "approved" || status === "pending";
+      }).length;
+    }
+  }
+
+  const joinedDate = user?.createdAt ? new Date(user.createdAt) : new Date();
+  const memberSince = joinedDate.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+  const lastSeen = formatUtcDateTime(new Date());
+  const usernameForLink = (botUsername || process.env.TELEGRAM_BOT_USERNAME || "").replace(/^@+/, "").trim();
+  const referralLink = usernameForLink ? `https://t.me/${usernameForLink}?start=ref_${chatId}` : `ref_${chatId}`;
 
   const lines = [
-    "🧑‍💻 Here's Your Profile:",
-    `👤 Name: ${nameSource}${username ? ` (${username})` : ""}`,
-    `👤 User ID: ${chatId}`,
-    `✉️ Email: ${email || "/linkemail"}`,
-    `Card profile: ${hasProfile ? "Ready ✅" : "Incomplete"}`,
-    `Wallet: ${Number.isFinite(walletBalance) ? walletBalance.toFixed(2) : "0.00"} ${currency}`,
-    hasCard && Number.isFinite(cardBalance)
-      ? `Card Balance: ${cardBalance.toFixed(2)} ${(remoteDetail?.currency || primaryCard?.currency || "USD").toUpperCase()}`
-      : undefined,
-    `Cards: ${hasCard ? "1" : "0"}`,
-    "💳 Virtual Card",
-    `• Status: ${hasCard ? (cardStatusLabel || "Active") : "No Card"}`,
-    `• Last 4 digits: ${hasCard ? (last4 || "****") : "****"}`,
-  ].filter(Boolean) as string[];
+    "👤 My Profile",
+    "",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    "🙍 PERSONAL DETAILS",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    `📛 Name:        ${nameSource}`,
+    `🆔 Telegram ID: ${chatId}`,
+    `👤 Username:    ${username}`,
+    `📧 Email:       ${email || "N/A"}`,
+    `📱 Phone:       ${phone || "N/A"}`,
+    "",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    `💳 Card:    ${cardActive ? "✅ Active" : "❌ Inactive"} · $${cardBalanceUsd.toFixed(2)}`,
+    `👛 Wallet:  ✅ Active · $${(Number.isFinite(walletBalance) ? walletBalance : 0).toFixed(2)}`,
+    "",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    "📊 ACTIVITY",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    `📥 Deposits:     ${deposits}`,
+    `💸 Transfers:    ${transfers}`,
+    `🧾 Bills Paid:   ${billsPaid}`,
+    `💳 Top-Ups:      ${topups}`,
+    `📅 Member Since: ${memberSince}`,
+    "",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    "👫 REFERRALS",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    `👥 Invited: ${invitedCount}  ·  ✅ Verified: ${verifiedInvites}`,
+    `🔗 ${referralLink}`,
+    "👆 Tap and hold to copy",
+    "",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    `✅ Active · Last seen: ${lastSeen}`,
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+  ];
 
   await editOrSend(chatId, message, lines.join("\n"), {
-    inline_keyboard: [
-      [
-        { text: "💼 Wallet", callback_data: "MENU_WALLET" },
-        { text: "💳 My Cards", callback_data: "MENU_MY_CARDS" },
-      ],
-      [MENU_BUTTON],
-    ],
+    inline_keyboard: [[MENU_BUTTON]],
   });
 }
 
@@ -5732,15 +5839,10 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
     const existingAddresses = Array.isArray(existingData?.addresses)
       ? existingData.addresses
       : (existingData?.address ? [existingData.address] : []);
-    if (existingAddresses.length) {
+    const uniqueNetworks = new Set(existingAddresses.map((entry: any) => String(entry?.network || "TRC20").toUpperCase()));
+    if (existingAddresses.length && uniqueNetworks.size >= 3 && !options?.forceCreate) {
       await editOrSend(chatId, message, buildUsdtWalletAddressesMessage(existingAddresses), {
-        inline_keyboard: [
-          [
-            { text: "📊 USDT Balance", callback_data: "WALLET_USDT_BALANCE" },
-            { text: "🧾 USDT History", callback_data: "WALLET_USDT_HISTORY" },
-          ],
-          [MENU_BUTTON],
-        ],
+        inline_keyboard: buildUsdtAddressCopyKeyboard(existingAddresses),
       });
       return;
     }
@@ -5771,13 +5873,7 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
     }
 
     await editOrSend(chatId, message, buildUsdtWalletAddressesMessage(addresses), {
-      inline_keyboard: [
-        [
-          { text: "📊 USDT Balance", callback_data: "WALLET_USDT_BALANCE" },
-          { text: "🧾 USDT History", callback_data: "WALLET_USDT_HISTORY" },
-        ],
-        [MENU_BUTTON],
-      ],
+      inline_keyboard: buildUsdtAddressCopyKeyboard(addresses),
     });
   } catch (err: any) {
     const message = err?.response?.data?.error || err?.response?.data?.message || err?.message || "Unexpected error";

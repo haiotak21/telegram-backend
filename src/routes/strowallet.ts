@@ -1427,6 +1427,14 @@ router.post("/usdt/address", async (req, res) => {
         data = resp.data || {};
       } catch (providerErr: any) {
         const providerMessage = String(providerErr?.response?.data?.message || providerErr?.response?.data?.error || providerErr?.message || "");
+        if (shouldDebugStroWallet()) {
+          console.warn("[strowallet] usdt address request failed", {
+            userId: body.userId,
+            network,
+            message: providerMessage,
+            data: providerErr?.response?.data,
+          });
+        }
         if (providerMessage.toLowerCase().includes("address already exists")) {
           const refreshed = await findExistingUsdtAddresses(body.userId);
           const recovered = refreshed.find((row: any) => normalizeUsdtNetwork(row?.network) === network);
