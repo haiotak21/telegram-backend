@@ -595,11 +595,13 @@ function normalizeError(e: any) {
     const ae = e as AxiosError<any>;
     const status = ae.response?.status ?? 400;
     const payload = ae.response?.data;
-    const msg = payload?.message || payload?.error || ae.message || "Request failed";
+    const rawMsg = payload?.message || payload?.error || ae.message || "Request failed";
+    const msg = typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg);
     return { status, message: String(msg) };
   }
   const status = e?.status ?? 400;
-  const msg = e?.message ?? "Request error";
+  const rawMsg = e?.message ?? "Request error";
+  const msg = typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg);
   return { status, message: String(msg) };
 }
 
@@ -1088,11 +1090,38 @@ router.post("/action/status", async (req, res) => {
       : body.action === "unfreeze"
         ? "active"
         : "terminated";
-    const params = { card_id: body.card_id, status, public_key };
+    const params = { card_id: body.card_id, status, public_key } as Record<string, any>;
     const mode = normalizeMode(getDefaultMode());
     if (mode) (params as any).mode = mode;
-    const resp = await bitvcard.post("nfc-cards/status/", undefined, { params });
-    return ok(res, resp.data, 200);
+
+    // Some providers support only active/frozen for this endpoint.
+    if (body.action !== "terminate") {
+      const resp = await bitvcard.post("nfc-cards/status/", undefined, { params });
+      return ok(res, resp.data, 200);
+    }
+
+    const terminateStatuses = ["terminated", "inactive", "closed", "deactivated", "frozen"];
+    let lastError: any = null;
+    for (const candidate of terminateStatuses) {
+      try {
+        const candidateParams = { ...params, status: candidate };
+        const resp = await bitvcard.post("nfc-cards/status/", undefined, { params: candidateParams });
+        const data: any = resp.data || {};
+        return ok(res, {
+          ...data,
+          action: "terminate",
+          statusApplied: candidate,
+          providerSupportsTerminate: candidate !== "frozen",
+          note: candidate === "frozen"
+            ? "Provider does not support hard terminate via this endpoint; fallback status applied."
+            : undefined,
+        }, 200);
+      } catch (err: any) {
+        lastError = err;
+      }
+    }
+
+    throw lastError || new Error("Terminate status not accepted by provider");
   } catch (e) {
     const { status, message } = normalizeError(e);
     return fail(res, message, status);
