@@ -3227,7 +3227,6 @@ function buildWalletMenuKeyboard(): InlineKeyboardButton[][] {
     ],
     [
       { text: "📊 Transaction History", callback_data: "WALLET_TRANSACTIONS" },
-      { text: "⬇️ Withdraw", callback_data: "WALLET_WITHDRAW" },
     ],
     [MENU_BUTTON],
   ];
@@ -6105,7 +6104,6 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
     const payload = { userId: String(chatId), ...(options?.forceCreate ? { forceCreate: true } : {}) };
     const existingResp = await callStroWallet("usdt/address", "get", { userId: String(chatId) });
     const existingAddresses = extractUsdtAddressEntries(existingResp);
-    const uniqueNetworks = new Set(existingAddresses.map((entry: any) => String(entry?.network || "TRC20").toUpperCase()));
     if (existingAddresses.length && !options?.forceCreate) {
       await editOrSend(chatId, message, buildUsdtWalletAddressesMessage(existingAddresses), {
         inline_keyboard: buildUsdtAddressCopyKeyboard(existingAddresses),
@@ -6113,7 +6111,21 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
       return;
     }
 
-    const resp = await callStroWallet("usdt/address", "post", payload);
+    if (!existingAddresses.length && !options?.forceCreate) {
+      await editOrSend(chatId, message, "No USDT address found yet. Tap below to create one.", {
+        inline_keyboard: [
+          [{ text: "➕ Create USDT Address", callback_data: "WALLET_CREATE_USDT_ADDRESS" }],
+          [
+            { text: "📊 USDT Balance", callback_data: "WALLET_USDT_BALANCE" },
+            { text: "🧾 USDT History", callback_data: "WALLET_USDT_HISTORY" },
+          ],
+          [MENU_BUTTON],
+        ],
+      });
+      return;
+    }
+
+    const resp = await callStroWallet("usdt/address", "post", payload, { timeoutMs: 45000 });
     const data: any = resp?.data ?? resp;
     const addresses = extractUsdtAddressEntries(resp);
     if (data?.pending) {
@@ -7668,7 +7680,7 @@ async function callStroWallet(
   path: string,
   method: "get" | "post" | "put",
   data?: any,
-  options?: { silentOnStatus?: number[] }
+  options?: { silentOnStatus?: number[]; timeoutMs?: number }
 ) {
   // Optional: allow synthetic card detail in non-production environments
   if (path === "fetch-card-detail" && String(process.env.STROWALLET_FAKE_FETCH || "").toLowerCase() === "true") {
@@ -7687,7 +7699,8 @@ async function callStroWallet(
   }
   const url = API_BASE.endsWith("/") ? `${API_BASE}${path}` : `${API_BASE}/${path}`;
   try {
-    const resp = await axios({ url, method, data, params: method === "get" ? data : undefined, timeout: 15000 });
+    const timeoutMs = Number(options?.timeoutMs || 15000);
+    const resp = await axios({ url, method, data, params: method === "get" ? data : undefined, timeout: timeoutMs });
     return resp.data;
   } catch (e: any) {
     const requestId = e?.response?.data?.requestId || e?.response?.data?.id;
