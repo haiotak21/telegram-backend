@@ -18,6 +18,12 @@ type UsdtNetwork = typeof SUPPORTED_USDT_NETWORKS[number];
 const VIRTUAL_ACCOUNT_CREATE_TTL_MS = Number(process.env.VIRTUAL_ACCOUNT_CREATE_TTL_MS || 60000);
 const USDT_ADDRESS_CREATE_TTL_MS = Number(process.env.USDT_ADDRESS_CREATE_TTL_MS || 60000);
 const USDT_PROVIDER_CONFLICT_TTL_MS = Number(process.env.USDT_PROVIDER_CONFLICT_TTL_MS || 900000);
+const USDT_ADDRESS_DISCOVERY_ENDPOINTS = String(
+  process.env.USDT_ADDRESS_DISCOVERY_ENDPOINTS || "generate-address,get-address,usdt/address,wallet/address,addresses"
+)
+  .split(",")
+  .map((part) => part.trim())
+  .filter(Boolean);
 const virtualAccountCreateLocks = new Map<string, { startedAt: number; account?: any }>();
 const usdtAddressCreateLocks = new Map<string, { startedAt: number; address?: any }>();
 const usdtProviderConflictLocks = new Map<string, { startedAt: number; networks: UsdtNetwork[] }>();
@@ -701,6 +707,70 @@ function collectUsdtAddressRecords(payload: any): Array<{ address: string; netwo
   return out;
 }
 
+async function discoverUsdtAddressesFromApi(params: {
+  userId: string;
+  email?: string;
+  requestedNetworks: UsdtNetwork[];
+  label?: string;
+}) {
+  const email = String(params.email || "").trim();
+  if (!email || !USDT_ADDRESS_DISCOVERY_ENDPOINTS.length) return [] as Array<{ address: string; network: UsdtNetwork; raw: any; endpoint: string }>;
+
+  const public_key = requirePublicKey();
+  const mode = normalizeMode(getDefaultMode());
+  const label = params.label || `user:${params.userId}`;
+  const discovered: Array<{ address: string; network: UsdtNetwork; raw: any; endpoint: string }> = [];
+  const seen = new Set<string>();
+
+  for (const endpoint of USDT_ADDRESS_DISCOVERY_ENDPOINTS) {
+    for (const network of params.requestedNetworks) {
+      const query = {
+        public_key,
+        email,
+        label,
+        network,
+        ...(mode ? { mode } : {}),
+      } as any;
+
+      try {
+        const resp = await api.get(endpoint, { params: query, timeout: 10000 });
+        const payload = resp?.data;
+        const directAddress = extractUsdtAddressByNetwork(payload, network);
+        if (directAddress && isLikelyUsdtWalletAddress(directAddress)) {
+          const key = `${network}:${directAddress}`;
+          if (!seen.has(key)) {
+            discovered.push({ address: directAddress, network, raw: payload, endpoint });
+            seen.add(key);
+          }
+          continue;
+        }
+
+        const collected = collectUsdtAddressRecords(payload);
+        for (const row of collected) {
+          const inferredNetwork = row.network || (row.address.startsWith("T") ? "TRC20" : network);
+          const key = `${inferredNetwork}:${row.address}`;
+          if (seen.has(key)) continue;
+          discovered.push({ address: row.address, network: inferredNetwork, raw: payload, endpoint });
+          seen.add(key);
+        }
+      } catch {
+        // Endpoint may not exist on this provider deployment; keep trying others.
+      }
+    }
+  }
+
+  if (shouldDebugStroWallet()) {
+    console.log("[strowallet] usdt api discovery", {
+      userId: params.userId,
+      email: maskValue(email, 3, 3),
+      endpointsTried: USDT_ADDRESS_DISCOVERY_ENDPOINTS,
+      count: discovered.length,
+    });
+  }
+
+  return discovered;
+}
+
 async function syncUsdtAddressesFromProvider(userId: string, email?: string) {
   const customerEmail = String(email || "").trim();
   const user = await findUserById(userId);
@@ -780,6 +850,47 @@ async function syncUsdtAddressesFromProvider(userId: string, email?: string) {
     } catch {
       // Continue with other lookup parameter styles.
     }
+  }
+
+  const discoveredViaApi = await discoverUsdtAddressesFromApi({
+    userId,
+    email: customerEmail,
+    requestedNetworks: [...SUPPORTED_USDT_NETWORKS],
+    label: `user:${userId}`,
+  });
+  if (discoveredViaApi.length) {
+    const savedRows: any[] = [];
+    for (const entry of discoveredViaApi) {
+      if (isPrismaPersistenceEnabled()) {
+        const saved = await upsertUsdtAddressRow({
+          userId,
+          address: entry.address,
+          label: `user:${userId}`,
+          network: entry.network,
+          responseData: entry.raw,
+        });
+        savedRows.push(saved ?? { userId, address: entry.address, network: entry.network, status: "active" });
+      } else if (!isMongoReady()) {
+        savedRows.push({ userId, address: entry.address, network: entry.network, status: "active", responseData: entry.raw });
+      } else {
+        const UsdtAddress = getUsdtAddressModel();
+        const saved = await UsdtAddress.findOneAndUpdate(
+          { address: entry.address },
+          {
+            $set: {
+              userId,
+              label: `user:${userId}`,
+              network: entry.network,
+              responseData: entry.raw,
+              status: "active",
+            },
+          },
+          { upsert: true, new: true }
+        );
+        savedRows.push(saved);
+      }
+    }
+    return savedRows;
   }
 
   if (shouldDebugStroWallet()) {
