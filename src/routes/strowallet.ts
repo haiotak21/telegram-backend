@@ -1117,6 +1117,26 @@ router.post("/action/status", async (req, res) => {
             : undefined,
         }, 200);
       } catch (err: any) {
+        const providerMsg = String(
+          err?.response?.data?.message ||
+          err?.response?.data?.error ||
+          err?.message ||
+          ""
+        ).toLowerCase();
+        const alreadyTerminated =
+          providerMsg.includes("already terminated") ||
+          providerMsg.includes("from terminated") ||
+          providerMsg.includes("cannot transition card from terminated");
+
+        if (alreadyTerminated) {
+          return ok(res, {
+            ok: true,
+            action: "terminate",
+            statusApplied: "terminated",
+            providerSupportsTerminate: true,
+            note: "Provider reports card is already terminated.",
+          }, 200);
+        }
         lastError = err;
       }
     }
