@@ -615,6 +615,118 @@ function extractUsdtAddressByNetwork(payload: any, network?: string) {
   return extractUsdtAddress(payload);
 }
 
+function isLikelyUsdtWalletAddress(value?: string) {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  if (/^T[1-9A-HJ-NP-Za-km-z]{25,45}$/.test(raw)) return true; // Tron/TRC20
+  if (/^0x[a-fA-F0-9]{40}$/.test(raw)) return true; // EVM (BEP20/POLYGON)
+  return false;
+}
+
+function inferUsdtNetwork(input: any): UsdtNetwork | undefined {
+  const value = String(input || "").trim().toLowerCase();
+  if (!value) return undefined;
+  if (value.includes("trc20") || value.includes("tron")) return "TRC20";
+  if (value.includes("bep20") || value.includes("bsc") || value.includes("binance")) return "BEP20";
+  if (value.includes("polygon") || value.includes("matic")) return "POLYGON";
+  return undefined;
+}
+
+function collectUsdtAddressRecords(payload: any): Array<{ address: string; network?: UsdtNetwork }> {
+  const out: Array<{ address: string; network?: UsdtNetwork }> = [];
+  const seenNodes = new Set<any>();
+  const seenAddress = new Set<string>();
+  const queue = [payload];
+
+  while (queue.length) {
+    const node = queue.shift();
+    if (!node || typeof node !== "object" || seenNodes.has(node)) continue;
+    seenNodes.add(node);
+
+    const asAny = node as any;
+    const candidates = [
+      asAny.address,
+      asAny.walletAddress,
+      asAny.wallet_address,
+      asAny.depositAddress,
+      asAny.usdtAddress,
+      asAny.usdt_address,
+    ];
+
+    for (const item of candidates) {
+      const address = String(item || "").trim();
+      if (!isLikelyUsdtWalletAddress(address) || seenAddress.has(address)) continue;
+      const network = inferUsdtNetwork(asAny.network || asAny.chain || asAny.blockchain || asAny.protocol)
+        || (address.startsWith("T") ? "TRC20" : undefined);
+      out.push({ address, network });
+      seenAddress.add(address);
+    }
+
+    for (const val of Object.values(asAny)) {
+      if (Array.isArray(val)) {
+        for (const child of val) queue.push(child);
+      } else if (val && typeof val === "object") {
+        queue.push(val);
+      }
+    }
+  }
+
+  return out;
+}
+
+async function syncUsdtAddressesFromProvider(userId: string, email?: string) {
+  const customerEmail = String(email || "").trim();
+  if (!customerEmail) return [] as any[];
+  const public_key = requirePublicKey();
+
+  let payload: any = null;
+  try {
+    const lookup = await bitvcard.get("getcardholder/", {
+      params: { public_key, customerEmail },
+    });
+    payload = lookup?.data || null;
+  } catch {
+    return [];
+  }
+
+  const found = collectUsdtAddressRecords(payload);
+  if (!found.length) return [];
+
+  const savedRows: any[] = [];
+  for (const entry of found) {
+    if (isPrismaPersistenceEnabled()) {
+      const saved = await upsertUsdtAddressRow({
+        userId,
+        address: entry.address,
+        label: `user:${userId}`,
+        network: entry.network || "TRC20",
+        responseData: payload,
+      });
+      savedRows.push(saved ?? { userId, address: entry.address, network: entry.network || "TRC20", status: "active" });
+    } else if (!isMongoReady()) {
+      savedRows.push({ userId, address: entry.address, network: entry.network || "TRC20", status: "active", responseData: payload });
+    } else {
+      const UsdtAddress = getUsdtAddressModel();
+      const saved = await UsdtAddress.findOneAndUpdate(
+        { address: entry.address },
+        {
+          $set: {
+            userId,
+            label: `user:${userId}`,
+            network: entry.network || "TRC20",
+            responseData: payload,
+            status: "active",
+          },
+        },
+        { upsert: true, new: true }
+      );
+      savedRows.push(saved);
+    }
+  }
+
+  return savedRows;
+}
+
 function normalizeError(e: any) {
   // Axios error normalization
   if (typeof (axios as any).isAxiosError === "function" && (axios as any).isAxiosError(e)) {
@@ -1425,7 +1537,14 @@ router.get("/usdt/address", async (req, res) => {
   try {
     const userId = String(req.query.userId || "").trim();
     if (!userId) return fail(res, "userId is required", 400);
-    const existing = await findExistingUsdtAddresses(userId);
+    let existing = await findExistingUsdtAddresses(userId);
+    if (!existing.length) {
+      const user = await findUserById(userId);
+      const discovered = await syncUsdtAddressesFromProvider(userId, user?.customerEmail || undefined);
+      if (discovered.length) {
+        existing = await findExistingUsdtAddresses(userId);
+      }
+    }
     if (!existing.length) {
       const cached = usdtAddressCreateLocks.get(userId);
       if (cached?.address) return ok(res, { addresses: Array.isArray(cached.address) ? cached.address : [cached.address], address: Array.isArray(cached.address) ? cached.address[0] : cached.address }, 200);
@@ -1545,6 +1664,13 @@ router.post("/usdt/address", async (req, res) => {
           const recovered = refreshed.find((row: any) => normalizeUsdtNetwork(row?.network) === network);
           if (recovered) {
             createdAddresses.push(recovered);
+            continue;
+          }
+
+          const discovered = await syncUsdtAddressesFromProvider(body.userId, email);
+          const discoveredByNetwork = discovered.find((row: any) => normalizeUsdtNetwork(row?.network) === network);
+          if (discoveredByNetwork) {
+            createdAddresses.push(discoveredByNetwork);
             continue;
           }
         }
