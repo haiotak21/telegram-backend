@@ -409,6 +409,9 @@
           <button class="menu-btn" data-target="depositRequests">
             Deposit Requests
           </button>
+          <button class="menu-btn" data-target="usdtBind">
+            Bind USDT Addresses
+          </button>
           <button class="menu-btn" data-target="cardManagement">
             Card Management
           </button>
@@ -759,6 +762,32 @@
           <div class="status" id="recentStatus"></div>
         </section>
 
+        <section class="card panel-view" data-view="usdtBind">
+          <h2>Bind USDT Addresses</h2>
+          <p class="sub">
+            Use when provider confirms addresses exist but your local records are missing.
+          </p>
+          <form id="usdtBindForm" class="row">
+            <label>Telegram User ID</label>
+            <input id="usdtBindUserId" type="text" placeholder="e.g. 1289295140" required />
+
+            <label>TRC20 Address (optional)</label>
+            <input id="usdtBindTrc20" type="text" placeholder="T..." />
+
+            <label>BEP20 Address (optional)</label>
+            <input id="usdtBindBep20" type="text" placeholder="0x..." />
+
+            <label>POLYGON Address (optional)</label>
+            <input id="usdtBindPolygon" type="text" placeholder="0x..." />
+
+            <div class="toolbar">
+              <button type="submit">Save & Bind Addresses</button>
+              <span class="tag">Admin action</span>
+            </div>
+            <div id="usdtBindStatus" class="status">—</div>
+          </form>
+        </section>
+
         <section class="card panel-view" data-view="cardManagement">
           <div
             class="toolbar"
@@ -1066,6 +1095,8 @@
         loadRecent: document.getElementById("loadRecent"),
         recentList: document.getElementById("recentList"),
         recentStatus: document.getElementById("recentStatus"),
+        usdtBindForm: document.getElementById("usdtBindForm"),
+        usdtBindStatus: document.getElementById("usdtBindStatus"),
         recentLimit: document.getElementById("recentLimit"),
         requestList: document.getElementById("requestList"),
         requestStatusText: document.getElementById("requestStatusText"),
@@ -1149,6 +1180,10 @@
         tuCardId: document.getElementById("tuCardId"),
         tuAmountUsdt: document.getElementById("tuAmountUsdt"),
         tuMode: document.getElementById("tuMode"),
+        usdtBindUserId: document.getElementById("usdtBindUserId"),
+        usdtBindTrc20: document.getElementById("usdtBindTrc20"),
+        usdtBindBep20: document.getElementById("usdtBindBep20"),
+        usdtBindPolygon: document.getElementById("usdtBindPolygon"),
       };
 
       let lastConfig = null;
@@ -2116,9 +2151,64 @@
         }
       }
 
+      async function bindUsdtAddresses(evt) {
+        if (evt) evt.preventDefault();
+        if (!hasToken()) {
+          if (els.usdtBindStatus)
+            els.usdtBindStatus.textContent = "Missing admin token";
+          return showToast("Missing admin token", "error");
+        }
+
+        const userId = (inputs.usdtBindUserId?.value || "").trim();
+        const trc20 = (inputs.usdtBindTrc20?.value || "").trim();
+        const bep20 = (inputs.usdtBindBep20?.value || "").trim();
+        const polygon = (inputs.usdtBindPolygon?.value || "").trim();
+
+        if (!userId) {
+          if (els.usdtBindStatus)
+            els.usdtBindStatus.textContent = "Telegram User ID is required";
+          return;
+        }
+        if (!trc20 && !bep20 && !polygon) {
+          if (els.usdtBindStatus)
+            els.usdtBindStatus.textContent = "At least one network address is required";
+          return;
+        }
+
+        if (els.usdtBindStatus) els.usdtBindStatus.textContent = "Binding addresses...";
+        setLoading(els.usdtBindForm?.querySelector("button[type=submit]"), true);
+        try {
+          const payload = {
+            userId,
+            ...(trc20 ? { trc20 } : {}),
+            ...(bep20 ? { bep20 } : {}),
+            ...(polygon ? { polygon } : {}),
+          };
+          const data = await safeFetch("/api/admin/usdt/bind-address", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+
+          const count = Number(data?.count || 0);
+          if (els.usdtBindStatus) {
+            els.usdtBindStatus.textContent = `Bound ${count} address${count === 1 ? "" : "es"} for user ${userId}.`;
+          }
+          showToast("USDT addresses bound", "success");
+        } catch (err) {
+          const msg = err?.message || "Failed to bind USDT addresses";
+          if (els.usdtBindStatus) els.usdtBindStatus.textContent = msg;
+          showToast(msg, "error");
+        } finally {
+          setLoading(els.usdtBindForm?.querySelector("button[type=submit]"), false);
+        }
+      }
+
       els.refreshConfig.addEventListener("click", loadConfig);
       if (els.cardTxnRefresh) {
         els.cardTxnRefresh.addEventListener("click", loadCardTransactions);
+      }
+      if (els.usdtBindForm) {
+        els.usdtBindForm.addEventListener("submit", bindUsdtAddresses);
       }
       if (els.declineFeeLoad) {
         els.declineFeeLoad.addEventListener("click", loadDeclineFeeReport);
