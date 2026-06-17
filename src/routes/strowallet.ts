@@ -17,8 +17,10 @@ const SUPPORTED_USDT_NETWORKS = ["TRC20", "BEP20", "POLYGON"] as const;
 type UsdtNetwork = typeof SUPPORTED_USDT_NETWORKS[number];
 const VIRTUAL_ACCOUNT_CREATE_TTL_MS = Number(process.env.VIRTUAL_ACCOUNT_CREATE_TTL_MS || 60000);
 const USDT_ADDRESS_CREATE_TTL_MS = Number(process.env.USDT_ADDRESS_CREATE_TTL_MS || 60000);
+const USDT_PROVIDER_CONFLICT_TTL_MS = Number(process.env.USDT_PROVIDER_CONFLICT_TTL_MS || 900000);
 const virtualAccountCreateLocks = new Map<string, { startedAt: number; account?: any }>();
 const usdtAddressCreateLocks = new Map<string, { startedAt: number; address?: any }>();
+const usdtProviderConflictLocks = new Map<string, { startedAt: number; networks: UsdtNetwork[] }>();
 
 function getVirtualBankAccountModel() {
   return require("../models/VirtualBankAccount").default as any;
@@ -1561,16 +1563,36 @@ router.get("/usdt/address", async (req, res) => {
 router.post("/usdt/address", async (req, res) => {
   try {
     const body = UsdtAddressSchema.parse(req.body || {});
+    const requestedNetworks = body.network ? [normalizeUsdtNetwork(body.network)] : [...SUPPORTED_USDT_NETWORKS];
+    const activeProviderConflict = usdtProviderConflictLocks.get(body.userId);
+    if (activeProviderConflict) {
+      if (Date.now() - activeProviderConflict.startedAt <= USDT_PROVIDER_CONFLICT_TTL_MS) {
+        const relevant = requestedNetworks.every((network) => activeProviderConflict.networks.includes(network));
+        if (relevant) {
+          return ok(res, {
+            address: null,
+            addresses: [],
+            created: false,
+            status: "provider_conflict",
+            message: "Address exists on provider but not locally stored. Admin action required.",
+            networks: activeProviderConflict.networks,
+          }, 200);
+        }
+      } else {
+        usdtProviderConflictLocks.delete(body.userId);
+      }
+    }
+
     if (shouldSkipCreate(usdtAddressCreateLocks, body.userId, USDT_ADDRESS_CREATE_TTL_MS)) {
       const cached = usdtAddressCreateLocks.get(body.userId);
       return ok(res, { address: cached?.address ?? null, pending: true }, 200);
     }
     const existing = await findExistingUsdtAddresses(body.userId);
-    const requestedNetworks = body.network ? [normalizeUsdtNetwork(body.network)] : [...SUPPORTED_USDT_NETWORKS];
     const existingByNetwork = requestedNetworks
       .map((network) => existing.find((row: any) => normalizeUsdtNetwork(row?.network) === network))
       .filter(Boolean);
     if (existingByNetwork.length === requestedNetworks.length) {
+      usdtProviderConflictLocks.delete(body.userId);
       return ok(res, { address: existingByNetwork[0], addresses: existingByNetwork, created: false }, 200);
     }
     const cachedExisting = usdtAddressCreateLocks.get(body.userId);
@@ -1592,6 +1614,7 @@ router.post("/usdt/address", async (req, res) => {
     const webhook_url = body.webhookUrl || getWebhookUrl("/api/webhook/strowallet");
     const createdAddresses: any[] = [];
     const rawResponses: any[] = [];
+    const providerConflictNetworks = new Set<UsdtNetwork>();
 
     for (const network of requestedNetworks) {
       const existingForNetwork = existing.find((row: any) => normalizeUsdtNetwork(row?.network) === network);
@@ -1673,6 +1696,15 @@ router.post("/usdt/address", async (req, res) => {
             createdAddresses.push(discoveredByNetwork);
             continue;
           }
+
+          providerConflictNetworks.add(network);
+          rawResponses.push({
+            network,
+            status: "provider_conflict",
+            error: "Address exists on provider but not locally stored. Admin action required.",
+            provider: providerErr?.response?.data || providerMessage,
+          });
+          continue;
         }
         rawResponses.push({ network, error: providerErr?.response?.data || providerMessage });
         continue;
@@ -1701,6 +1733,31 @@ router.post("/usdt/address", async (req, res) => {
     }
 
     const ordered = SUPPORTED_USDT_NETWORKS.map((network) => createdAddresses.find((row: any) => normalizeUsdtNetwork(row?.network) === network)).filter(Boolean);
+    if (!ordered.length && providerConflictNetworks.size) {
+      const networks = Array.from(providerConflictNetworks);
+      usdtProviderConflictLocks.set(body.userId, {
+        startedAt: Date.now(),
+        networks,
+      });
+      console.warn("[strowallet] usdt provider conflict", {
+        userId: body.userId,
+        networks,
+        message: "Address exists on provider but not locally stored. Admin action required.",
+      });
+      return ok(res, {
+        address: null,
+        addresses: [],
+        created: false,
+        status: "provider_conflict",
+        message: "Address exists on provider but not locally stored. Admin action required.",
+        networks,
+        raw: rawResponses,
+      }, 200);
+    }
+
+    if (ordered.length) {
+      usdtProviderConflictLocks.delete(body.userId);
+    }
     const response = { address: ordered[0] || null, addresses: ordered, raw: rawResponses, created: ordered.length > 0 };
     usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: ordered });
     return ok(res, response, 200);

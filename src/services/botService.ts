@@ -6128,6 +6128,20 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
     const resp = await callStroWallet("usdt/address", "post", payload, { timeoutMs: 45000 });
     const data: any = resp?.data ?? resp;
     const addresses = extractUsdtAddressEntries(resp);
+    if (data?.status === "provider_conflict") {
+      await editOrSend(chatId, message, [
+        "⚠️ USDT Wallet Setup Pending",
+        "",
+        "Your wallet address already exists on",
+        "the provider, but it is not synced yet.",
+        "",
+        "Please contact support if this",
+        "persists.",
+      ].join("\n"), {
+        inline_keyboard: [[MENU_BUTTON]],
+      });
+      return;
+    }
     if (data?.pending) {
       await editOrSend(chatId, message, "USDT address creation is already in progress. Please wait a moment and try again.", {
         inline_keyboard: [[MENU_BUTTON]],

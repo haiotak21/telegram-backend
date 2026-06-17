@@ -204,6 +204,78 @@ const UsdtRecoverySchema = z.object({
   responseData: z.any().optional(),
 });
 
+const UsdtBindAddressSchema = z.object({
+  userId: z.string().min(1),
+  trc20: z.string().min(10).optional(),
+  bep20: z.string().min(10).optional(),
+  polygon: z.string().min(10).optional(),
+}).refine((value) => Boolean(value.trc20 || value.bep20 || value.polygon), {
+  message: "At least one network address is required",
+});
+
+function tokenFingerprint(token?: string) {
+  const raw = String(token || "").trim();
+  if (!raw) return "none";
+  if (raw.length <= 8) return `${raw[0] || "*"}***${raw[raw.length - 1] || "*"}`;
+  return `${raw.slice(0, 4)}***${raw.slice(-4)}`;
+}
+
+async function upsertUsdtByUserNetworkPrisma(params: {
+  userId: string;
+  network: "TRC20" | "BEP20" | "POLYGON";
+  address: string;
+  label: string;
+  responseData: any;
+}) {
+  const responseDataJson = JSON.stringify(params.responseData ?? {});
+  const existingRows = await prismaAny.$queryRawUnsafe(
+    'SELECT "id" FROM "UsdtAddress" WHERE "userId" = $1 AND UPPER(COALESCE("network", \'\')) = $2 ORDER BY "updatedAt" DESC LIMIT 1',
+    params.userId,
+    params.network
+  );
+  const existing = Array.isArray(existingRows) && existingRows.length ? existingRows[0] : null;
+
+  if (existing?.id) {
+    const updatedRows = await prismaAny.$queryRawUnsafe(
+      `UPDATE "UsdtAddress"
+       SET "address" = $1,
+           "label" = $2,
+           "network" = $3,
+           "status" = 'active',
+           "responseData" = $4::jsonb,
+           "updatedAt" = NOW()
+       WHERE "id" = $5
+       RETURNING *`,
+      params.address,
+      params.label,
+      params.network,
+      responseDataJson,
+      String(existing.id)
+    );
+    return Array.isArray(updatedRows) && updatedRows.length ? updatedRows[0] : null;
+  }
+
+  const insertedRows = await prismaAny.$queryRawUnsafe(
+    `INSERT INTO "UsdtAddress" ("id", "userId", "address", "label", "network", "status", "responseData", "createdAt", "updatedAt")
+     VALUES ($1, $2, $3, $4, $5, 'active', $6::jsonb, NOW(), NOW())
+     ON CONFLICT ("address") DO UPDATE SET
+       "userId" = EXCLUDED."userId",
+       "label" = EXCLUDED."label",
+       "network" = EXCLUDED."network",
+       "status" = EXCLUDED."status",
+       "responseData" = EXCLUDED."responseData",
+       "updatedAt" = NOW()
+     RETURNING *`,
+    crypto.randomUUID(),
+    params.userId,
+    params.address,
+    params.label,
+    params.network,
+    responseDataJson
+  );
+  return Array.isArray(insertedRows) && insertedRows.length ? insertedRows[0] : null;
+}
+
 function ensureCloudinary() {
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
   const apiKey = process.env.CLOUDINARY_API_KEY;
@@ -350,6 +422,101 @@ router.post("/usdt/recover", requireAdmin, async (req, res) => {
       { upsert: true, new: true }
     );
     return ok(res, { address: saved }, 200);
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.post("/usdt/bind-address", requireAdmin, async (req, res) => {
+  try {
+    const body = UsdtBindAddressSchema.parse(req.body || {});
+    const userId = body.userId.trim();
+    const label = `user:${userId}`;
+    const rowsToBind = [
+      { network: "TRC20" as const, address: body.trc20?.trim() || "" },
+      { network: "BEP20" as const, address: body.bep20?.trim() || "" },
+      { network: "POLYGON" as const, address: body.polygon?.trim() || "" },
+    ].filter((item) => Boolean(item.address));
+
+    const saved: any[] = [];
+    const nowIso = new Date().toISOString();
+    const providedToken = req.headers["x-admin-token"] as string | undefined;
+
+    if (isPrismaPersistenceEnabled()) {
+      for (const row of rowsToBind) {
+        const responseData = {
+          source: "admin_bind",
+          at: nowIso,
+          network: row.network,
+          userId,
+        };
+        const bound = await upsertUsdtByUserNetworkPrisma({
+          userId,
+          network: row.network,
+          address: row.address,
+          label,
+          responseData,
+        });
+        if (bound) saved.push(bound);
+      }
+    } else {
+      const UsdtAddress = require("../models/UsdtAddress").default as any;
+      for (const row of rowsToBind) {
+        const responseData = {
+          source: "admin_bind",
+          at: nowIso,
+          network: row.network,
+          userId,
+        };
+        let bound: any;
+        try {
+          bound = await UsdtAddress.findOneAndUpdate(
+            { userId, network: row.network },
+            {
+              $set: {
+                userId,
+                address: row.address,
+                label,
+                network: row.network,
+                status: "active",
+                responseData,
+              },
+            },
+            { upsert: true, new: true }
+          );
+        } catch {
+          bound = await UsdtAddress.findOneAndUpdate(
+            { address: row.address },
+            {
+              $set: {
+                userId,
+                label,
+                network: row.network,
+                status: "active",
+                responseData,
+              },
+            },
+            { upsert: true, new: true }
+          );
+        }
+        if (bound) saved.push(bound);
+      }
+    }
+
+    console.log("[admin] usdt bind-address", {
+      userId,
+      networks: rowsToBind.map((row) => row.network),
+      token: tokenFingerprint(providedToken),
+      at: nowIso,
+    });
+
+    return ok(res, {
+      userId,
+      bound: saved,
+      count: saved.length,
+      message: "USDT addresses bound successfully",
+    }, 200);
   } catch (e) {
     const { status, message } = normalizeError(e);
     return fail(res, message, status);
