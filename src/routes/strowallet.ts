@@ -589,6 +589,32 @@ function extractUsdtAddress(payload: any) {
   return undefined;
 }
 
+function extractUsdtAddressByNetwork(payload: any, network?: string) {
+  const targetNetwork = normalizeUsdtNetwork(network);
+  if (!payload) return undefined;
+
+  const arraysToCheck = [
+    payload?.addresses,
+    payload?.data?.addresses,
+    payload?.result?.addresses,
+    payload?.data?.result?.addresses,
+    payload?.wallets,
+    payload?.data?.wallets,
+  ];
+
+  for (const entries of arraysToCheck) {
+    if (!Array.isArray(entries)) continue;
+    for (const item of entries) {
+      if (!item || typeof item !== "object") continue;
+      const itemNetwork = normalizeUsdtNetwork(item?.network);
+      const addr = extractUsdtAddress(item);
+      if (addr && itemNetwork === targetNetwork) return addr;
+    }
+  }
+
+  return extractUsdtAddress(payload);
+}
+
 function normalizeError(e: any) {
   // Axios error normalization
   if (typeof (axios as any).isAxiosError === "function" && (axios as any).isAxiosError(e)) {
@@ -1489,6 +1515,32 @@ router.post("/usdt/address", async (req, res) => {
           });
         }
         if (providerMessage.toLowerCase().includes("address already exists")) {
+          const errorPayload = providerErr?.response?.data || {};
+          const recoveredAddress = extractUsdtAddressByNetwork(errorPayload, network);
+          if (recoveredAddress) {
+            if (isPrismaPersistenceEnabled()) {
+              const saved = await upsertUsdtAddressRow({
+                userId: body.userId,
+                address: recoveredAddress,
+                label,
+                network,
+                responseData: errorPayload,
+              });
+              createdAddresses.push(saved ?? { userId: body.userId, address: recoveredAddress, label, network, status: "active" });
+            } else if (!isMongoReady()) {
+              createdAddresses.push({ address: recoveredAddress, userId: body.userId, label, network, status: "active", responseData: errorPayload });
+            } else {
+              const UsdtAddress = getUsdtAddressModel();
+              const saved = await UsdtAddress.findOneAndUpdate(
+                { address: recoveredAddress },
+                { $set: { userId: body.userId, label, network, responseData: errorPayload } },
+                { upsert: true, new: true }
+              );
+              createdAddresses.push(saved);
+            }
+            continue;
+          }
+
           const refreshed = await findExistingUsdtAddresses(body.userId);
           const recovered = refreshed.find((row: any) => normalizeUsdtNetwork(row?.network) === network);
           if (recovered) {

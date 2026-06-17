@@ -183,6 +183,32 @@ function buildUsdtAddressCopyKeyboard(addresses: Array<{ network?: string; addre
   return rows;
 }
 
+function extractUsdtAddressEntries(payload: any): Array<{ network?: string; address?: string }> {
+  const body = payload?.data && typeof payload.data === "object" && (payload?.ok !== undefined || payload?.success !== undefined)
+    ? payload.data
+    : payload;
+
+  const asArray = body?.addresses;
+  if (Array.isArray(asArray)) {
+    return asArray
+      .map((entry: any) => {
+        if (!entry) return null;
+        if (typeof entry === "string") return { network: undefined, address: entry };
+        const address = entry?.address || entry?.walletAddress || entry?.wallet_address;
+        return address ? { network: entry?.network, address: String(address) } : null;
+      })
+      .filter(Boolean) as Array<{ network?: string; address?: string }>;
+  }
+
+  const single = body?.address;
+  if (single) {
+    if (typeof single === "string") return [{ network: undefined, address: single }];
+    const address = single?.address || single?.walletAddress || single?.wallet_address;
+    if (address) return [{ network: single?.network, address: String(address) }];
+  }
+  return [];
+}
+
 function clearPendingAction(value: number | string | undefined) {
   const key = chatKey(value);
   if (key) pendingActions.delete(key);
@@ -547,6 +573,11 @@ export async function initBot() {
   const botRef = new TelegramBot(activeToken, { polling: false });
   await (botRef as any).deleteWebHook({ drop_pending_updates: true }).catch(() => {});
   botRef.on("polling_error", (err: any) => {
+    const msg = String(err?.message || "").toLowerCase();
+    if (msg.includes("etimedout") || msg.includes("read etimedout")) {
+      console.warn("Telegram polling timeout (transient network issue); polling will continue.");
+      return;
+    }
     console.error("Telegram polling error:", err);
   });
   await (botRef as any).startPolling();
@@ -6073,12 +6104,9 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
   try {
     const payload = { userId: String(chatId), ...(options?.forceCreate ? { forceCreate: true } : {}) };
     const existingResp = await callStroWallet("usdt/address", "get", { userId: String(chatId) });
-    const existingData: any = existingResp?.data ?? existingResp;
-    const existingAddresses = Array.isArray(existingData?.addresses)
-      ? existingData.addresses
-      : (existingData?.address ? [existingData.address] : []);
+    const existingAddresses = extractUsdtAddressEntries(existingResp);
     const uniqueNetworks = new Set(existingAddresses.map((entry: any) => String(entry?.network || "TRC20").toUpperCase()));
-    if (existingAddresses.length && uniqueNetworks.size >= 3 && !options?.forceCreate) {
+    if (existingAddresses.length && !options?.forceCreate) {
       await editOrSend(chatId, message, buildUsdtWalletAddressesMessage(existingAddresses), {
         inline_keyboard: buildUsdtAddressCopyKeyboard(existingAddresses),
       });
@@ -6087,9 +6115,7 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
 
     const resp = await callStroWallet("usdt/address", "post", payload);
     const data: any = resp?.data ?? resp;
-    const addresses = Array.isArray(data?.addresses)
-      ? data.addresses
-      : (data?.address ? [data.address] : []);
+    const addresses = extractUsdtAddressEntries(resp);
     if (data?.pending) {
       await editOrSend(chatId, message, "USDT address creation is already in progress. Please wait a moment and try again.", {
         inline_keyboard: [[MENU_BUTTON]],
@@ -6132,9 +6158,8 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
 async function resolveUsdtAddress(chatId: number) {
   try {
     const resp = await callStroWallet("usdt/address", "get", { userId: String(chatId) });
-    const data: any = resp?.data ?? resp;
-    const record = Array.isArray(data?.addresses) ? data.addresses[0] : (data?.address ?? data);
-    const address = record?.address;
+    const entries = extractUsdtAddressEntries(resp);
+    const address = entries[0]?.address;
     return address ? String(address) : null;
   } catch {
     return null;
