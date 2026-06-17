@@ -6438,20 +6438,42 @@ async function sendMyCards(chatId: number, message?: any) {
         attempts: 1,
       });
       if (recoveredCardId) {
-        card = await prisma.card.upsert({
-          where: { cardId: recoveredCardId },
-          create: {
-            cardId: recoveredCardId,
-            userId,
-            customerEmail: user?.customerEmail || null,
-            status: "active",
-          },
-          update: {
-            userId,
-            customerEmail: user?.customerEmail || null,
-            status: "active",
-          },
-        });
+        const existingRecovered = await prisma.card.findUnique({ where: { cardId: recoveredCardId } });
+        const remoteRecovered = await fetchCardDetailSafe(String(recoveredCardId));
+        const recoveredStatus = String(remoteRecovered?.status || existingRecovered?.status || "active");
+
+        if (isTerminatedStatus(recoveredStatus)) {
+          await prisma.card.upsert({
+            where: { cardId: recoveredCardId },
+            create: {
+              cardId: recoveredCardId,
+              userId,
+              customerEmail: user?.customerEmail || null,
+              status: "terminated",
+            },
+            update: {
+              userId,
+              customerEmail: user?.customerEmail || null,
+              status: "terminated",
+              lastSync: new Date(),
+            },
+          });
+        } else {
+          card = await prisma.card.upsert({
+            where: { cardId: recoveredCardId },
+            create: {
+              cardId: recoveredCardId,
+              userId,
+              customerEmail: user?.customerEmail || null,
+              status: recoveredStatus,
+            },
+            update: {
+              userId,
+              customerEmail: user?.customerEmail || null,
+              status: recoveredStatus,
+            },
+          });
+        }
       }
     }
     if (!card) {
@@ -6707,12 +6729,34 @@ async function getPrimaryCardForUser(userId: string) {
       orderBy: { updatedAt: "desc" },
     });
     if (!request?.cardId) return null;
-    const existingSameCard = await prisma.card.findUnique({ where: { cardId: String(request.cardId) } });
+    const requestCardId = String(request.cardId);
+    const existingSameCard = await prisma.card.findUnique({ where: { cardId: requestCardId } });
     if (existingSameCard && isTerminatedStatus(existingSameCard.status || undefined)) return null;
+
+    const remoteDetail = await fetchCardDetailSafe(requestCardId);
+    if (isTerminatedStatus(remoteDetail?.status || undefined)) {
+      await prisma.card.upsert({
+        where: { cardId: requestCardId },
+        create: {
+          cardId: requestCardId,
+          userId,
+          customerEmail: customerEmail || null,
+          status: "terminated",
+        },
+        update: {
+          status: "terminated",
+          userId,
+          customerEmail: customerEmail || null,
+          lastSync: new Date(),
+        },
+      });
+      return null;
+    }
+
     return {
-      cardId: String(request.cardId),
+      cardId: requestCardId,
       cardType: request.cardType,
-      status: "active",
+      status: remoteDetail?.status || "active",
       last4: request.cardNumber ? request.cardNumber.slice(-4) : undefined,
       balance: undefined,
       currency: undefined,
@@ -6730,12 +6774,19 @@ async function getPrimaryCardForUser(userId: string) {
     .sort({ updatedAt: -1 })
     .lean();
   if (!request) return null;
-  const existingSameCard = await Card.findOne({ cardId: String(request.cardId) }).lean();
+  const requestCardId = String(request.cardId);
+  const existingSameCard = await Card.findOne({ cardId: requestCardId }).lean();
   if (existingSameCard && isTerminatedStatus((existingSameCard as any)?.status)) return null;
+
+  const remoteDetail = await fetchCardDetailSafe(requestCardId);
+  if (isTerminatedStatus(remoteDetail?.status || undefined)) {
+    return null;
+  }
+
   return {
-    cardId: String(request.cardId),
+    cardId: requestCardId,
     cardType: request.cardType,
-    status: (request as any)?.responseData?.response?.card_status || "pending",
+    status: remoteDetail?.status || (request as any)?.responseData?.response?.card_status || "pending",
     last4: request.cardNumber ? request.cardNumber.slice(-4) : undefined,
     balance: undefined,
     currency: undefined,
