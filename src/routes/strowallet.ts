@@ -1075,7 +1075,7 @@ router.post("/card-transactions", async (req, res) => {
 
 // 8) Freeze / Unfreeze NFC Card
 const ActionStatusSchema = z.object({
-  action: z.enum(["freeze", "unfreeze"]),
+  action: z.enum(["freeze", "unfreeze", "terminate"]),
   card_id: CardIdSchema,
 });
 
@@ -1083,7 +1083,11 @@ router.post("/action/status", async (req, res) => {
   try {
     const body = ActionStatusSchema.parse(req.body || {});
     const public_key = requirePublicKey();
-    const status = body.action === "freeze" ? "frozen" : "active";
+    const status = body.action === "freeze"
+      ? "frozen"
+      : body.action === "unfreeze"
+        ? "active"
+        : "terminated";
     const params = { card_id: body.card_id, status, public_key };
     const mode = normalizeMode(getDefaultMode());
     if (mode) (params as any).mode = mode;

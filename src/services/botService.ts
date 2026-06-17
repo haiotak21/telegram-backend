@@ -33,6 +33,7 @@ type PendingAction =
   | { type: "wallet_transfer_username" }
   | { type: "wallet_transfer_phone" }
   | { type: "wallet_transfer_amount" }
+  | { type: "card_terminate_confirm" }
   | { type: "airtime" }
   | { type: "data_plans" }
   | { type: "internet_plans" };
@@ -349,7 +350,10 @@ const walletCardTopupSessions = new Map<number, {
   walletBalance: number;
   cardBalance: number;
   amountUsd?: number;
+  feeUsd?: number;
+  totalDebitUsd?: number;
 }>();
+const cardTerminateSessions = new Map<number, { cardId: string; last4?: string }>();
 const walletTransferSessions = new Map<number, {
   mode?: "username" | "phone";
   recipientUserId?: string;
@@ -848,6 +852,7 @@ export async function initBot() {
     walletCardPaymentSessions.delete(msg.chat.id);
     walletCardTopupSessions.delete(msg.chat.id);
     walletTransferSessions.delete(msg.chat.id);
+    cardTerminateSessions.delete(msg.chat.id);
     cardProfileSessions.delete(msg.chat.id);
     createCardSessions.delete(msg.chat.id);
     bankTransferSessions.delete(msg.chat.id);
@@ -1044,6 +1049,7 @@ export async function initBot() {
       walletCardPaymentSessions.delete(chatId);
       walletCardTopupSessions.delete(chatId);
       walletTransferSessions.delete(chatId);
+      cardTerminateSessions.delete(chatId);
       cardProfileSessions.delete(chatId);
       createCardSessions.delete(chatId);
       await bot!.answerCallbackQuery(query.id, { text: "Cancelled" }).catch(() => { });
@@ -1066,6 +1072,50 @@ export async function initBot() {
       await bot!.answerCallbackQuery(query.id).catch(() => { });
       await bot!.sendMessage(chatId, "No card found. Use /card_request to create your virtual card.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      return;
+    }
+
+    if (action.startsWith("CARD_TOPUP::")) {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      const cardId = action.replace("CARD_TOPUP::", "");
+      await sendWalletCardTopupStart(chatId, query.message, cardId);
+      return;
+    }
+
+    if (action.startsWith("CARD_TERMINATE::")) {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      const cardId = action.replace("CARD_TERMINATE::", "");
+      await sendTerminateCardPrompt(chatId, cardId);
+      return;
+    }
+
+    if (action === "CARD_TERMINATE_CANCEL") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      cardTerminateSessions.delete(chatId);
+      clearPendingAction(chatId);
+      await bot!.sendMessage(chatId, "Card termination cancelled.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      return;
+    }
+
+    if (action.startsWith("CARD_TERMINATE_CONFIRM::")) {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      const cardId = action.replace("CARD_TERMINATE_CONFIRM::", "");
+      const key = chatKey(chatId);
+      if (key) pendingActions.set(key, { type: "card_terminate_confirm" });
+      const detail = await fetchCardDetailSafe(cardId);
+      cardTerminateSessions.set(chatId, { cardId, last4: detail?.last4 || cardId.slice(-4) });
+      await bot!.sendMessage(chatId, [
+        "⚠️ Final Warning",
+        "",
+        "Your card will be permanently closed.",
+        "You can request a new card after.",
+        "",
+        "Type CONFIRM to proceed:",
+      ].join("\n"), {
+        reply_markup: { force_reply: true },
       });
       return;
     }
@@ -1220,9 +1270,9 @@ export async function initBot() {
       const key = chatKey(chatId);
       if (key) pendingActions.set(key, { type: "wallet_card_topup_amount" });
       await bot!.sendMessage(chatId, [
-        "✏️ Enter the amount you want to send to your card:",
+        "✏️ Enter the amount you want to top up:",
         "",
-        `(Available: $${session.walletBalance.toFixed(2)})`,
+        `(Available wallet balance: $${session.walletBalance.toFixed(2)})`,
       ].join("\n"), {
         reply_markup: { force_reply: true },
       });
@@ -1246,6 +1296,8 @@ export async function initBot() {
         return;
       }
       const topupAmount = Number(session.amountUsd);
+      const feeUsd = roundMoney(Number(session.feeUsd ?? topupAmount * 0.1));
+      const totalDebitUsd = roundMoney(Number(session.totalDebitUsd ?? topupAmount + feeUsd));
       const now = new Date();
       const nowLabel = formatUtcDateTime(now);
       const reference = `TOPUP-${Date.now()}`;
@@ -1253,15 +1305,15 @@ export async function initBot() {
         userId: String(chatId),
         cardId: session.cardId,
         amountUsd: topupAmount,
+        feeUsd,
         reference,
       });
 
       if (!result.success) {
         await bot!.sendMessage(chatId, [
-          "❌ Top-Up Failed",
+          "❌ Top Up Failed",
           "",
-          "Something went wrong.",
-          "Your wallet has NOT been debited.",
+          "Your wallet was not charged.",
           "",
           "Please try again or contact support.",
         ].join("\n"), {
@@ -1285,13 +1337,14 @@ export async function initBot() {
         return;
       }
 
-      const newWalletBalance = roundMoney(Number(result.newWalletBalance ?? session.walletBalance - topupAmount));
+      const newWalletBalance = roundMoney(Number(result.newWalletBalance ?? session.walletBalance - totalDebitUsd));
       walletCardTopupSessions.delete(chatId);
       await bot!.sendMessage(chatId, [
-        "✅ Card Topped Up Successfully!",
+        "✅ Card Topped Up!",
         "",
-        `💳 Amount sent to card:   $${topupAmount.toFixed(2)}`,
-        `💰 Remaining wallet:      $${newWalletBalance.toFixed(2)}`,
+        `💳 Added to card:     $${topupAmount.toFixed(2)}`,
+        `🧾 Fee charged:       $${feeUsd.toFixed(2)}`,
+        `💰 Wallet balance:    $${newWalletBalance.toFixed(2)}`,
         `📅 ${nowLabel}`,
         `🔖 Ref: ${String(result.reference || reference)}`,
       ].join("\n"), {
@@ -1306,10 +1359,10 @@ export async function initBot() {
       await bot!.sendMessage(chatId, [
         "✅ Card Top-Up Successful!",
         "",
-        `💳 $${topupAmount.toFixed(2)} sent to your card`,
-        `💰 Wallet balance: $${newWalletBalance.toFixed(2)}`,
+        `💳 $${topupAmount.toFixed(2)} added to your card`,
+        `🧾 Fee: $${feeUsd.toFixed(2)}`,
+        `💰 Wallet remaining: $${newWalletBalance.toFixed(2)}`,
         `📅 ${nowLabel}`,
-        `🔖 Ref: ${String(result.reference || reference)}`,
       ].join("\n"), {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
@@ -1814,6 +1867,75 @@ export async function initBot() {
       clearPendingAction(msg.chat.id);
       const amount = Number(text.replace(/,/g, ""));
       await proceedWalletTransferAmount(msg.chat.id, amount);
+    } else if (pending.type === "card_terminate_confirm") {
+      clearPendingAction(msg.chat.id);
+      const session = cardTerminateSessions.get(msg.chat.id);
+      if (!session?.cardId) {
+        await bot!.sendMessage(msg.chat.id, "Termination session expired.", {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+      }
+      if (text.toUpperCase() !== "CONFIRM") {
+        cardTerminateSessions.delete(msg.chat.id);
+        await bot!.sendMessage(msg.chat.id, "Card termination cancelled.", {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+      }
+
+      await bot!.sendMessage(msg.chat.id, "⏳ Terminating your card...", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      const termination = await executeCardTermination(msg.chat.id, session.cardId);
+      cardTerminateSessions.delete(msg.chat.id);
+      if (!termination.success) {
+        await bot!.sendMessage(msg.chat.id, [
+          "❌ Termination Failed",
+          "",
+          "Something went wrong.",
+          "Your card is still active.",
+          "",
+          "Please try again or contact support.",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "🔄 Try Again", callback_data: `CARD_TERMINATE::${session.cardId}` },
+              { text: "🆘 Support", url: SUPPORT_URL },
+              MENU_BUTTON,
+            ]],
+          },
+        });
+        return;
+      }
+
+      await bot!.sendMessage(msg.chat.id, [
+        "✅ Card Terminated",
+        "",
+        "Your card has been closed.",
+        "💰 Any remaining balance has been",
+        "   returned to your wallet.",
+        "",
+        "Would you like to request a new card?",
+      ].join("\n"), {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: "➕ Request New Card", callback_data: "MENU_CREATE_CARD" },
+            MENU_BUTTON,
+          ]],
+        },
+      });
+
+      await bot!.sendMessage(msg.chat.id, [
+        "🚫 Card Terminated",
+        "",
+        "Your card has been permanently closed.",
+        "Any remaining balance returned to wallet.",
+        "",
+        "Tap Request Card to get a new one.",
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
     } else if (pending.type === "verify") {
       const method = pending.method;
       if (!text) {
@@ -4080,9 +4202,10 @@ async function executeInternalWalletTransfer(params: {
 function buildWalletTopupAmountKeyboard() {
   return [
     [
-      { text: "$ 5", callback_data: "WALLET_CARD_TOPUP_AMOUNT::5" },
-      { text: "$ 10", callback_data: "WALLET_CARD_TOPUP_AMOUNT::10" },
-      { text: "$ 20", callback_data: "WALLET_CARD_TOPUP_AMOUNT::20" },
+      { text: "$5", callback_data: "WALLET_CARD_TOPUP_AMOUNT::5" },
+      { text: "$10", callback_data: "WALLET_CARD_TOPUP_AMOUNT::10" },
+      { text: "$20", callback_data: "WALLET_CARD_TOPUP_AMOUNT::20" },
+      { text: "$50", callback_data: "WALLET_CARD_TOPUP_AMOUNT::50" },
     ],
     [{ text: "✏️ Custom Amount", callback_data: "WALLET_CARD_TOPUP_CUSTOM" }],
     [{ text: "❌ Cancel", callback_data: "WALLET_CARD_TOPUP_CANCEL" }],
@@ -4201,9 +4324,95 @@ async function proceedWalletTransferAmount(chatId: number, amountRaw: number) {
   });
 }
 
-async function sendWalletCardTopupStart(chatId: number, message?: any) {
+async function sendTerminateCardPrompt(chatId: number, cardId: string) {
+  const detail = await fetchCardDetailSafe(cardId);
+  const last4 = detail?.last4 || cardId.slice(-4);
+  cardTerminateSessions.set(chatId, { cardId, last4 });
+  await bot!.sendMessage(chatId, [
+    "⚠️ Terminate Your Card",
+    "",
+    `Are you sure you want to terminate`,
+    `your card ending in ${last4}?`,
+    "",
+    "This action is permanent and cannot",
+    "be undone.",
+    "",
+    "Your card balance will be returned",
+    "to your wallet before termination.",
+  ].join("\n"), {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: "🚫 Yes, Terminate", callback_data: `CARD_TERMINATE_CONFIRM::${cardId}` },
+        { text: "❌ Cancel", callback_data: "CARD_TERMINATE_CANCEL" },
+      ]],
+    },
+  });
+}
+
+async function executeCardTermination(chatId: number, cardId: string) {
   const userId = String(chatId);
-  const card = await getPrimaryCardForUser(userId);
+  try {
+    const detail = await fetchCardDetailSafe(cardId);
+    const refundableBalance = roundMoney(Number(detail?.available_balance ?? detail?.balance ?? 0));
+
+    await callStroWallet("action/status", "post", { action: "terminate", card_id: cardId });
+
+    if (isPrismaPersistenceEnabled()) {
+      await prisma.$transaction(async (tx: any) => {
+        await tx.card.updateMany({ where: { cardId }, data: { status: "terminated", lastSync: new Date() } });
+        if (refundableBalance > 0) {
+          await tx.user.update({ where: { userId }, data: { balance: { increment: refundableBalance } } });
+          await tx.transaction.create({
+            data: {
+              userId,
+              transactionType: "deposit",
+              paymentMethod: "system",
+              amount: refundableBalance,
+              amountUsdt: refundableBalance,
+              currency: "USDT",
+              transactionNumber: `TERM-REFUND-${Date.now()}`,
+              status: "completed",
+              verified: true,
+              metadata: { source: "card_termination_refund", cardId } as any,
+            },
+          });
+        }
+      });
+      return { success: true };
+    }
+
+    await Card.findOneAndUpdate({ cardId }, { $set: { status: "terminated", lastSync: new Date() } }, { new: true });
+    if (refundableBalance > 0) {
+      await User.findOneAndUpdate({ userId }, { $inc: { balance: refundableBalance } }, { new: true });
+      await Transaction.create({
+        userId,
+        transactionType: "deposit",
+        paymentMethod: "system",
+        amount: refundableBalance,
+        amountUsdt: refundableBalance,
+        currency: "USDT",
+        transactionNumber: `TERM-REFUND-${Date.now()}`,
+        status: "completed",
+        verified: true,
+        metadata: { source: "card_termination_refund", cardId },
+      });
+    }
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, message: e?.message || "Termination failed" };
+  }
+}
+
+async function sendWalletCardTopupStart(chatId: number, message?: any, preferredCardId?: string) {
+  const userId = String(chatId);
+  let card = preferredCardId
+    ? (isPrismaPersistenceEnabled()
+        ? await prisma.card.findFirst({ where: { cardId: preferredCardId } })
+        : await Card.findOne({ cardId: preferredCardId }).lean())
+    : null;
+  if (!card) {
+    card = await getPrimaryCardForUser(userId);
+  }
   if (!card?.cardId) {
     await editOrSend(chatId, message, [
       "❌ No Card Found",
@@ -4250,12 +4459,11 @@ async function sendWalletCardTopupStart(chatId: number, message?: any) {
   });
 
   await editOrSend(chatId, message, [
-    "💳 Send to Card",
+    "💳 Top Up Your Card",
     "",
-    `Your wallet balance:    $${walletBalance.toFixed(2)}`,
-    `Your card balance:       $${(Number.isFinite(cardBalance) ? cardBalance : 0).toFixed(2)}`,
+    `Wallet balance: $${walletBalance.toFixed(2)}`,
     "",
-    "How much would you like to send to your card?",
+    "Select amount to add to your card:",
   ].join("\n"), {
     inline_keyboard: buildWalletTopupAmountKeyboard(),
   });
@@ -4277,35 +4485,51 @@ async function proceedWalletTopupAmount(chatId: number, amountRaw: number) {
   }
 
   const amountUsd = roundMoney(Number(amountRaw));
+  const feeUsd = roundMoney(amountUsd * 0.1);
+  const totalDebitUsd = roundMoney(amountUsd + feeUsd);
   if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
     await sendWalletTopupValidationError(chatId, "❌ Please enter a valid amount greater than $0");
     return;
   }
-  if (amountUsd > session.walletBalance) {
-    await sendWalletTopupValidationError(chatId, `❌ Amount exceeds your wallet balance of $${session.walletBalance.toFixed(2)}`);
+  if (totalDebitUsd > session.walletBalance) {
+    await bot!.sendMessage(chatId, [
+      "❌ Insufficient balance for this amount.",
+      "",
+      `You selected: $${amountUsd.toFixed(2)}`,
+      `10% fee:      + $${feeUsd.toFixed(2)}`,
+      `Total needed: $${totalDebitUsd.toFixed(2)}`,
+      `Your wallet:  $${session.walletBalance.toFixed(2)}`,
+      "",
+      "Please select a lower amount.",
+    ].join("\n"), {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "🔄 Try Again", callback_data: "WALLET_CARD_TOPUP_RETRY" },
+          { text: "❌ Cancel", callback_data: "WALLET_CARD_TOPUP_CANCEL" },
+        ]],
+      },
+    });
     return;
   }
 
   session.amountUsd = amountUsd;
+  session.feeUsd = feeUsd;
+  session.totalDebitUsd = totalDebitUsd;
   walletCardTopupSessions.set(chatId, session);
-  const walletAfter = roundMoney(session.walletBalance - amountUsd);
-  const cardAfter = roundMoney(session.cardBalance + amountUsd);
+  const walletAfter = roundMoney(session.walletBalance - totalDebitUsd);
 
   await bot!.sendMessage(chatId, [
-    "📋 Confirm Top-Up",
+    "💳 Top Up Summary",
     "",
-    "From:  💰 Wallet",
-    "To:    💳 Your Card",
-    "",
-    `Amount:              $${amountUsd.toFixed(2)}`,
-    `Wallet after:        $${walletAfter.toFixed(2)}`,
-    `Card balance after:  $${cardAfter.toFixed(2)}`,
-    "",
-    "⚠️ This action cannot be undone.",
+    `Amount to card:       $${amountUsd.toFixed(2)}`,
+    `Service fee (10%):  + $${feeUsd.toFixed(2)}`,
+    "━━━━━━━━━━━━━━━━━━━",
+    `Total from wallet:    $${totalDebitUsd.toFixed(2)}`,
+    `Wallet after:         $${walletAfter.toFixed(2)}`,
   ].join("\n"), {
     reply_markup: {
       inline_keyboard: [[
-        { text: "✅ Confirm", callback_data: "WALLET_CARD_TOPUP_CONFIRM" },
+        { text: "✅ Confirm Top Up", callback_data: "WALLET_CARD_TOPUP_CONFIRM" },
         { text: "❌ Cancel", callback_data: "WALLET_CARD_TOPUP_CANCEL" },
       ]],
     },
@@ -4316,11 +4540,14 @@ async function executeWalletCardTopup(params: {
   userId: string;
   cardId: string;
   amountUsd: number;
+  feeUsd?: number;
   reference: string;
 }) {
   const userId = String(params.userId);
   const cardId = String(params.cardId);
   const amountUsd = Number(params.amountUsd || 0);
+  const feeUsd = roundMoney(Number(params.feeUsd ?? amountUsd * 0.1));
+  const totalDebitUsd = roundMoney(amountUsd + feeUsd);
   const reference = String(params.reference || "").trim() || `TOPUP-${Date.now()}`;
   if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
     return { success: false, message: "Invalid top-up amount", reference };
@@ -4340,8 +4567,8 @@ async function executeWalletCardTopup(params: {
     try {
       const reserve = await prisma.$transaction(async (tx: any) => {
         const decremented = await tx.user.updateMany({
-          where: { userId, balance: { gte: amountUsd } },
-          data: { balance: { decrement: amountUsd } },
+          where: { userId, balance: { gte: totalDebitUsd } },
+          data: { balance: { decrement: totalDebitUsd } },
         });
         if (!decremented?.count) {
           throw new Error("Insufficient wallet balance");
@@ -4353,15 +4580,15 @@ async function executeWalletCardTopup(params: {
             userId,
             transactionType: "withdrawal",
             paymentMethod: "wallet",
-            amount: amountUsd,
-            amountUsdt: amountUsd,
-            feeUsdt: 0,
+            amount: totalDebitUsd,
+            amountUsdt: totalDebitUsd,
+            feeUsdt: feeUsd,
             currency: "USDT",
             transactionNumber: reference,
             referenceNumber: reference,
             status: "pending",
             verified: true,
-            metadata: { cardId, source: "wallet_card_topup" } as any,
+            metadata: { cardId, source: "wallet_card_topup", topupAmountUsd: amountUsd, feeUsd } as any,
           },
         });
 
@@ -4384,20 +4611,20 @@ async function executeWalletCardTopup(params: {
         data: {
           status: "completed",
           responseData: providerResponse as any,
-          metadata: { cardId, source: "wallet_card_topup", reference } as any,
+          metadata: { cardId, source: "wallet_card_topup", topupAmountUsd: amountUsd, feeUsd, totalDebitUsd, reference } as any,
         },
       });
       return { success: true, newWalletBalance: walletAfterReserve, providerResponse, reference };
     } catch (e: any) {
       const message = e?.message || "Card top-up failed";
       await prisma.$transaction(async (tx: any) => {
-        await tx.user.update({ where: { userId }, data: { balance: { increment: amountUsd } } });
+        await tx.user.update({ where: { userId }, data: { balance: { increment: totalDebitUsd } } });
         await tx.transaction.update({
           where: { id: pendingTxId! },
           data: {
             status: "failed",
             responseData: { error: message } as any,
-            metadata: { cardId, source: "wallet_card_topup", refunded: true, failureReason: message, reference } as any,
+            metadata: { cardId, source: "wallet_card_topup", topupAmountUsd: amountUsd, feeUsd, refunded: true, failureReason: message, reference } as any,
           },
         });
       });
@@ -4411,8 +4638,8 @@ async function executeWalletCardTopup(params: {
   let walletAfterReserve = 0;
   try {
     const updatedUser = await User.findOneAndUpdate(
-      { userId, balance: { $gte: amountUsd } },
-      { $inc: { balance: -amountUsd } },
+      { userId, balance: { $gte: totalDebitUsd } },
+      { $inc: { balance: -totalDebitUsd } },
       { new: true, session }
     );
     if (!updatedUser) {
@@ -4424,15 +4651,15 @@ async function executeWalletCardTopup(params: {
         userId,
         transactionType: "withdrawal",
         paymentMethod: "wallet",
-        amount: amountUsd,
-        amountUsdt: amountUsd,
-        feeUsdt: 0,
+        amount: totalDebitUsd,
+        amountUsdt: totalDebitUsd,
+        feeUsdt: feeUsd,
         currency: "USDT",
         transactionNumber: reference,
         referenceNumber: reference,
         status: "pending",
         verified: true,
-        metadata: { cardId, source: "wallet_card_topup", reference },
+        metadata: { cardId, source: "wallet_card_topup", topupAmountUsd: amountUsd, feeUsd, reference },
       },
     ], { session });
 
@@ -4454,7 +4681,7 @@ async function executeWalletCardTopup(params: {
       $set: {
         status: "completed",
         responseData: providerResponse,
-        metadata: { cardId, source: "wallet_card_topup", reference },
+        metadata: { cardId, source: "wallet_card_topup", topupAmountUsd: amountUsd, feeUsd, totalDebitUsd, reference },
       },
     });
     return { success: true, newWalletBalance: walletAfterReserve, providerResponse, reference };
@@ -4463,14 +4690,14 @@ async function executeWalletCardTopup(params: {
     const refundSession = await mongoose.startSession();
     refundSession.startTransaction();
     try {
-      await User.updateOne({ userId }, { $inc: { balance: amountUsd } }, { session: refundSession });
+      await User.updateOne({ userId }, { $inc: { balance: totalDebitUsd } }, { session: refundSession });
       await Transaction.updateOne(
         { _id: pendingTxId },
         {
           $set: {
             status: "failed",
             responseData: { error: message },
-            metadata: { cardId, source: "wallet_card_topup", refunded: true, failureReason: message, reference },
+            metadata: { cardId, source: "wallet_card_topup", topupAmountUsd: amountUsd, feeUsd, refunded: true, failureReason: message, reference },
           },
         },
         { session: refundSession }
@@ -5516,6 +5743,27 @@ function formatCardMoney(value: any, currency?: string) {
   return `${amount.toFixed(2)} ${normalized}`;
 }
 
+function normalizeCardDisplayValue(value?: string) {
+  const raw = String(value || "").trim();
+  return raw || "Not set";
+}
+
+function buildCardAddressDisplay(detail: any) {
+  const billing = normalizeCardDisplayValue(detail?.address);
+  const city = String(detail?.city || "").trim();
+  const state = String(detail?.state || "").trim();
+  const postalCode = String(detail?.postal_code || detail?.postalCode || "").trim();
+  const country = String(detail?.country || "").trim();
+
+  const lineOne = [city, state, postalCode].filter(Boolean).join(", ");
+  const lineTwo = country;
+  const address = lineOne || lineTwo
+    ? [lineOne, lineTwo].filter(Boolean).join("\n            ")
+    : "Not set";
+
+  return { billing, address };
+}
+
 function extractExpiry(detail: any) {
   if (!detail) return undefined;
   const month = detail?.exp_month || detail?.expiry_month || detail?.expMonth || detail?.expiryMonth;
@@ -5557,22 +5805,11 @@ function normalizeCardDetail(raw: any) {
   const expMonth = pickNestedField(raw, ["exp_month", "expiry_month", "expMonth", "expiryMonth"]);
   const expYear = pickNestedField(raw, ["exp_year", "expiry_year", "expYear", "expiryYear"]);
   const expiry = pickNestedField(raw, ["expiry", "expiry_date", "exp", "expDate"]);
-  const billingRaw = pickNestedField(raw, ["billing", "billing_address", "billingAddress"]);
-  const billingStreet = pickNestedField(raw, ["billing_street", "billingStreet"]);
-  const billingCity = pickNestedField(raw, ["billing_city", "billingCity"]);
-  const billingState = pickNestedField(raw, ["billing_state", "billingState"]);
-  const billingZip = pickNestedField(raw, ["billing_zip_code", "billing_zip", "billingZip", "billingZipCode"]);
-  const billingCountry = pickNestedField(raw, ["billing_country", "billingCountry"]);
-  const line1 = pickNestedField(raw, ["line1", "addressLine1", "address_line1"]);
-  const city = pickNestedField(raw, ["city", "town"]);
-  const state = pickNestedField(raw, ["state", "province", "region"]);
-  const zip = pickNestedField(raw, ["zip", "zipCode", "postal", "postalCode"]);
-  const country = pickNestedField(raw, ["country"]);
-  const addressRaw = pickNestedField(raw, ["address", "address_full", "addressFull"]);
-  const billingParts = [billingStreet || line1, billingCity || city].filter(Boolean).join(", ");
-  const addressParts = [billingState || state, billingZip || zip, billingCountry || country].filter(Boolean).join(", ");
-  const billing = billingRaw || (billingParts ? billingParts : undefined);
-  const address = addressRaw || (addressParts ? addressParts : undefined);
+  const address = pickNestedField(raw, ["address", "billing_address", "billingAddress", "address_full", "addressFull"]);
+  const city = pickNestedField(raw, ["city", "billing_city", "billingCity", "town"]);
+  const state = pickNestedField(raw, ["state", "billing_state", "billingState", "province", "region"]);
+  const postalCode = pickNestedField(raw, ["postal_code", "postalCode", "billing_zip_code", "billing_zip", "zip", "zipCode", "postal"]);
+  const country = pickNestedField(raw, ["country", "billing_country", "billingCountry"]);
   return {
     card_number: cardNumber,
     cvc,
@@ -5586,8 +5823,11 @@ function normalizeCardDetail(raw: any) {
     exp_month: expMonth,
     exp_year: expYear,
     expiry,
-    billing,
     address,
+    city,
+    state,
+    postal_code: postalCode,
+    country,
   };
 }
 
@@ -6237,25 +6477,23 @@ async function sendMyCards(chatId: number, message?: any) {
     const fullCardNumber = fullCardNumberRaw.length >= 12
       ? fullCardNumberRaw.replace(/(.{4})/g, "$1 ").trim()
       : undefined;
-    const statusText = isFrozenStatus(card.status || undefined) ? "❄️ Frozen" : "✅ Active";
-    const balanceLabel = formatCardMoney(
-      mergedDetail?.balance ?? mergedDetail?.available_balance ?? card.balance,
-      mergedDetail?.currency || card.currency || "USD"
-    );
-    const expiry = extractExpiry(mergedDetail);
-    const billing = mergedDetail?.billing;
-    const address = mergedDetail?.address;
+    const frozen = isFrozenStatus(card.status || undefined);
+    const statusIcon = frozen ? "❄️" : "✅";
+    const statusLabel = frozen ? "Frozen" : "Active";
+    const balanceAmount = Number(mergedDetail?.balance ?? mergedDetail?.available_balance ?? card.balance);
+    const billingView = buildCardAddressDisplay(mergedDetail || {});
     const lines = [
-      "💳 Your Virtual Card",
-      `Card Type: ${cardType}`,
-      `Status: ${statusText}`,
-      cardName ? `Name: ${cardName}` : undefined,
-      `Card Number: ${fullCardNumber || formatMaskedCard(last4)}`,
-      `CVV: ${cvc || "None"}`,
-      `Billing: ${billing || "None"}`,
-      `Address: ${address || "None"}`,
-      expiry ? `Valid Thru: ${expiry}` : undefined,
-      balanceLabel ? `Balance: ${balanceLabel}` : undefined,
+      "🏧 Your Virtual Card",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+      `💳 Type:    ${cardType === "virtual" ? "Virtual" : cardType}`,
+      `${statusIcon} Status:  ${statusLabel}`,
+      `👤 Name:    ${normalizeCardDisplayValue(cardName)}`,
+      `🔢 Number:  ${fullCardNumber || formatMaskedCard(last4)}`,
+      `🔐 CVV:     ${normalizeCardDisplayValue(cvc)}`,
+      `💰 Balance: $${(Number.isFinite(balanceAmount) ? balanceAmount : 0).toFixed(2)}`,
+      `🧾 Billing: ${billingView.billing}`,
+      `📍 Address: ${billingView.address}`,
+      "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
     ].filter(Boolean) as string[];
 
     const freezeAction = isFrozenStatus(card.status || undefined) ? "CARD_UNFREEZE" : "CARD_FREEZE";
@@ -6265,6 +6503,10 @@ async function sendMyCards(chatId: number, message?: any) {
         [
           { text: "🔍 Transactions", callback_data: `CARD_TXN::${card.cardId}` },
           { text: freezeLabel, callback_data: `${freezeAction}::${card.cardId}` },
+        ],
+        [
+          { text: "💳 Top Up Card", callback_data: `CARD_TOPUP::${card.cardId}` },
+          { text: "🚫 Terminate Card", callback_data: `CARD_TERMINATE::${card.cardId}` },
         ],
         [MENU_BUTTON],
       ],
@@ -6288,15 +6530,15 @@ async function sendMyCards(chatId: number, message?: any) {
   const resolvedCardId = resolvedCard?.cardId || latestRequest?.cardId || linkedCardId;
 
   const noCardLines = [
-    "💳 Your Virtual Card",
+    "🏧 Your Virtual Card",
     "Card Type: virtual",
-    "Status: ✅ None",
+    "Status: Not set",
     "Card Number: /card_request",
-    "CVV: None",
-    "Expiry Date: None",
+    "CVV: Not set",
+    "Expiry Date: Not set",
     "Balance: __",
-    "Billing: None",
-    "Address: None",
+    "Billing: Not set",
+    "Address: Not set",
   ];
   const noCardKeyboard: InlineKeyboardButton[][] = [
     [
@@ -6336,25 +6578,23 @@ async function sendMyCards(chatId: number, message?: any) {
   const fullCardNumber = fullCardNumberRaw.length >= 12
     ? fullCardNumberRaw.replace(/(.{4})/g, "$1 ").trim()
     : undefined;
-  const statusText = isFrozenStatus(activeCard.status) ? "❄️ Frozen" : "✅ Active";
-  const balanceLabel = formatCardMoney(
-    mergedDetail?.balance ?? mergedDetail?.available_balance ?? activeCard.balance ?? user?.balance,
-    mergedDetail?.currency || activeCard.currency || user?.currency || "USD"
-  );
-  const expiry = extractExpiry(mergedDetail) || extractExpiry(latestRequest?.responseData || latestRequest?.metadata || {});
-  const billing = mergedDetail?.billing || latestRequest?.metadata?.billing;
-  const address = mergedDetail?.address || latestRequest?.metadata?.address;
+  const frozen = isFrozenStatus(activeCard.status);
+  const statusIcon = frozen ? "❄️" : "✅";
+  const statusLabel = frozen ? "Frozen" : "Active";
+  const balanceAmount = Number(mergedDetail?.balance ?? mergedDetail?.available_balance ?? activeCard.balance ?? user?.balance);
+  const billingView = buildCardAddressDisplay(mergedDetail || {});
   const lines = [
-    "💳 Your Virtual Card",
-    `Card Type: ${cardType}`,
-    `Status: ${statusText}`,
-    cardName ? `Name: ${cardName}` : undefined,
-    `Card Number: ${fullCardNumber || formatMaskedCard(last4)}`,
-    `CVV: ${cvc || "None"}`,
-    `Billing: ${billing || "None"}`,
-    `Address: ${address || "None"}`,
-    expiry ? `Valid Thru: ${expiry}` : undefined,
-    balanceLabel ? `Balance: ${balanceLabel}` : undefined,
+    "🏧 Your Virtual Card",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    `💳 Type:    ${cardType === "virtual" ? "Virtual" : cardType}`,
+    `${statusIcon} Status:  ${statusLabel}`,
+    `👤 Name:    ${normalizeCardDisplayValue(cardName)}`,
+    `🔢 Number:  ${fullCardNumber || formatMaskedCard(last4)}`,
+    `🔐 CVV:     ${normalizeCardDisplayValue(cvc)}`,
+    `💰 Balance: $${(Number.isFinite(balanceAmount) ? balanceAmount : 0).toFixed(2)}`,
+    `🧾 Billing: ${billingView.billing}`,
+    `📍 Address: ${billingView.address}`,
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
   ].filter(Boolean) as string[];
 
   const freezeAction = isFrozenStatus(activeCard.status) ? "CARD_UNFREEZE" : "CARD_FREEZE";
@@ -6365,6 +6605,10 @@ async function sendMyCards(chatId: number, message?: any) {
       [
         { text: "🔍 Transactions", callback_data: `CARD_TXN::${activeCard.cardId}` },
         { text: freezeLabel, callback_data: `${freezeAction}::${activeCard.cardId}` },
+      ],
+      [
+        { text: "💳 Top Up Card", callback_data: `CARD_TOPUP::${activeCard.cardId}` },
+        { text: "🚫 Terminate Card", callback_data: `CARD_TERMINATE::${activeCard.cardId}` },
       ],
       [MENU_BUTTON],
     ],
@@ -6597,7 +6841,7 @@ async function sendCardSensitiveDetails(chatId: number, cardId: string) {
   const cardNumber = local?.cardNumber || remote?.card_number;
   const cvc = local?.cvc || remote?.cvc;
   const expiry = localExpiry || extractExpiry(remote);
-  const billing = localBilling || remote?.billing;
+  const billing = localBilling || remote?.address;
   const address = localAddress || remote?.address;
 
   if (!cardNumber || !cvc) {
