@@ -172,7 +172,14 @@ async function processStroWalletEvent(payload) {
         }
     }
     const isUsdtIncoming = action === "receive_usdt" ||
-        (String(payload?.type || "").toLowerCase() === "credit" && (currency === "USDT" || chain === "TRX"));
+        (String(payload?.type || "").toLowerCase() === "credit" &&
+            (currency === "USDT" ||
+                chain === "TRX" ||
+                chain === "TRC20" ||
+                chain === "BEP20" ||
+                chain === "BSC" ||
+                chain === "POLYGON" ||
+                chain === "MATIC"));
     const usdtStatusText = String(payload?.status || payload?.state || payload?.txStatus || "").toLowerCase();
     const isUsdtFailed = usdtStatusText.includes("fail") ||
         usdtStatusText.includes("declin") ||
@@ -420,7 +427,6 @@ async function processStroWalletEvent(payload) {
             },
         }, { new: true });
         if (amount != null && card?.userId) {
-            await User_1.default.findOneAndUpdate({ userId: card.userId }, { $inc: { balance: amount } }, { new: true });
             const last4 = card.last4 ? `**** ${card.last4}` : undefined;
             const balanceValue = data?.balance || data?.available_balance || data?.availableBalance;
             const amountLabel = amount.toFixed(2);
@@ -429,7 +435,7 @@ async function processStroWalletEvent(payload) {
                 `Amount: - $${amountLabel}`,
                 "From Wallet",
                 last4 ? `Card: ${last4}` : undefined,
-                balanceValue != null ? `Wallet Balance: $${Number(balanceValue).toFixed(2)}` : undefined,
+                balanceValue != null ? `Card Balance: $${Number(balanceValue).toFixed(2)}` : undefined,
             ].filter(Boolean);
             await (0, botService_1.notifyByCardId)(cardId, lines.join("\n")).catch(() => { });
         }

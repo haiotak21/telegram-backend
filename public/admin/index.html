@@ -418,6 +418,27 @@
           <button class="menu-btn" data-target="cardTransactions">
             Card Transactions
           </button>
+          <button class="menu-btn" data-target="cardTopupReport">
+            Card Top-Up Report
+          </button>
+          <button class="menu-btn" data-target="terminatedCards">
+            Terminated Cards
+          </button>
+          <button class="menu-btn" data-target="walletBalances">
+            Wallet Balances
+          </button>
+          <button class="menu-btn" data-target="walletCardRequests">
+            Card Requests via Wallet
+          </button>
+          <button class="menu-btn" data-target="transferHistory">
+            Transfer History
+          </button>
+          <button class="menu-btn" data-target="billHistory">
+            Bill Payment History
+          </button>
+          <button class="menu-btn" data-target="referralReport">
+            Referral Report
+          </button>
           <button class="menu-btn" data-target="declineFeeReport">
             Decline Fee Report
           </button>
@@ -537,6 +558,34 @@
                 <input id="firstCardFeeUsd" type="number" step="0.01" min="0" />
               </div>
             </div>
+            <div class="row inline">
+              <div>
+                <label>Wallet Card Request Fee Tier 1 (USD, below $20)</label>
+                <input id="cardRequestWalletFeeTier1Usd" type="number" step="0.01" min="0" value="2" />
+              </div>
+              <div>
+                <label>Wallet Card Request Fee Tier 2 (USD, $20+)</label>
+                <input id="cardRequestWalletFeeTier2Usd" type="number" step="0.01" min="0" value="3" />
+              </div>
+              <div>
+                <label>Wallet Card Request Fee Tier 3 (USD, $50+)</label>
+                <input id="cardRequestWalletFeeTier3Usd" type="number" step="0.01" min="0" value="5" />
+              </div>
+            </div>
+            <div class="row inline">
+              <div>
+                <label>Card Top-Up Commission (%)</label>
+                <input id="topupCommissionPercent" type="number" step="0.01" min="0" value="10" />
+              </div>
+              <div>
+                <label>Transfer Fee (%)</label>
+                <input id="transferFeePercent" type="number" step="0.01" min="0" value="0" />
+              </div>
+              <div>
+                <label>Bill Payment Fee (%)</label>
+                <input id="billPaymentFeePercent" type="number" step="0.01" min="0" value="0" />
+              </div>
+            </div>
             <div class="toolbar">
               <button type="submit">Save Pricing</button>
               <span class="tag" id="configSummary">—</span>
@@ -583,6 +632,16 @@
             <div class="data-box" id="statsUsers">Users: —</div>
             <div class="data-box" id="statsCards">Card Holders: —</div>
             <div class="data-box" id="statsTx">Transactions: —</div>
+          </div>
+          <div class="row inline">
+            <div class="data-box" id="statsWalletBalances">Total Wallet Balances: —</div>
+            <div class="data-box" id="statsTransfersToday">P2P Transfers Today: —</div>
+            <div class="data-box" id="statsBillsToday">Bills Paid Today: —</div>
+          </div>
+          <div class="row inline">
+            <div class="data-box" id="statsTopupsToday">Card Top-Ups Today: —</div>
+            <div class="data-box" id="statsReferralsTotal">Referrals All Time: —</div>
+            <div class="data-box" id="statsFeesToday">Fee Revenue Today: —</div>
           </div>
           <div class="status" id="statsStatus"></div>
         </section>
@@ -765,11 +824,17 @@
         <section class="card panel-view" data-view="usdtBind">
           <h2>Bind USDT Addresses</h2>
           <p class="sub">
-            Use when provider confirms addresses exist but your local records are missing.
+            Use when provider confirms addresses exist but your local records
+            are missing.
           </p>
           <form id="usdtBindForm" class="row">
             <label>Telegram User ID</label>
-            <input id="usdtBindUserId" type="text" placeholder="e.g. 1289295140" required />
+            <input
+              id="usdtBindUserId"
+              type="text"
+              placeholder="e.g. 1289295140"
+              required
+            />
 
             <label>TRC20 Address (optional)</label>
             <input id="usdtBindTrc20" type="text" placeholder="T..." />
@@ -782,19 +847,21 @@
 
             <div class="toolbar">
               <button type="submit">Save & Bind Addresses</button>
-              <button id="usdtResetBtn" type="button" class="secondary">Reset User Addresses</button>
+              <button id="usdtResetBtn" type="button" class="secondary">
+                Reset User Addresses
+              </button>
               <span class="tag">Admin action</span>
             </div>
             <div class="row inline">
-              <label style="display:flex;align-items:center;gap:8px;">
+              <label style="display: flex; align-items: center; gap: 8px">
                 <input id="usdtResetTrc20" type="checkbox" checked />
                 Reset TRC20
               </label>
-              <label style="display:flex;align-items:center;gap:8px;">
+              <label style="display: flex; align-items: center; gap: 8px">
                 <input id="usdtResetBep20" type="checkbox" checked />
                 Reset BEP20
               </label>
-              <label style="display:flex;align-items:center;gap:8px;">
+              <label style="display: flex; align-items: center; gap: 8px">
                 <input id="usdtResetPolygon" type="checkbox" checked />
                 Reset POLYGON
               </label>
@@ -895,6 +962,136 @@
             No data yet. Load to view.
           </div>
           <div class="status" id="cardTxnStatus"></div>
+        </section>
+
+        <section class="card panel-view" data-view="cardTopupReport">
+          <div class="toolbar" style="justify-content: space-between; margin-bottom: 6px">
+            <div>
+              <h2>Card Top-Up Report</h2>
+              <p class="sub">Wallet-to-card top-ups with fee and wallet deduction.</p>
+            </div>
+            <div class="toolbar">
+              <button id="cardTopupLoad" type="button" class="secondary">Load</button>
+              <button id="cardTopupExport" type="button">Export CSV</button>
+            </div>
+          </div>
+          <div class="row inline">
+            <div><label>Telegram ID</label><input id="cardTopupUserId" type="text" placeholder="optional" /></div>
+            <div><label>From (UTC)</label><input id="cardTopupFrom" type="date" /></div>
+            <div><label>To (UTC)</label><input id="cardTopupTo" type="date" /></div>
+            <div><label>Limit</label><select id="cardTopupLimit"><option>10</option><option selected>20</option><option>50</option><option>100</option></select></div>
+          </div>
+          <div class="data-box" id="cardTopupSummary">No data yet. Load to view.</div>
+          <div class="data-box" id="cardTopupList">No records yet.</div>
+          <div class="status" id="cardTopupStatus"></div>
+        </section>
+
+        <section class="card panel-view" data-view="terminatedCards">
+          <div class="toolbar" style="justify-content: space-between; margin-bottom: 6px">
+            <div>
+              <h2>Terminated Cards</h2>
+              <p class="sub">Audit trail for terminated cards and returned balances.</p>
+            </div>
+            <div class="toolbar"><button id="terminatedCardsLoad" type="button" class="secondary">Load</button></div>
+          </div>
+          <div class="row inline"><div><label>Limit</label><select id="terminatedCardsLimit"><option>10</option><option selected>20</option><option>50</option><option>100</option></select></div></div>
+          <div class="data-box" id="terminatedCardsList">No records yet.</div>
+          <div class="status" id="terminatedCardsStatus"></div>
+        </section>
+
+        <section class="card panel-view" data-view="walletBalances">
+          <div class="toolbar" style="justify-content: space-between; margin-bottom: 6px">
+            <div>
+              <h2>Wallet Balances</h2>
+              <p class="sub">Lookup wallet summary, then manually credit or debit.</p>
+            </div>
+            <div class="toolbar"><button id="walletBalancesLoad" type="button" class="secondary">Search</button></div>
+          </div>
+          <div class="row inline">
+            <div><label>Search by Telegram ID or phone</label><input id="walletBalanceSearch" type="text" placeholder="Telegram ID, username, phone, email" /></div>
+            <div><label>Limit</label><select id="walletBalanceLimit"><option>10</option><option selected>20</option><option>50</option><option>100</option></select></div>
+          </div>
+          <div class="data-box" id="walletBalanceResult">Search to view a wallet summary.</div>
+          <div class="row inline">
+            <form id="walletCreditForm" class="row">
+              <h3 style="margin:0">Manual Credit</h3>
+              <label>Telegram ID</label><input id="walletCreditUserId" type="text" required />
+              <label>Amount (USDT)</label><input id="walletCreditAmount" type="number" min="0.01" step="0.01" required />
+              <label>Reason</label><input id="walletCreditReason" type="text" required />
+              <div class="toolbar"><button type="submit">Confirm Credit</button></div>
+              <div class="status" id="walletCreditStatus"></div>
+            </form>
+            <form id="walletDebitForm" class="row">
+              <h3 style="margin:0">Manual Debit</h3>
+              <label>Telegram ID</label><input id="walletDebitUserId" type="text" required />
+              <label>Amount (USDT)</label><input id="walletDebitAmount" type="number" min="0.01" step="0.01" required />
+              <label>Reason</label><input id="walletDebitReason" type="text" required />
+              <div class="toolbar"><button type="submit">Confirm Debit</button></div>
+              <div class="status" id="walletDebitStatus"></div>
+            </form>
+          </div>
+        </section>
+
+        <section class="card panel-view" data-view="walletCardRequests">
+          <div class="toolbar" style="justify-content: space-between; margin-bottom: 6px">
+            <div>
+              <h2>Card Requests via Wallet</h2>
+              <p class="sub">Requests funded from wallet balance and their fees.</p>
+            </div>
+            <div class="toolbar"><button id="walletCardRequestsLoad" type="button" class="secondary">Load</button><button id="walletCardRequestsExport" type="button">Export CSV</button></div>
+          </div>
+          <div class="row inline"><div><label>Limit</label><select id="walletCardRequestsLimit"><option>10</option><option selected>20</option><option>50</option><option>100</option></select></div></div>
+          <div class="data-box" id="walletCardRequestsSummary">No data yet. Load to view.</div>
+          <div class="data-box" id="walletCardRequestsList">No records yet.</div>
+          <div class="status" id="walletCardRequestsStatus"></div>
+        </section>
+
+        <section class="card panel-view" data-view="transferHistory">
+          <div class="toolbar" style="justify-content: space-between; margin-bottom: 6px">
+            <div>
+              <h2>Transfer History</h2>
+              <p class="sub">Peer-to-peer transfers across users.</p>
+            </div>
+            <div class="toolbar"><button id="transferHistoryLoad" type="button" class="secondary">Load</button><button id="transferHistoryExport" type="button">Export CSV</button></div>
+          </div>
+          <div class="row inline"><div><label>Telegram ID</label><input id="transferHistoryUserId" type="text" placeholder="optional" /></div><div><label>From (UTC)</label><input id="transferHistoryFrom" type="date" /></div><div><label>To (UTC)</label><input id="transferHistoryTo" type="date" /></div><div><label>Limit</label><select id="transferHistoryLimit"><option>10</option><option selected>20</option><option>50</option><option>100</option></select></div></div>
+          <div class="data-box" id="transferHistorySummary">No data yet. Load to view.</div>
+          <div class="data-box" id="transferHistoryList">No records yet.</div>
+          <div class="status" id="transferHistoryStatus"></div>
+        </section>
+
+        <section class="card panel-view" data-view="billHistory">
+          <div class="toolbar" style="justify-content: space-between; margin-bottom: 6px">
+            <div>
+              <h2>Bill Payment History</h2>
+              <p class="sub">Electricity, water, internet, airtime, and other bill payments.</p>
+            </div>
+            <div class="toolbar"><button id="billHistoryLoad" type="button" class="secondary">Load</button><button id="billHistoryExport" type="button">Export CSV</button></div>
+          </div>
+          <div class="row inline">
+            <div><label>Type</label><select id="billHistoryType"><option value="all" selected>All</option><option value="electricity">Electricity</option><option value="water">Water</option><option value="internet">Internet</option><option value="airtime">Airtime</option></select></div>
+            <div><label>Telegram ID</label><input id="billHistoryUserId" type="text" placeholder="optional" /></div>
+            <div><label>From (UTC)</label><input id="billHistoryFrom" type="date" /></div>
+            <div><label>To (UTC)</label><input id="billHistoryTo" type="date" /></div>
+            <div><label>Limit</label><select id="billHistoryLimit"><option>10</option><option selected>20</option><option>50</option><option>100</option></select></div>
+          </div>
+          <div class="data-box" id="billHistorySummary">No data yet. Load to view.</div>
+          <div class="data-box" id="billHistoryList">No records yet.</div>
+          <div class="status" id="billHistoryStatus"></div>
+        </section>
+
+        <section class="card panel-view" data-view="referralReport">
+          <div class="toolbar" style="justify-content: space-between; margin-bottom: 6px">
+            <div>
+              <h2>Referral Report</h2>
+              <p class="sub">Track invites, verified users, and top referrers.</p>
+            </div>
+            <div class="toolbar"><button id="referralReportLoad" type="button" class="secondary">Load</button><button id="referralReportExport" type="button">Export CSV</button></div>
+          </div>
+          <div class="row inline"><div><label>Limit</label><select id="referralReportLimit"><option>10</option><option selected>20</option><option>50</option><option>100</option></select></div></div>
+          <div class="data-box" id="referralReportSummary">No data yet. Load to view.</div>
+          <div class="data-box" id="referralReportList">No records yet.</div>
+          <div class="status" id="referralReportStatus"></div>
         </section>
 
         <section class="card panel-view" data-view="declineFeeReport">
@@ -1132,6 +1329,40 @@
         cardTxnCardId: document.getElementById("cardTxnCardId"),
         cardTxnTable: document.getElementById("cardTxnTable"),
         cardTxnStatus: document.getElementById("cardTxnStatus"),
+        cardTopupLoad: document.getElementById("cardTopupLoad"),
+        cardTopupExport: document.getElementById("cardTopupExport"),
+        cardTopupSummary: document.getElementById("cardTopupSummary"),
+        cardTopupList: document.getElementById("cardTopupList"),
+        cardTopupStatus: document.getElementById("cardTopupStatus"),
+        terminatedCardsLoad: document.getElementById("terminatedCardsLoad"),
+        terminatedCardsList: document.getElementById("terminatedCardsList"),
+        terminatedCardsStatus: document.getElementById("terminatedCardsStatus"),
+        walletBalancesLoad: document.getElementById("walletBalancesLoad"),
+        walletBalanceResult: document.getElementById("walletBalanceResult"),
+        walletCreditForm: document.getElementById("walletCreditForm"),
+        walletDebitForm: document.getElementById("walletDebitForm"),
+        walletCreditStatus: document.getElementById("walletCreditStatus"),
+        walletDebitStatus: document.getElementById("walletDebitStatus"),
+        walletCardRequestsLoad: document.getElementById("walletCardRequestsLoad"),
+        walletCardRequestsExport: document.getElementById("walletCardRequestsExport"),
+        walletCardRequestsSummary: document.getElementById("walletCardRequestsSummary"),
+        walletCardRequestsList: document.getElementById("walletCardRequestsList"),
+        walletCardRequestsStatus: document.getElementById("walletCardRequestsStatus"),
+        transferHistoryLoad: document.getElementById("transferHistoryLoad"),
+        transferHistoryExport: document.getElementById("transferHistoryExport"),
+        transferHistorySummary: document.getElementById("transferHistorySummary"),
+        transferHistoryList: document.getElementById("transferHistoryList"),
+        transferHistoryStatus: document.getElementById("transferHistoryStatus"),
+        billHistoryLoad: document.getElementById("billHistoryLoad"),
+        billHistoryExport: document.getElementById("billHistoryExport"),
+        billHistorySummary: document.getElementById("billHistorySummary"),
+        billHistoryList: document.getElementById("billHistoryList"),
+        billHistoryStatus: document.getElementById("billHistoryStatus"),
+        referralReportLoad: document.getElementById("referralReportLoad"),
+        referralReportExport: document.getElementById("referralReportExport"),
+        referralReportSummary: document.getElementById("referralReportSummary"),
+        referralReportList: document.getElementById("referralReportList"),
+        referralReportStatus: document.getElementById("referralReportStatus"),
         declineFeeLoad: document.getElementById("declineFeeLoad"),
         declineFeeExport: document.getElementById("declineFeeExport"),
         declineFeeDays: document.getElementById("declineFeeDays"),
@@ -1152,6 +1383,12 @@
         statsUsers: document.getElementById("statsUsers"),
         statsCards: document.getElementById("statsCards"),
         statsTx: document.getElementById("statsTx"),
+        statsWalletBalances: document.getElementById("statsWalletBalances"),
+        statsTransfersToday: document.getElementById("statsTransfersToday"),
+        statsBillsToday: document.getElementById("statsBillsToday"),
+        statsTopupsToday: document.getElementById("statsTopupsToday"),
+        statsReferralsTotal: document.getElementById("statsReferralsTotal"),
+        statsFeesToday: document.getElementById("statsFeesToday"),
         statsStatus: document.getElementById("statsStatus"),
         resetUsersBtn: document.getElementById("resetUsersBtn"),
         resetScope: document.getElementById("resetScope"),
@@ -1186,6 +1423,12 @@
         cardRequestFeeEtb: document.getElementById("cardRequestFeeEtb"),
         firstCardAmountUsd: document.getElementById("firstCardAmountUsd"),
         firstCardFeeUsd: document.getElementById("firstCardFeeUsd"),
+        cardRequestWalletFeeTier1Usd: document.getElementById("cardRequestWalletFeeTier1Usd"),
+        cardRequestWalletFeeTier2Usd: document.getElementById("cardRequestWalletFeeTier2Usd"),
+        cardRequestWalletFeeTier3Usd: document.getElementById("cardRequestWalletFeeTier3Usd"),
+        topupCommissionPercent: document.getElementById("topupCommissionPercent"),
+        transferFeePercent: document.getElementById("transferFeePercent"),
+        billPaymentFeePercent: document.getElementById("billPaymentFeePercent"),
         depositAmountEtb: document.getElementById("depositAmountEtb"),
         topupAmountUsdt: document.getElementById("topupAmountUsdt"),
         balanceUserId: document.getElementById("balanceUserId"),
@@ -1306,7 +1549,9 @@
           data = data.data;
         }
         if (!res.ok) {
-          const message = extractErrorMessage(data?.message || data?.error || data);
+          const message = extractErrorMessage(
+            data?.message || data?.error || data,
+          );
           const err = new Error(message);
           err.status = res.status;
           // Attach payload so UI can show validation detail
@@ -1314,6 +1559,47 @@
           throw err;
         }
         return data;
+      }
+
+      async function downloadCsv(url, filename) {
+        const res = await fetch(url, { headers: headers() });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(text || `Failed to download ${filename}`);
+        }
+        const blob = await res.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = objectUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      }
+
+      function formatMaybeDate(value) {
+        if (!value) return "-";
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+      }
+
+      function formatMoney(value, digits = 2) {
+        const num = Number(value);
+        return Number.isFinite(num) ? `$${num.toFixed(digits)}` : String(value ?? "-");
+      }
+
+      function renderList(container, rows, emptyText, renderRow) {
+        if (!container) return;
+        if (!rows || !rows.length) {
+          container.textContent = emptyText;
+          return;
+        }
+        container.innerHTML = rows.map(renderRow).join("");
+      }
+
+      function setText(el, text) {
+        if (el) el.textContent = text;
       }
 
       let latestTxns = [];
@@ -1413,11 +1699,266 @@
             els.statsCards.textContent = `Card Holders: ${data.cardHolders ?? 0}`;
           if (els.statsTx)
             els.statsTx.textContent = `Transactions: ${data.transactionsTotal ?? 0}`;
+          if (els.statsWalletBalances)
+            els.statsWalletBalances.textContent = `Total Wallet Balances: ${formatMoney(data.totalWalletBalances ?? 0)}`;
+          if (els.statsTransfersToday)
+            els.statsTransfersToday.textContent = `P2P Transfers Today: ${data.totalP2pTransfersToday ?? 0}`;
+          if (els.statsBillsToday)
+            els.statsBillsToday.textContent = `Bills Paid Today: ${data.totalBillsPaidToday ?? 0}`;
+          if (els.statsTopupsToday)
+            els.statsTopupsToday.textContent = `Card Top-Ups Today: ${data.totalCardTopUpsToday ?? 0}`;
+          if (els.statsReferralsTotal)
+            els.statsReferralsTotal.textContent = `Referrals All Time: ${data.totalReferralsAllTime ?? 0}`;
+          if (els.statsFeesToday)
+            els.statsFeesToday.textContent = `Fee Revenue Today: ${formatMoney(data.totalFeeRevenueToday ?? 0)}`;
           if (els.statsStatus) els.statsStatus.textContent = "Updated";
         } catch (err) {
           const msg = err?.message || "Failed to load stats";
           if (els.statsStatus) els.statsStatus.textContent = msg;
           showToast(msg, "error");
+        }
+      }
+
+      function buildQuery(params) {
+        const qp = new URLSearchParams();
+        Object.entries(params || {}).forEach(([key, value]) => {
+          if (value == null || value === "") return;
+          qp.set(key, String(value));
+        });
+        return qp.toString();
+      }
+
+      function adminUrl(path, params) {
+        const qs = buildQuery(params);
+        return qs ? `${path}?${qs}` : path;
+      }
+
+      function renderReportCards(container, rows, emptyText, renderLine) {
+        renderList(container, rows, emptyText, (row) => {
+          return `<div class="req-card">${renderLine(row)}</div>`;
+        });
+      }
+
+      async function loadReportJson(path, params) {
+        return safeFetch(adminUrl(path, params));
+      }
+
+      function renderPairs(obj, labels) {
+        return labels
+          .map(([label, value]) => `<div class="req-line">${label}: ${value ?? "-"}</div>`)
+          .join("");
+      }
+
+      async function loadCardTopupReport(download = false) {
+        if (!hasToken()) return showToast("Missing admin token", "error");
+        const params = {
+          userId: (document.getElementById("cardTopupUserId")?.value || "").trim(),
+          from: document.getElementById("cardTopupFrom")?.value || "",
+          to: document.getElementById("cardTopupTo")?.value || "",
+          limit: document.getElementById("cardTopupLimit")?.value || 20,
+          format: download ? "csv" : "json",
+        };
+        if (els.cardTopupStatus) els.cardTopupStatus.textContent = download ? "Exporting..." : "Loading...";
+        try {
+          if (download) return await downloadCsv(adminUrl("/api/admin/reports/card-topups", params), "card-topup-report.csv");
+          const data = await loadReportJson("/api/admin/reports/card-topups", params);
+          setText(els.cardTopupSummary, `Total Top-Ups: ${data.summary?.totalTopUps ?? 0}\nTotal Fees Collected: ${formatMoney(data.summary?.totalFeesCollected ?? 0)}\nTotal Volume: ${formatMoney(data.summary?.totalVolume ?? 0)}`);
+          renderReportCards(els.cardTopupList, data.rows || [], "No records yet.", (row) => `
+            <div class="mono req-line">${formatMaybeDate(row.createdAt)}</div>
+            <div class="req-line">👤 User: ${row.userId || "-"}</div>
+            <div class="req-line">💳 Card: ${row.cardId || "-"}</div>
+            <div class="req-line">💰 Amount to card: ${formatMoney(row.amountToCard)}</div>
+            <div class="req-line">🧾 Fee (10%): ${formatMoney(row.feeUsd)}</div>
+            <div class="req-line">💵 Wallet deducted: ${formatMoney(row.walletDeducted)}</div>
+            <div class="req-line">✅ Status: ${row.status || "-"}</div>
+          `);
+          setText(els.cardTopupStatus, `Loaded ${data.rows?.length || 0}`);
+        } catch (err) {
+          setText(els.cardTopupStatus, err.message || "Failed to load report");
+          showToast(err.message || "Failed to load report", "error");
+        }
+      }
+
+      async function loadTerminatedCards() {
+        if (!hasToken()) return showToast("Missing admin token", "error");
+        const params = { limit: document.getElementById("terminatedCardsLimit")?.value || 20 };
+        setText(els.terminatedCardsStatus, "Loading...");
+        try {
+          const data = await loadReportJson("/api/admin/cards/terminated", params);
+          renderReportCards(els.terminatedCardsList, data.rows || [], "No terminated cards found.", (row) => `
+            <div class="mono req-line">${formatMaybeDate(row.terminatedAt)}</div>
+            <div class="req-line">👤 User: ${row.userId || "-"}</div>
+            <div class="req-line">💳 Card: ${row.last4 ? `•••• ${row.last4}` : row.cardId || "-"}</div>
+            <div class="req-line">💰 Balance returned: ${formatMoney(row.balanceReturned)}</div>
+            <div class="req-line">📅 Terminated: ${formatMaybeDate(row.terminatedAt)}</div>
+            <div class="req-line">✅ Status: ${row.status || "-"}</div>
+            <div class="toolbar" style="margin-top:6px"><button class="secondary" data-reactivate-card="${row.cardId}">Reactivate Card</button></div>
+          `);
+          setText(els.terminatedCardsStatus, `Loaded ${data.rows?.length || 0}`);
+        } catch (err) {
+          setText(els.terminatedCardsStatus, err.message || "Failed to load terminated cards");
+          showToast(err.message || "Failed to load terminated cards", "error");
+        }
+      }
+
+      async function loadWalletBalances() {
+        if (!hasToken()) return showToast("Missing admin token", "error");
+        const search = (document.getElementById("walletBalanceSearch")?.value || "").trim();
+        const limit = document.getElementById("walletBalanceLimit")?.value || 20;
+        setText(els.walletBalanceResult, "Loading...");
+        try {
+          const data = await loadReportJson("/api/admin/wallet/balances", { search, limit });
+          const items = data.items || [];
+          if (!items.length) {
+            setText(els.walletBalanceResult, "No matching wallets found.");
+            return;
+          }
+          const first = items[0];
+          setText(els.walletBalanceResult, [
+            `👤 User: ${first.userId}`,
+            `💰 Wallet Balance: ${formatMoney(first.balance)}`,
+            `📅 Last Deposit: ${formatMaybeDate(first.lastDeposit)}`,
+            `📅 Last Activity: ${formatMaybeDate(first.lastActivity)}`,
+            `📊 Total Deposited: ${formatMoney(first.totalDeposited)}`,
+            `📊 Total Transferred Out: ${formatMoney(first.totalTransferredOut)}`,
+            `📊 Total Top-Ups to Card: ${formatMoney(first.totalTopUpsToCard)}`,
+          ].join("\n"));
+          if (els.walletCreditUserId) els.walletCreditUserId.value = first.userId;
+          if (els.walletDebitUserId) els.walletDebitUserId.value = first.userId;
+        } catch (err) {
+          setText(els.walletBalanceResult, err.message || "Failed to load wallet summary");
+          showToast(err.message || "Failed to load wallet summary", "error");
+        }
+      }
+
+      async function submitWalletAdjust(action, formEls) {
+        if (!hasToken()) return showToast("Missing admin token", "error");
+        const statusEl = action === "credit" ? els.walletCreditStatus : els.walletDebitStatus;
+        const userId = (formEls.userId.value || "").trim();
+        const amountUsdt = Number(formEls.amount.value);
+        const reason = (formEls.reason.value || "").trim();
+        if (!userId || !reason || !Number.isFinite(amountUsdt) || amountUsdt <= 0) {
+          setText(statusEl, "Telegram ID, amount, and reason are required");
+          return;
+        }
+        setText(statusEl, "Working...");
+        try {
+          const data = await safeFetch("/api/admin/wallet/balances/adjust", {
+            method: "POST",
+            body: JSON.stringify({ userId, amountUsdt, reason, action }),
+          });
+          setText(statusEl, `Done. New balance: ${formatMoney(data.balance)}`);
+          showToast(`${action === "credit" ? "Credit" : "Debit"} complete`, "success");
+          await loadWalletBalances();
+        } catch (err) {
+          setText(statusEl, err.message || "Failed");
+          showToast(err.message || "Failed", "error");
+        }
+      }
+
+      async function loadWalletCardRequests(download = false) {
+        if (!hasToken()) return showToast("Missing admin token", "error");
+        const params = { limit: document.getElementById("walletCardRequestsLimit")?.value || 20, format: download ? "csv" : "json" };
+        setText(els.walletCardRequestsStatus, download ? "Exporting..." : "Loading...");
+        try {
+          if (download) return await downloadCsv(adminUrl("/api/admin/reports/card-requests-wallet", params), "card-requests-wallet.csv");
+          const data = await loadReportJson("/api/admin/reports/card-requests-wallet", params);
+          setText(els.walletCardRequestsSummary, `Total Requests: ${data.summary?.totalRequests ?? 0}\nTotal Fees Collected: ${formatMoney(data.summary?.totalFeesCollected ?? 0)}`);
+          renderReportCards(els.walletCardRequestsList, data.rows || [], "No records yet.", (row) => `
+            <div class="mono req-line">${formatMaybeDate(row.createdAt)}</div>
+            <div class="req-line">👤 User: ${row.userId || "-"}</div>
+            <div class="req-line">💵 Wallet deducted: ${formatMoney(row.walletDeducted)}</div>
+            <div class="req-line">💳 Card funded: ${formatMoney(row.cardFunded)}</div>
+            <div class="req-line">🧾 Fee: ${formatMoney(row.fee)}${row.tier ? ` (tier: ${row.tier})` : ""}</div>
+            <div class="req-line">✅ Status: ${row.status || "-"}</div>
+          `);
+          setText(els.walletCardRequestsStatus, `Loaded ${data.rows?.length || 0}`);
+        } catch (err) {
+          setText(els.walletCardRequestsStatus, err.message || "Failed to load report");
+          showToast(err.message || "Failed to load report", "error");
+        }
+      }
+
+      async function loadTransferHistory(download = false) {
+        if (!hasToken()) return showToast("Missing admin token", "error");
+        const params = {
+          userId: (document.getElementById("transferHistoryUserId")?.value || "").trim(),
+          from: document.getElementById("transferHistoryFrom")?.value || "",
+          to: document.getElementById("transferHistoryTo")?.value || "",
+          limit: document.getElementById("transferHistoryLimit")?.value || 20,
+          format: download ? "csv" : "json",
+        };
+        setText(els.transferHistoryStatus, download ? "Exporting..." : "Loading...");
+        try {
+          if (download) return await downloadCsv(adminUrl("/api/admin/reports/transfers", params), "transfer-history.csv");
+          const data = await loadReportJson("/api/admin/reports/transfers", params);
+          setText(els.transferHistorySummary, `Total Transfers: ${data.summary?.totalTransfers ?? 0}\nTotal Amount: ${formatMoney(data.summary?.totalAmount ?? 0)}`);
+          renderReportCards(els.transferHistoryList, data.rows || [], "No records yet.", (row) => `
+            <div class="mono req-line">${formatMaybeDate(row.createdAt)}</div>
+            <div class="req-line">👤 Sender: ${row.senderUserId || "-"}${row.senderName ? ` (${row.senderName})` : ""}</div>
+            <div class="req-line">👤 Receiver: ${row.receiverUserId || "-"}${row.receiverName ? ` (${row.receiverName})` : ""}</div>
+            <div class="req-line">💸 Amount: ${formatMoney(row.amount)}</div>
+            <div class="req-line">🔖 Ref: ${row.reference || "-"}</div>
+            <div class="req-line">✅ Status: ${row.status || "-"}</div>
+            <div class="toolbar" style="margin-top:6px"><button class="secondary" data-reverse-transfer="${row.reference || ""}">Reverse Transfer</button></div>
+          `);
+          setText(els.transferHistoryStatus, `Loaded ${data.rows?.length || 0}`);
+        } catch (err) {
+          setText(els.transferHistoryStatus, err.message || "Failed to load report");
+          showToast(err.message || "Failed to load report", "error");
+        }
+      }
+
+      async function loadBillHistory(download = false) {
+        if (!hasToken()) return showToast("Missing admin token", "error");
+        const params = {
+          userId: (document.getElementById("billHistoryUserId")?.value || "").trim(),
+          from: document.getElementById("billHistoryFrom")?.value || "",
+          to: document.getElementById("billHistoryTo")?.value || "",
+          limit: document.getElementById("billHistoryLimit")?.value || 20,
+          type: document.getElementById("billHistoryType")?.value || "all",
+          format: download ? "csv" : "json",
+        };
+        setText(els.billHistoryStatus, download ? "Exporting..." : "Loading...");
+        try {
+          if (download) return await downloadCsv(adminUrl("/api/admin/reports/bills", params), "bill-payment-history.csv");
+          const data = await loadReportJson("/api/admin/reports/bills", params);
+          setText(els.billHistorySummary, `Total Paid Today: ${data.summary?.totalPaidToday ?? 0}\nTotal Volume Today: ${formatMoney(data.summary?.totalVolumeToday ?? 0)}\nFailed Today: ${data.summary?.failedToday ?? 0}`);
+          renderReportCards(els.billHistoryList, data.rows || [], "No records yet.", (row) => `
+            <div class="mono req-line">${formatMaybeDate(row.createdAt)}</div>
+            <div class="req-line">👤 User: ${row.userId || "-"}</div>
+            <div class="req-line">🧾 Type: ${row.billType || "-"}</div>
+            <div class="req-line">📱 Provider: ${row.provider || "-"}</div>
+            <div class="req-line">📞 Number: ${row.number || "-"}</div>
+            <div class="req-line">💰 Amount: ${formatMoney(row.amount)}</div>
+            <div class="req-line">🔖 Ref: ${row.reference || "-"}</div>
+            <div class="req-line">✅ Status: ${row.status || "-"}</div>
+          `);
+          setText(els.billHistoryStatus, `Loaded ${data.rows?.length || 0}`);
+        } catch (err) {
+          setText(els.billHistoryStatus, err.message || "Failed to load report");
+          showToast(err.message || "Failed to load report", "error");
+        }
+      }
+
+      async function loadReferralReport(download = false) {
+        if (!hasToken()) return showToast("Missing admin token", "error");
+        const params = { limit: document.getElementById("referralReportLimit")?.value || 20, format: download ? "csv" : "json" };
+        setText(els.referralReportStatus, download ? "Exporting..." : "Loading...");
+        try {
+          if (download) return await downloadCsv(adminUrl("/api/admin/reports/referrals", params), "referral-report.csv");
+          const data = await loadReportJson("/api/admin/reports/referrals", params);
+          setText(els.referralReportSummary, `Total Referrals: ${data.summary?.totalReferrals ?? 0}\nVerified: ${data.summary?.verified ?? 0}\nTop Referrer: ${data.summary?.topReferrer || "-"}`);
+          renderReportCards(els.referralReportList, data.rows || [], "No records yet.", (row) => `
+            <div class="req-line">👤 User: ${row.userId || "-"}${row.userName ? ` (${row.userName})` : ""}</div>
+            <div class="req-line">👥 Invited: ${row.invited ?? 0}</div>
+            <div class="req-line">✅ Verified: ${row.verified ?? 0}</div>
+            <div class="req-line">📅 Last Referral: ${formatMaybeDate(row.lastReferral)}</div>
+          `);
+          setText(els.referralReportStatus, `Loaded ${data.rows?.length || 0}`);
+        } catch (err) {
+          setText(els.referralReportStatus, err.message || "Failed to load report");
+          showToast(err.message || "Failed to load report", "error");
         }
       }
 
@@ -2156,8 +2697,14 @@
           inputs.cardRequestFeeEtb.value = c.cardRequestFeeEtb ?? 0;
           inputs.firstCardAmountUsd.value = c.firstCardAmountUsd ?? 5;
           inputs.firstCardFeeUsd.value = c.firstCardFeeUsd ?? 0;
+          inputs.cardRequestWalletFeeTier1Usd.value = c.cardRequestWalletFeeTier1Usd ?? 2;
+          inputs.cardRequestWalletFeeTier2Usd.value = c.cardRequestWalletFeeTier2Usd ?? 3;
+          inputs.cardRequestWalletFeeTier3Usd.value = c.cardRequestWalletFeeTier3Usd ?? 5;
+          inputs.topupCommissionPercent.value = c.topupCommissionPercent ?? c.topupPercentFee ?? 10;
+          inputs.transferFeePercent.value = c.transferFeePercent ?? 0;
+          inputs.billPaymentFeePercent.value = c.billPaymentFeePercent ?? 0;
           els.configStatus.textContent = "Config loaded";
-          els.configSummary.textContent = `Rate ${c.usdtRate} ETB | Deposit fee ${c.depositPercentFee}% + ${c.depositFlatFee} ETB | Top-up fee ${c.topupPercentFee}% + ${c.topupFlatFee} USDT | First card ${c.firstCardAmountUsd ?? 5} USD + fee ${c.firstCardFeeUsd ?? 0} USD`;
+          els.configSummary.textContent = `Rate ${c.usdtRate} ETB | Deposit fee ${c.depositPercentFee}% + ${c.depositFlatFee} ETB | Top-up fee ${c.topupCommissionPercent ?? c.topupPercentFee ?? 10}% + ${c.topupFlatFee} USDT | Card request tiers $${c.cardRequestWalletFeeTier1Usd ?? 2}/$${c.cardRequestWalletFeeTier2Usd ?? 3}/$${c.cardRequestWalletFeeTier3Usd ?? 5}`;
           const updatedAt = c.updatedAt
             ? new Date(c.updatedAt).toLocaleString()
             : "n/a";
@@ -2190,12 +2737,17 @@
         }
         if (!trc20 && !bep20 && !polygon) {
           if (els.usdtBindStatus)
-            els.usdtBindStatus.textContent = "At least one network address is required";
+            els.usdtBindStatus.textContent =
+              "At least one network address is required";
           return;
         }
 
-        if (els.usdtBindStatus) els.usdtBindStatus.textContent = "Binding addresses...";
-        setLoading(els.usdtBindForm?.querySelector("button[type=submit]"), true);
+        if (els.usdtBindStatus)
+          els.usdtBindStatus.textContent = "Binding addresses...";
+        setLoading(
+          els.usdtBindForm?.querySelector("button[type=submit]"),
+          true,
+        );
         try {
           const payload = {
             userId,
@@ -2218,7 +2770,10 @@
           if (els.usdtBindStatus) els.usdtBindStatus.textContent = msg;
           showToast(msg, "error");
         } finally {
-          setLoading(els.usdtBindForm?.querySelector("button[type=submit]"), false);
+          setLoading(
+            els.usdtBindForm?.querySelector("button[type=submit]"),
+            false,
+          );
         }
       }
 
@@ -2240,11 +2795,16 @@
         if (inputs.usdtResetTrc20?.checked) networks.push("TRC20");
         if (inputs.usdtResetBep20?.checked) networks.push("BEP20");
         if (inputs.usdtResetPolygon?.checked) networks.push("POLYGON");
-        const scopeLabel = networks.length ? networks.join(", ") : "all networks";
-        const confirmed = confirm(`Reset ${scopeLabel} USDT addresses for user ${userId}?`);
+        const scopeLabel = networks.length
+          ? networks.join(", ")
+          : "all networks";
+        const confirmed = confirm(
+          `Reset ${scopeLabel} USDT addresses for user ${userId}?`,
+        );
         if (!confirmed) return;
 
-        if (els.usdtBindStatus) els.usdtBindStatus.textContent = "Resetting addresses...";
+        if (els.usdtBindStatus)
+          els.usdtBindStatus.textContent = "Resetting addresses...";
         setLoading(els.usdtResetBtn, true);
         try {
           const payload = {
@@ -2354,6 +2914,24 @@
           firstCardFeeUsd: inputs.firstCardFeeUsd.value
             ? Number(inputs.firstCardFeeUsd.value)
             : undefined,
+          cardRequestWalletFeeTier1Usd: inputs.cardRequestWalletFeeTier1Usd.value
+            ? Number(inputs.cardRequestWalletFeeTier1Usd.value)
+            : undefined,
+          cardRequestWalletFeeTier2Usd: inputs.cardRequestWalletFeeTier2Usd.value
+            ? Number(inputs.cardRequestWalletFeeTier2Usd.value)
+            : undefined,
+          cardRequestWalletFeeTier3Usd: inputs.cardRequestWalletFeeTier3Usd.value
+            ? Number(inputs.cardRequestWalletFeeTier3Usd.value)
+            : undefined,
+          topupCommissionPercent: inputs.topupCommissionPercent.value
+            ? Number(inputs.topupCommissionPercent.value)
+            : undefined,
+          transferFeePercent: inputs.transferFeePercent.value
+            ? Number(inputs.transferFeePercent.value)
+            : undefined,
+          billPaymentFeePercent: inputs.billPaymentFeePercent.value
+            ? Number(inputs.billPaymentFeePercent.value)
+            : undefined,
           updatedBy: inputs.updatedBy.value || undefined,
         };
         try {
@@ -2363,7 +2941,7 @@
           });
           els.configStatus.textContent = "Saved";
           lastConfig = data.config;
-          els.configSummary.textContent = `Rate ${data.config.usdtRate} ETB | Deposit fee ${data.config.depositPercentFee}% + ${data.config.depositFlatFee} ETB | Top-up fee ${data.config.topupPercentFee}% + ${data.config.topupFlatFee} USDT | First card ${data.config.firstCardAmountUsd ?? 5} USD + fee ${data.config.firstCardFeeUsd ?? 0} USD`;
+          els.configSummary.textContent = `Rate ${data.config.usdtRate} ETB | Deposit fee ${data.config.depositPercentFee}% + ${data.config.depositFlatFee} ETB | Top-up fee ${data.config.topupCommissionPercent ?? data.config.topupPercentFee ?? 10}% + ${data.config.topupFlatFee} USDT | Card request tiers $${data.config.cardRequestWalletFeeTier1Usd ?? 2}/$${data.config.cardRequestWalletFeeTier2Usd ?? 3}/$${data.config.cardRequestWalletFeeTier3Usd ?? 5}`;
           showToast("Config saved", "success");
         } catch (err) {
           els.configStatus.textContent = err.message;

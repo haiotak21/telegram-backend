@@ -10,6 +10,12 @@ export interface IPricingConfig extends Document {
   topupMin?: number; // Minimum top-up amount in USDT
   topupMax?: number; // Maximum top-up amount in USDT
   cardRequestFeeEtb?: number; // flat fee in ETB for card requests
+  cardRequestWalletFeeTier1Usd?: number;
+  cardRequestWalletFeeTier2Usd?: number;
+  cardRequestWalletFeeTier3Usd?: number;
+  topupCommissionPercent?: number;
+  transferFeePercent?: number;
+  billPaymentFeePercent?: number;
   firstCardAmountUsd?: number; // card load amount in USD for first card request
   firstCardFeeUsd?: number; // processing fee in USD for first card request
   updatedBy?: string;
@@ -28,6 +34,12 @@ const PricingConfigSchema = new Schema<IPricingConfig>(
     topupMin: { type: Number },
     topupMax: { type: Number },
     cardRequestFeeEtb: { type: Number, default: 0 },
+    cardRequestWalletFeeTier1Usd: { type: Number, default: 2 },
+    cardRequestWalletFeeTier2Usd: { type: Number, default: 3 },
+    cardRequestWalletFeeTier3Usd: { type: Number, default: 5 },
+    topupCommissionPercent: { type: Number, default: 10 },
+    transferFeePercent: { type: Number, default: 0 },
+    billPaymentFeePercent: { type: Number, default: 0 },
     firstCardAmountUsd: { type: Number, default: 5 },
     firstCardFeeUsd: { type: Number, default: 0 },
     updatedBy: { type: String },

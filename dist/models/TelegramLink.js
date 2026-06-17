@@ -39,5 +39,7 @@ const TelegramLinkSchema = new mongoose_1.Schema({
     chatId: { type: Number, required: true, unique: true },
     customerEmail: { type: String },
     cardIds: { type: [String], default: [] },
+    referrerUserId: { type: String },
+    referredAt: { type: Date },
 });
 exports.TelegramLink = mongoose_1.default.model("TelegramLink", TelegramLinkSchema);

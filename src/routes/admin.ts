@@ -10,6 +10,7 @@ import User from "../models/User";
 import Customer from "../models/Customer";
 import Card from "../models/Card";
 import CardRequest from "../models/CardRequest";
+import RuntimeAudit from "../models/RuntimeAudit";
 import { TelegramLink } from "../models/TelegramLink";
 import Transaction from "../models/Transaction";
 import { notifyCardLinkedToUser, notifyCardStatusChanged } from "../services/botService";
@@ -293,10 +294,73 @@ function ensureCloudinary() {
   cloudinary.config({ cloud_name: cloudName, api_key: apiKey, api_secret: apiSecret, secure: true });
 }
 
+function startOfUtcDay(date = new Date()) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+function toFiniteNumber(value: any, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function extractTransactionMetadata(tx: any) {
+  const metadata = tx?.metadata && typeof tx.metadata === "object" && !Array.isArray(tx.metadata) ? tx.metadata : {};
+  return {
+    kind: String(metadata?.kind || "").toLowerCase(),
+    source: String(metadata?.source || "").toLowerCase(),
+    direction: String(metadata?.direction || "").toLowerCase(),
+    cardId: metadata?.cardId ? String(metadata.cardId) : undefined,
+    recipientUserId: metadata?.recipientUserId ? String(metadata.recipientUserId) : undefined,
+    senderUserId: metadata?.senderUserId ? String(metadata.senderUserId) : undefined,
+  };
+}
+
+function isBillPaymentTxn(tx: any) {
+  const meta = extractTransactionMetadata(tx);
+  return meta.kind === "bill_payment" || meta.source.startsWith("bill_") || String(tx?.transactionType || "").toLowerCase() === "bill";
+}
+
+function isP2pTransferTxn(tx: any) {
+  const meta = extractTransactionMetadata(tx);
+  return meta.kind === "p2p_transfer" && meta.direction === "debit";
+}
+
+function isWalletCardTopupTxn(tx: any) {
+  const meta = extractTransactionMetadata(tx);
+  return meta.source === "wallet_card_topup" || meta.kind === "wallet_card_topup";
+}
+
+function isWalletCardRequestTxn(tx: any) {
+  const meta = extractTransactionMetadata(tx);
+  return meta.kind === "card_request_wallet" || meta.source === "wallet_card_request";
+}
+
+async function buildUserLookup(userIds: string[]) {
+  const uniqueIds = Array.from(new Set(userIds.filter(Boolean)));
+  if (!uniqueIds.length) return new Map<string, any>();
+  if (isPrismaPersistenceEnabled()) {
+    const users = await prisma.user.findMany({ where: { userId: { in: uniqueIds } } });
+    return new Map(users.map((u) => [u.userId, u]));
+  }
+  const users = await User.find({ userId: { $in: uniqueIds } }).lean();
+  return new Map(users.map((u) => [u.userId, u]));
+}
+
+function userDisplayName(user: any) {
+  return [user?.firstName, user?.lastName].filter(Boolean).join(" ") || user?.username || user?.customerEmail || null;
+}
+
 router.get("/stats", requireAdmin, async (_req, res) => {
   try {
+    const since = startOfUtcDay();
+    const allUsersBalance = isPrismaPersistenceEnabled()
+      ? await prisma.user.aggregate({ _sum: { balance: true } })
+      : await User.aggregate([{ $group: { _id: null, balance: { $sum: "$balance" } } }]);
+    const totalWalletBalances = Number(isPrismaPersistenceEnabled() ? (allUsersBalance as any)?._sum?.balance || 0 : (allUsersBalance as any)?.[0]?.balance || 0);
+    const referralsTotal = await TelegramLink.countDocuments({ $and: [{ referrerUserId: { $exists: true } }, { referrerUserId: { $ne: null } }, { referrerUserId: { $ne: "" } }] });
+
     if (isPrismaPersistenceEnabled()) {
-      const [usersTotal, cardHoldersRows, transactionsTotal] = await Promise.all([
+      const [usersTotal, cardHoldersRows, transactionsTotal, todayTxns, referralLinks] = await Promise.all([
         prisma.user.count(),
         prisma.card.findMany({
           where: {
@@ -307,17 +371,70 @@ router.get("/stats", requireAdmin, async (_req, res) => {
           distinct: ["userId"],
         }),
         prisma.transaction.count(),
+        prisma.transaction.findMany({ where: { createdAt: { gte: since } }, take: 2000, orderBy: { createdAt: "desc" } }),
+        Promise.resolve(referralsTotal),
       ]);
       const cardHolders = cardHoldersRows.filter((row) => Boolean(row.userId)).length;
-      return ok(res, { usersTotal, cardHolders, transactionsTotal });
+      let totalP2pTransfersToday = 0;
+      let totalBillsPaidToday = 0;
+      let totalCardTopUpsToday = 0;
+      let totalFeeRevenueToday = 0;
+      for (const tx of todayTxns as any[]) {
+        if (isP2pTransferTxn(tx)) totalP2pTransfersToday += 1;
+        if (isBillPaymentTxn(tx) && String(tx?.status || "").toLowerCase() === "completed") totalBillsPaidToday += 1;
+        if (isWalletCardTopupTxn(tx) && String(tx?.status || "").toLowerCase() === "completed") {
+          totalCardTopUpsToday += 1;
+          totalFeeRevenueToday += toFiniteNumber(tx?.feeUsdt ?? tx?.metadata?.feeUsd ?? 0);
+        }
+        if (isWalletCardRequestTxn(tx) && String(tx?.status || "").toLowerCase() === "completed") {
+          totalFeeRevenueToday += toFiniteNumber(tx?.metadata?.feeUsd ?? tx?.feeUsdt ?? 0);
+        }
+      }
+      return ok(res, {
+        usersTotal,
+        cardHolders,
+        transactionsTotal,
+        totalWalletBalances,
+        totalP2pTransfersToday,
+        totalBillsPaidToday,
+        totalCardTopUpsToday,
+        totalReferralsAllTime: referralLinks,
+        totalFeeRevenueToday: Number(totalFeeRevenueToday.toFixed(2)),
+      });
     }
 
-    const [usersTotal, cardHolders, transactionsTotal] = await Promise.all([
+    const [usersTotal, cardHolders, transactionsTotal, todayTxns] = await Promise.all([
       User.countDocuments({}),
       Card.distinct("userId", { cardId: { $exists: true, $ne: "" } }).then((ids) => ids.length),
       Transaction.countDocuments({}),
+      Transaction.find({ createdAt: { $gte: since } }).sort({ createdAt: -1 }).limit(2000).lean(),
     ]);
-    return ok(res, { usersTotal, cardHolders, transactionsTotal });
+    let totalP2pTransfersToday = 0;
+    let totalBillsPaidToday = 0;
+    let totalCardTopUpsToday = 0;
+    let totalFeeRevenueToday = 0;
+    for (const tx of todayTxns as any[]) {
+      if (isP2pTransferTxn(tx)) totalP2pTransfersToday += 1;
+      if (isBillPaymentTxn(tx) && String(tx?.status || "").toLowerCase() === "completed") totalBillsPaidToday += 1;
+      if (isWalletCardTopupTxn(tx) && String(tx?.status || "").toLowerCase() === "completed") {
+        totalCardTopUpsToday += 1;
+        totalFeeRevenueToday += toFiniteNumber(tx?.feeUsdt ?? tx?.metadata?.feeUsd ?? 0);
+      }
+      if (isWalletCardRequestTxn(tx) && String(tx?.status || "").toLowerCase() === "completed") {
+        totalFeeRevenueToday += toFiniteNumber(tx?.metadata?.feeUsd ?? tx?.feeUsdt ?? 0);
+      }
+    }
+    return ok(res, {
+      usersTotal,
+      cardHolders,
+      transactionsTotal,
+      totalWalletBalances,
+      totalP2pTransfersToday,
+      totalBillsPaidToday,
+      totalCardTopUpsToday,
+      totalReferralsAllTime: referralsTotal,
+      totalFeeRevenueToday: Number(totalFeeRevenueToday.toFixed(2)),
+    });
   } catch (e) {
     const { status, message } = normalizeError(e);
     return fail(res, message, status);
@@ -1048,6 +1165,173 @@ router.post("/cards/:cardId/action", requireAdmin, async (req, res) => {
   }
 });
 
+router.post("/cards/:cardId/reactivate", requireAdmin, async (req, res) => {
+  try {
+    const cardId = String(req.params.cardId);
+    const card = isPrismaPersistenceEnabled()
+      ? await prisma.card.findUnique({ where: { cardId } })
+      : await Card.findOne({ cardId });
+    if (!card) return fail(res, "Card not found", 404);
+
+    const currentStatus = String(card.status || "").toLowerCase();
+    if (currentStatus !== "terminated" && currentStatus !== "inactive" && currentStatus !== "closed") {
+      return fail(res, "Only terminated cards can be reactivated", 400);
+    }
+
+    const result = await actionCard(cardId, "unfreeze");
+    const nextStatus = "active";
+
+    if (isPrismaPersistenceEnabled()) {
+      await prisma.card.update({ where: { cardId }, data: { status: nextStatus, lastSync: new Date() } });
+    } else {
+      await Card.findOneAndUpdate({ cardId }, { $set: { status: nextStatus, lastSync: new Date() } }, { new: true });
+    }
+
+    await notifyCardStatusChanged(cardId, nextStatus);
+    return ok(res, { result, status: nextStatus });
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.post("/transfers/:reference/reverse", requireAdmin, async (req, res) => {
+  try {
+    const reference = String(req.params.reference || "").trim();
+    if (!reference) return fail(res, "Reference is required", 400);
+
+    if (isPrismaPersistenceEnabled()) {
+      const original = await prisma.transaction.findFirst({
+        where: {
+          OR: [
+            { transactionNumber: reference },
+            { referenceNumber: reference },
+          ],
+          metadata: {
+            path: ["kind"],
+            equals: "p2p_transfer",
+          },
+        } as any,
+        orderBy: { createdAt: "desc" },
+      });
+      if (!original) return fail(res, "Transfer not found", 404);
+      const meta = extractTransactionMetadata(original as any);
+      const amount = toFiniteNumber((original as any)?.amountUsdt ?? (original as any)?.amount ?? 0);
+      const senderUserId = String((original as any)?.userId || "");
+      const receiverUserId = meta.recipientUserId || "";
+      if (!senderUserId || !receiverUserId) return fail(res, "Transfer metadata is incomplete", 400);
+      const sender = await prisma.user.findUnique({ where: { userId: senderUserId } });
+      const receiver = await prisma.user.findUnique({ where: { userId: receiverUserId } });
+      if (!sender || !receiver) return fail(res, "Sender or receiver not found", 404);
+
+      await prisma.$transaction(async (tx: any) => {
+        await tx.user.update({ where: { userId: senderUserId }, data: { balance: { increment: amount } } });
+        await tx.user.update({ where: { userId: receiverUserId }, data: { balance: { decrement: amount } } });
+        await tx.transaction.create({
+          data: {
+            userId: senderUserId,
+            transactionType: "deposit",
+            paymentMethod: "system",
+            amount,
+            amountUsdt: amount,
+            currency: "USDT",
+            transactionNumber: `${reference}-REV-S`,
+            referenceNumber: `${reference}-REV`,
+            status: "completed",
+            verified: true,
+            metadata: { kind: "p2p_transfer_reversal", direction: "credit", originalReference: reference, receiverUserId },
+          },
+        });
+        await tx.transaction.create({
+          data: {
+            userId: receiverUserId,
+            transactionType: "withdrawal",
+            paymentMethod: "system",
+            amount,
+            amountUsdt: amount,
+            currency: "USDT",
+            transactionNumber: `${reference}-REV-R`,
+            referenceNumber: `${reference}-REV`,
+            status: "completed",
+            verified: true,
+            metadata: { kind: "p2p_transfer_reversal", direction: "debit", originalReference: reference, senderUserId },
+          },
+        });
+        await tx.transaction.updateMany({
+          where: { OR: [{ transactionNumber: reference }, { referenceNumber: reference }] },
+          data: { metadata: { ...(original as any).metadata, reversedAt: new Date(), reversedBy: "admin" } },
+        });
+      });
+      return ok(res, { reversed: true, reference, amount });
+    }
+
+    const original = await Transaction.findOne({
+      $or: [{ transactionNumber: reference }, { referenceNumber: reference }],
+      transactionType: "withdrawal",
+      "metadata.kind": "p2p_transfer",
+    }).lean();
+    if (!original) return fail(res, "Transfer not found", 404);
+    const meta = extractTransactionMetadata(original as any);
+    const amount = toFiniteNumber((original as any)?.amountUsdt ?? (original as any)?.amount ?? 0);
+    const senderUserId = String((original as any)?.userId || "");
+    const receiverUserId = meta.recipientUserId || "";
+    if (!senderUserId || !receiverUserId) return fail(res, "Transfer metadata is incomplete", 400);
+    const sender = await User.findOne({ userId: senderUserId }).lean();
+    const receiver = await User.findOne({ userId: receiverUserId }).lean();
+    if (!sender || !receiver) return fail(res, "Sender or receiver not found", 404);
+
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+      await User.updateOne({ userId: senderUserId }, { $inc: { balance: amount } }, { session });
+      await User.updateOne({ userId: receiverUserId }, { $inc: { balance: -amount } }, { session });
+      await Transaction.create([
+        {
+          userId: senderUserId,
+          transactionType: "deposit",
+          paymentMethod: "system",
+          amount,
+          amountUsdt: amount,
+          currency: "USDT",
+          transactionNumber: `${reference}-REV-S`,
+          referenceNumber: `${reference}-REV`,
+          status: "completed",
+          verified: true,
+          metadata: { kind: "p2p_transfer_reversal", direction: "credit", originalReference: reference, receiverUserId },
+        },
+        {
+          userId: receiverUserId,
+          transactionType: "withdrawal",
+          paymentMethod: "system",
+          amount,
+          amountUsdt: amount,
+          currency: "USDT",
+          transactionNumber: `${reference}-REV-R`,
+          referenceNumber: `${reference}-REV`,
+          status: "completed",
+          verified: true,
+          metadata: { kind: "p2p_transfer_reversal", direction: "debit", originalReference: reference, senderUserId },
+        },
+      ], { session });
+      await Transaction.updateMany(
+        { $or: [{ transactionNumber: reference }, { referenceNumber: reference }] },
+        { $set: { metadata: { ...(original as any).metadata, reversedAt: new Date(), reversedBy: "admin" } } },
+        { session }
+      );
+      await session.commitTransaction();
+      session.endSession();
+      return ok(res, { reversed: true, reference, amount });
+    } catch (err) {
+      try { await session.abortTransaction(); } catch {}
+      session.endSession();
+      throw err;
+    }
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
 router.post("/cards/:cardId/fund", requireAdmin, async (_req, res) => {
   return fail(res, "Admin funding is disabled. StroWallet is the source of truth.", 405);
 });
@@ -1142,6 +1426,478 @@ router.get("/transactions", requireAdmin, async (req, res) => {
     });
 
     return ok(res, { transactions, declineFeeCount });
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+const AdminReportQuerySchema = z.object({
+  userId: z.string().optional(),
+  from: z.string().optional(),
+  to: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(1000).optional(),
+  format: z.enum(["json", "csv"]).optional(),
+  search: z.string().optional(),
+});
+
+const WalletAdjustSchema = z.object({
+  userId: z.string().min(1),
+  amountUsdt: z.number().positive(),
+  reason: z.string().min(1).max(500),
+  action: z.enum(["credit", "debit"]),
+});
+
+function toDateOrUndefined(value?: string) {
+  if (!value) return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+async function fetchWalletBalanceSummary(userId: string) {
+  const since = startOfUtcDay();
+  if (isPrismaPersistenceEnabled()) {
+    const user = await prisma.user.findUnique({ where: { userId } });
+    if (!user) return null;
+    const txns = await prisma.transaction.findMany({
+      where: { userId, createdAt: { gte: since } },
+      orderBy: { createdAt: "desc" },
+      take: 500,
+    });
+    let totalDeposited = 0;
+    let totalTransferredOut = 0;
+    let totalTopUpsToCard = 0;
+    let lastDeposit: Date | null = null;
+    let lastActivity: Date | null = null;
+    for (const tx of txns as any[]) {
+      const createdAt = tx?.createdAt ? new Date(tx.createdAt) : null;
+      if (createdAt && (!lastActivity || createdAt > lastActivity)) lastActivity = createdAt;
+      const status = String(tx?.status || "").toLowerCase();
+      if (status === "completed" && ["deposit", "manual_deposit"].includes(String(tx?.transactionType || ""))) {
+        totalDeposited += toFiniteNumber(tx?.amountUsdt ?? tx?.amount ?? 0);
+        if (createdAt && (!lastDeposit || createdAt > lastDeposit)) lastDeposit = createdAt;
+      }
+      if (status === "completed" && isP2pTransferTxn(tx)) {
+        totalTransferredOut += toFiniteNumber(tx?.amountUsdt ?? tx?.amount ?? 0);
+      }
+      if (status === "completed" && isWalletCardTopupTxn(tx)) {
+        totalTopUpsToCard += toFiniteNumber(tx?.metadata?.topupAmountUsd ?? tx?.amountUsdt ?? tx?.amount ?? 0);
+      }
+    }
+    return {
+      userId,
+      username: user.username || null,
+      phoneNumber: user.phoneNumber || null,
+      balance: Number(user.balance ?? 0),
+      currency: user.currency || "USDT",
+      lastDeposit: lastDeposit,
+      lastActivity: lastActivity,
+      totalDeposited: Number(totalDeposited.toFixed(2)),
+      totalTransferredOut: Number(totalTransferredOut.toFixed(2)),
+      totalTopUpsToCard: Number(totalTopUpsToCard.toFixed(2)),
+    };
+  }
+
+  const user = await User.findOne({ userId }).lean();
+  if (!user) return null;
+  const txns = await Transaction.find({ userId, createdAt: { $gte: since } }).sort({ createdAt: -1 }).limit(500).lean();
+  let totalDeposited = 0;
+  let totalTransferredOut = 0;
+  let totalTopUpsToCard = 0;
+  let lastDeposit: Date | null = null;
+  let lastActivity: Date | null = null;
+  for (const tx of txns as any[]) {
+    const createdAt = tx?.createdAt ? new Date(tx.createdAt) : null;
+    if (createdAt && (!lastActivity || createdAt > lastActivity)) lastActivity = createdAt;
+    const status = String(tx?.status || "").toLowerCase();
+    if (status === "completed" && ["deposit", "manual_deposit"].includes(String(tx?.transactionType || ""))) {
+      totalDeposited += toFiniteNumber(tx?.amountUsdt ?? tx?.amount ?? 0);
+      if (createdAt && (!lastDeposit || createdAt > lastDeposit)) lastDeposit = createdAt;
+    }
+    if (status === "completed" && isP2pTransferTxn(tx)) {
+      totalTransferredOut += toFiniteNumber(tx?.amountUsdt ?? tx?.amount ?? 0);
+    }
+    if (status === "completed" && isWalletCardTopupTxn(tx)) {
+      totalTopUpsToCard += toFiniteNumber(tx?.metadata?.topupAmountUsd ?? tx?.amountUsdt ?? tx?.amount ?? 0);
+    }
+  }
+  return {
+    userId,
+    username: user.username || null,
+    phoneNumber: user.phoneNumber || null,
+    balance: Number(user.balance ?? 0),
+    currency: user.currency || "USDT",
+    lastDeposit,
+    lastActivity,
+    totalDeposited: Number(totalDeposited.toFixed(2)),
+    totalTransferredOut: Number(totalTransferredOut.toFixed(2)),
+    totalTopUpsToCard: Number(totalTopUpsToCard.toFixed(2)),
+  };
+}
+
+router.get("/wallet/balances", requireAdmin, async (req, res) => {
+  try {
+    const query = AdminReportQuerySchema.parse(req.query || {});
+    const search = String(query.search || "").trim();
+    const limit = query.limit || 20;
+    const where = search
+      ? isPrismaPersistenceEnabled()
+        ? {
+            OR: [
+              { userId: search },
+              { phoneNumber: search },
+              { username: search },
+              { customerEmail: search },
+            ],
+          }
+        : {
+            $or: [
+              { userId: search },
+              { phoneNumber: search },
+              { username: search },
+              { customerEmail: search },
+            ],
+          }
+      : undefined;
+
+    const users = isPrismaPersistenceEnabled()
+      ? await prisma.user.findMany({ where, orderBy: { updatedAt: "desc" }, take: limit })
+      : await User.find(where || {}).sort({ updatedAt: -1 }).limit(limit).lean();
+    const userIds = users.map((u: any) => String(u.userId));
+    const summaries = [] as any[];
+    for (const userId of userIds) {
+      const summary = await fetchWalletBalanceSummary(userId);
+      if (summary) summaries.push(summary);
+    }
+    return ok(res, { items: summaries });
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.post("/wallet/balances/adjust", requireAdmin, async (req, res) => {
+  try {
+    const body = WalletAdjustSchema.parse(req.body || {});
+    const amount = toFiniteNumber(body.amountUsdt, 0);
+    if (amount <= 0) return fail(res, "Amount must be greater than 0", 400);
+    const now = new Date();
+    const txType = body.action === "credit" ? "manual_deposit" : "withdrawal";
+    const delta = body.action === "credit" ? amount : -amount;
+    const reference = `ADMIN-${body.action.toUpperCase()}-${Date.now()}`;
+
+    if (isPrismaPersistenceEnabled()) {
+      const result = await prisma.$transaction(async (tx: any) => {
+        const user = await tx.user.findUnique({ where: { userId: body.userId } });
+        if (!user) throw new Error("User not found");
+        if (body.action === "debit" && Number(user.balance ?? 0) < amount) {
+          throw new Error("Insufficient wallet balance");
+        }
+        const updated = body.action === "credit"
+          ? await tx.user.update({ where: { userId: body.userId }, data: { balance: { increment: amount } } })
+          : await tx.user.update({ where: { userId: body.userId }, data: { balance: { decrement: amount } } });
+        await tx.transaction.create({
+          data: {
+            userId: body.userId,
+            transactionType: txType,
+            paymentMethod: "system",
+            amount: amount,
+            amountUsdt: amount,
+            currency: "USDT",
+            transactionNumber: reference,
+            referenceNumber: reference,
+            status: "completed",
+            verified: true,
+            metadata: {
+              kind: "wallet_adjustment",
+              action: body.action,
+              reason: body.reason,
+              archivedBy: "admin_wallet_adjustment",
+              adjustedAt: now,
+            },
+          },
+        });
+        await RuntimeAudit.create({
+          key: `wallet_adjust_${body.userId}`,
+          oldValue: null,
+          newValue: { action: body.action, amount, reason: body.reason, reference },
+        }).catch(() => {});
+        return { balance: Number(updated.balance ?? 0) };
+      });
+      return ok(res, { userId: body.userId, balance: result.balance, reference });
+    }
+
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+      const user = await User.findOne({ userId: body.userId }).session(session);
+      if (!user) throw new Error("User not found");
+      if (body.action === "debit" && Number(user.balance ?? 0) < amount) {
+        throw new Error("Insufficient wallet balance");
+      }
+      const updated = await User.findOneAndUpdate(
+        { userId: body.userId },
+        body.action === "credit" ? { $inc: { balance: amount } } : { $inc: { balance: -amount } },
+        { new: true, session }
+      ).lean();
+      await Transaction.create([
+        {
+          userId: body.userId,
+          transactionType: txType,
+          paymentMethod: "system",
+          amount,
+          amountUsdt: amount,
+          currency: "USDT",
+          transactionNumber: reference,
+          referenceNumber: reference,
+          status: "completed",
+          verified: true,
+          metadata: { kind: "wallet_adjustment", action: body.action, reason: body.reason, adjustedAt: now },
+        },
+      ], { session });
+      await RuntimeAudit.create([{ key: `wallet_adjust_${body.userId}`, oldValue: null, newValue: { action: body.action, amount, reason: body.reason, reference } }], { session }).catch(() => {});
+      await session.commitTransaction();
+      session.endSession();
+      return ok(res, { userId: body.userId, balance: Number(updated?.balance ?? 0), reference });
+    } catch (err) {
+      try { await session.abortTransaction(); } catch {}
+      session.endSession();
+      throw err;
+    }
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+function maybeCsv(res: express.Response, filename: string, header: string[], rows: any[][], asCsv = false) {
+  if (!asCsv) return null;
+  const csv = [header.join(","), ...rows.map((row) => row.map(csvEscape).join(","))].join("\n");
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename=${filename}`);
+  res.status(200).send(csv);
+  return true;
+}
+
+router.get("/reports/card-topups", requireAdmin, async (req, res) => {
+  try {
+    const query = AdminReportQuerySchema.parse(req.query || {});
+    const since = toDateOrUndefined(query.from) || startOfUtcDay();
+    const until = toDateOrUndefined(query.to);
+    const limit = query.limit || 100;
+    const formatCsv = query.format === "csv";
+
+    const txFilter: any = {
+      createdAt: until ? { gte: since, lte: until } : { gte: since },
+    };
+    const txs = isPrismaPersistenceEnabled()
+      ? await prisma.transaction.findMany({ where: txFilter, orderBy: { createdAt: "desc" }, take: limit * 5 })
+      : await Transaction.find(txFilter).sort({ createdAt: -1 }).limit(limit * 5).lean();
+    const rows = (txs as any[])
+      .filter(isWalletCardTopupTxn)
+      .filter((tx) => !query.userId || String(tx.userId) === String(query.userId))
+      .slice(0, limit)
+      .map((tx) => ({
+        createdAt: tx.createdAt,
+        userId: tx.userId,
+        cardId: extractTransactionMetadata(tx).cardId || tx?.metadata?.cardId || null,
+        amountToCard: toFiniteNumber(tx?.metadata?.topupAmountUsd ?? tx?.amountUsdt ?? tx?.amount ?? 0),
+        feeUsd: toFiniteNumber(tx?.feeUsdt ?? tx?.metadata?.feeUsd ?? 0),
+        walletDeducted: toFiniteNumber(tx?.metadata?.totalDebitUsd ?? tx?.amountUsdt ?? tx?.amount ?? 0),
+        status: tx.status,
+      }));
+    const summary = {
+      totalTopUps: rows.length,
+      totalFeesCollected: Number(rows.reduce((sum, row) => sum + row.feeUsd, 0).toFixed(2)),
+      totalVolume: Number(rows.reduce((sum, row) => sum + row.amountToCard, 0).toFixed(2)),
+    };
+    if (maybeCsv(res, "card-topup-report.csv", ["createdAt", "userId", "cardId", "amountToCard", "feeUsd", "walletDeducted", "status"], rows.map((row) => [row.createdAt, row.userId, row.cardId || "", row.amountToCard, row.feeUsd, row.walletDeducted, row.status]), formatCsv)) return;
+    return ok(res, { summary, rows });
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.get("/reports/card-requests-wallet", requireAdmin, async (req, res) => {
+  try {
+    const query = AdminReportQuerySchema.parse(req.query || {});
+    const since = toDateOrUndefined(query.from) || startOfUtcDay();
+    const until = toDateOrUndefined(query.to);
+    const limit = query.limit || 100;
+    const formatCsv = query.format === "csv";
+    const txFilter: any = { createdAt: until ? { gte: since, lte: until } : { gte: since } };
+    const txs = isPrismaPersistenceEnabled()
+      ? await prisma.transaction.findMany({ where: txFilter, orderBy: { createdAt: "desc" }, take: limit * 10 })
+      : await Transaction.find(txFilter).sort({ createdAt: -1 }).limit(limit * 10).lean();
+    const cardRequests = isPrismaPersistenceEnabled()
+      ? await prisma.cardRequest.findMany({ where: { updatedAt: until ? { gte: since, lte: until } : { gte: since } }, orderBy: { updatedAt: "desc" }, take: limit * 10 })
+      : await CardRequest.find({ updatedAt: until ? { $gte: since, $lte: until } : { $gte: since }, $or: [{ metadata: { $exists: true } }, { amount: { $exists: true } }] }).sort({ updatedAt: -1 }).limit(limit * 10).lean();
+
+    const rows = [
+      ...(txs as any[])
+        .filter(isWalletCardRequestTxn)
+        .map((tx) => ({
+          createdAt: tx.createdAt,
+          userId: tx.userId,
+          cardFunded: toFiniteNumber(tx?.metadata?.cardAmountUsd ?? tx?.amountUsdt ?? tx?.amount ?? 0),
+          fee: toFiniteNumber(tx?.metadata?.feeUsd ?? tx?.feeUsdt ?? 0),
+          walletDeducted: toFiniteNumber(tx?.metadata?.totalUsd ?? tx?.amountUsdt ?? tx?.amount ?? 0),
+          status: tx.status,
+          tier: tx?.metadata?.tier || null,
+        })),
+      ...cardRequests
+        .filter((r: any) => String(r?.metadata?.paymentMethod || r?.metadata?.source || "").toLowerCase() === "wallet")
+        .map((r: any) => ({
+          createdAt: r.createdAt,
+          userId: r.userId,
+          cardFunded: toFiniteNumber(r?.metadata?.cardAmountUsd ?? r?.amount ?? 0),
+          fee: toFiniteNumber(r?.metadata?.feeUsd ?? 0),
+          walletDeducted: toFiniteNumber(r?.metadata?.totalUsd ?? r?.amount ?? 0),
+          status: r.status,
+          tier: r?.metadata?.tier || null,
+        })),
+    ]
+      .filter((row) => !query.userId || String(row.userId) === String(query.userId))
+      .slice(0, limit);
+    const summary = {
+      totalRequests: rows.length,
+      totalFeesCollected: Number(rows.reduce((sum, row) => sum + row.fee, 0).toFixed(2)),
+    };
+    if (maybeCsv(res, "card-request-wallet-report.csv", ["createdAt", "userId", "cardFunded", "fee", "walletDeducted", "status", "tier"], rows.map((row) => [row.createdAt, row.userId, row.cardFunded, row.fee, row.walletDeducted, row.status, row.tier || ""]), formatCsv)) return;
+    return ok(res, { summary, rows });
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.get("/reports/transfers", requireAdmin, async (req, res) => {
+  try {
+    const query = AdminReportQuerySchema.parse(req.query || {});
+    const since = toDateOrUndefined(query.from) || startOfUtcDay();
+    const until = toDateOrUndefined(query.to);
+    const limit = query.limit || 100;
+    const formatCsv = query.format === "csv";
+    const txFilter: any = { createdAt: until ? { gte: since, lte: until } : { gte: since } };
+    const txs = isPrismaPersistenceEnabled()
+      ? await prisma.transaction.findMany({ where: txFilter, orderBy: { createdAt: "desc" }, take: limit * 10 })
+      : await Transaction.find(txFilter).sort({ createdAt: -1 }).limit(limit * 10).lean();
+    const rowsRaw = (txs as any[]).filter(isP2pTransferTxn).filter((tx) => !query.userId || String(tx.userId) === String(query.userId));
+    const userMap = await buildUserLookup(rowsRaw.flatMap((tx) => [tx.userId, extractTransactionMetadata(tx).recipientUserId].filter(Boolean) as string[]));
+    const rows = rowsRaw.slice(0, limit).map((tx) => {
+      const meta = extractTransactionMetadata(tx);
+      const sender = userMap.get(String(tx.userId));
+      const receiver = meta.recipientUserId ? userMap.get(meta.recipientUserId) : null;
+      return {
+        createdAt: tx.createdAt,
+        senderUserId: tx.userId,
+        senderName: userDisplayName(sender),
+        receiverUserId: meta.recipientUserId || null,
+        receiverName: userDisplayName(receiver),
+        amount: toFiniteNumber(tx?.amountUsdt ?? tx?.amount ?? 0),
+        reference: tx.transactionNumber || tx.referenceNumber || null,
+        status: tx.status,
+      };
+    });
+    if (maybeCsv(res, "transfer-history.csv", ["createdAt", "senderUserId", "senderName", "receiverUserId", "receiverName", "amount", "reference", "status"], rows.map((row) => [row.createdAt, row.senderUserId, row.senderName || "", row.receiverUserId || "", row.receiverName || "", row.amount, row.reference || "", row.status]), formatCsv)) return;
+    return ok(res, { summary: { totalTransfers: rows.length, totalAmount: Number(rows.reduce((sum, row) => sum + row.amount, 0).toFixed(2)) }, rows });
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.get("/reports/bills", requireAdmin, async (req, res) => {
+  try {
+    const query = AdminReportQuerySchema.parse(req.query || {});
+    const since = toDateOrUndefined(query.from) || startOfUtcDay();
+    const until = toDateOrUndefined(query.to);
+    const limit = query.limit || 100;
+    const formatCsv = query.format === "csv";
+    const txFilter: any = { createdAt: until ? { gte: since, lte: until } : { gte: since } };
+    const txs = isPrismaPersistenceEnabled()
+      ? await prisma.transaction.findMany({ where: txFilter, orderBy: { createdAt: "desc" }, take: limit * 10 })
+      : await Transaction.find(txFilter).sort({ createdAt: -1 }).limit(limit * 10).lean();
+    const rows = (txs as any[])
+      .filter(isBillPaymentTxn)
+      .filter((tx) => !query.userId || String(tx.userId) === String(query.userId))
+      .slice(0, limit)
+      .map((tx) => {
+        const meta = extractTransactionMetadata(tx);
+        return {
+          createdAt: tx.createdAt,
+          userId: tx.userId,
+          billType: meta.kind || meta.source || String(tx?.metadata?.billType || tx?.metadata?.type || "bill"),
+          provider: tx?.metadata?.provider || tx?.metadata?.operator || tx?.metadata?.vendor || null,
+          number: tx?.metadata?.number || tx?.metadata?.phoneNumber || tx?.metadata?.meterNumber || tx?.referenceNumber || tx?.transactionNumber || null,
+          amount: toFiniteNumber(tx?.amountUsdt ?? tx?.amount ?? 0),
+          reference: tx.transactionNumber || tx.referenceNumber || null,
+          status: tx.status,
+        };
+      });
+    if (maybeCsv(res, "bill-payment-history.csv", ["createdAt", "userId", "billType", "provider", "number", "amount", "reference", "status"], rows.map((row) => [row.createdAt, row.userId, row.billType, row.provider || "", row.number || "", row.amount, row.reference || "", row.status]), formatCsv)) return;
+    return ok(res, { summary: { totalPaidToday: rows.length, totalVolumeToday: Number(rows.reduce((sum, row) => sum + row.amount, 0).toFixed(2)), failedToday: rows.filter((row) => String(row.status).toLowerCase() === "failed").length }, rows });
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.get("/reports/referrals", requireAdmin, async (req, res) => {
+  try {
+    const query = AdminReportQuerySchema.parse(req.query || {});
+    const limit = query.limit || 100;
+    const refs = await TelegramLink.find({ $and: [{ referrerUserId: { $exists: true } }, { referrerUserId: { $ne: null } }, { referrerUserId: { $ne: "" } }] }).sort({ referredAt: -1, updatedAt: -1 }).limit(1000).lean();
+    const referrerIds = Array.from(new Set(refs.map((r) => String(r.referrerUserId)).filter(Boolean)));
+    const inviteeIds = Array.from(new Set(refs.map((r) => String(r.chatId)).filter(Boolean)));
+    const userMap = await buildUserLookup([...referrerIds, ...inviteeIds]);
+    const grouped = new Map<string, { userId: string; invited: number; verified: number; lastReferral?: Date; usernames: string[] }>();
+    for (const row of refs as any[]) {
+      const referrerUserId = String(row.referrerUserId || "").trim();
+      if (!referrerUserId) continue;
+      const current = grouped.get(referrerUserId) || { userId: referrerUserId, invited: 0, verified: 0, lastReferral: undefined, usernames: [] };
+      current.invited += 1;
+      const invitee = userMap.get(String(row.chatId));
+      const status = String(invitee?.kycStatus || "").toLowerCase();
+      if (status === "approved" || status === "pending") current.verified += 1;
+      const referredAt = row.referredAt ? new Date(row.referredAt) : row.updatedAt ? new Date(row.updatedAt) : undefined;
+      if (referredAt && (!current.lastReferral || referredAt > current.lastReferral)) current.lastReferral = referredAt;
+      grouped.set(referrerUserId, current);
+    }
+    const rows = Array.from(grouped.values())
+      .sort((a, b) => b.invited - a.invited || b.verified - a.verified)
+      .slice(0, limit)
+      .map((entry) => ({
+        userId: entry.userId,
+        userName: userDisplayName(userMap.get(entry.userId)),
+        invited: entry.invited,
+        verified: entry.verified,
+        lastReferral: entry.lastReferral || null,
+      }));
+    const topReferrer = rows[0] ? `${rows[0].userName || rows[0].userId} (${rows[0].invited} invites)` : null;
+    return ok(res, {
+      summary: { totalReferrals: refs.length, verified: rows.reduce((sum, row) => sum + row.verified, 0), topReferrer },
+      rows,
+    });
+  } catch (e) {
+    const { status, message } = normalizeError(e);
+    return fail(res, message, status);
+  }
+});
+
+router.get("/cards/terminated", requireAdmin, async (req, res) => {
+  try {
+    const query = AdminReportQuerySchema.parse(req.query || {});
+    const limit = query.limit || 100;
+    if (isPrismaPersistenceEnabled()) {
+      const cards = await prisma.card.findMany({ where: { status: { in: ["terminated", "TERMINATED", "inactive", "INACTIVE", "closed", "CLOSED"] } }, orderBy: { updatedAt: "desc" }, take: limit });
+      const userMap = await buildUserLookup(Array.from(new Set(cards.map((c) => c.userId).filter(Boolean) as string[])));
+      return ok(res, { rows: cards.map((c) => ({ cardId: c.cardId, userId: c.userId, userName: userDisplayName(userMap.get(String(c.userId))), last4: c.last4, balanceReturned: Number(c.balance ?? c.availableBalance ?? 0), status: c.status, terminatedAt: c.updatedAt })) });
+    }
+    const cards = await Card.find({ status: { $in: ["terminated", "TERMINATED", "inactive", "INACTIVE", "closed", "CLOSED"] } }).sort({ updatedAt: -1 }).limit(limit).lean();
+    const userMap = await buildUserLookup(Array.from(new Set(cards.map((c: any) => c.userId).filter(Boolean) as string[])));
+    return ok(res, { rows: cards.map((c: any) => ({ cardId: c.cardId, userId: c.userId, userName: userDisplayName(userMap.get(String(c.userId))), last4: c.last4, balanceReturned: Number(c.balance ?? c.availableBalance ?? 0), status: c.status, terminatedAt: c.updatedAt })) });
   } catch (e) {
     const { status, message } = normalizeError(e);
     return fail(res, message, status);
