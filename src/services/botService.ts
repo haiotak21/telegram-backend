@@ -2324,9 +2324,7 @@ export async function initBot() {
           const userId = String(msg.chat.id);
           const { user, customer } = await getUserAndCustomerContext(userId);
 
-          const existingCard = isPrismaPersistenceEnabled()
-            ? await prisma.card.findFirst({ where: { userId }, orderBy: { updatedAt: "desc" } })
-            : await Card.findOne({ userId }).lean();
+          const existingCard = await getPrimaryCardForUser(userId);
           if (existingCard) {
             await bot!.sendMessage(msg.chat.id, "❌ You already have a card. Multiple cards are not allowed.", {
               reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
@@ -4855,13 +4853,8 @@ async function handleCardRequest(chatId: number, message?: any, options?: { skip
   const userId = String(chatId);
   const { user, customer: customerRecord } = await getUserAndCustomerContext(userId);
 
-  const existingCard = isPrismaPersistenceEnabled()
-    ? await prisma.card.findFirst({ where: { userId }, orderBy: { updatedAt: "desc" } })
-    : await Card.findOne({ userId }).lean();
-  const approvedRequest = isPrismaPersistenceEnabled()
-    ? await prisma.cardRequest.findFirst({ where: { userId, status: "approved" }, orderBy: { updatedAt: "desc" } })
-    : await CardRequest.findOne({ userId, status: "approved" }).lean();
-  if (existingCard || approvedRequest) {
+  const existingCard = await getPrimaryCardForUser(userId);
+  if (existingCard) {
     await bot!.sendMessage(chatId, "❌ You already have a card. Multiple cards are not allowed.", {
       reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
     });
@@ -5777,6 +5770,11 @@ function isFrozenStatus(raw?: string) {
   return String(raw || "").toLowerCase().includes("frozen");
 }
 
+function isTerminatedStatus(raw?: string) {
+  const status = String(raw || "").toLowerCase();
+  return ["terminated", "inactive", "cancelled", "closed"].some((item) => status.includes(item));
+}
+
 function pickNestedField(obj: any, keys: string[]): string | undefined {
   if (!obj || typeof obj !== "object") return undefined;
   for (const key of keys) {
@@ -6458,10 +6456,38 @@ async function sendMyCards(chatId: number, message?: any) {
     }
     if (!card) {
       await editOrSend(chatId, message, [
-        "💳 Your Virtual Card",
-        "Status: ✅ None",
+        "💳 My Cards",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "❌ You don't have a card yet.",
+        "",
+        "Tap below to request your first card",
+        "and start spending worldwide.",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
       ].join("\n"), {
-        inline_keyboard: [[MENU_BUTTON]],
+        inline_keyboard: [[
+          { text: "➕ Request Card", callback_data: "MENU_CREATE_CARD" },
+          MENU_BUTTON,
+        ]],
+      });
+      return;
+    }
+
+    if (isTerminatedStatus(card?.status)) {
+      await editOrSend(chatId, message, [
+        "💳 My Cards",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "❌ You don't have a card yet.",
+        "",
+        "Tap below to request your first card",
+        "and start spending worldwide.",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+      ].join("\n"), {
+        inline_keyboard: [[
+          { text: "➕ Request Card", callback_data: "MENU_CREATE_CARD" },
+          MENU_BUTTON,
+        ]],
       });
       return;
     }
@@ -6530,23 +6556,19 @@ async function sendMyCards(chatId: number, message?: any) {
   const resolvedCardId = resolvedCard?.cardId || latestRequest?.cardId || linkedCardId;
 
   const noCardLines = [
-    "🏧 Your Virtual Card",
-    "Card Type: virtual",
-    "Status: Not set",
-    "Card Number: /card_request",
-    "CVV: Not set",
-    "Expiry Date: Not set",
-    "Balance: __",
-    "Billing: Not set",
-    "Address: Not set",
+    "💳 My Cards",
+    "",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    "❌ You don't have a card yet.",
+    "",
+    "Tap below to request your first card",
+    "and start spending worldwide.",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
   ];
-  const noCardKeyboard: InlineKeyboardButton[][] = [
-    [
-      { text: "🔍 Transactions", callback_data: "CARD_TXN_NO_CARD" },
-      { text: "❄️ Freeze Card", callback_data: "CARD_FREEZE_NO_CARD" },
-    ],
-    [MENU_BUTTON],
-  ];
+  const noCardKeyboard: InlineKeyboardButton[][] = [[
+    { text: "➕ Request Card", callback_data: "MENU_CREATE_CARD" },
+    MENU_BUTTON,
+  ]];
 
   const card = resolvedCard || (latestRequest?.cardId ? await Card.findOne({ cardId: latestRequest.cardId }).lean() : null);
   const cardId = card?.cardId || latestRequest?.cardId || linkedCardId;
@@ -6566,6 +6588,13 @@ async function sendMyCards(chatId: number, message?: any) {
     currency: user?.currency || "USD",
     balance: user?.balance,
   };
+
+  if (isTerminatedStatus(activeCard?.status)) {
+    await editOrSend(chatId, message, noCardLines.join("\n"), {
+      inline_keyboard: noCardKeyboard,
+    });
+    return;
+  }
 
   const remoteDetail = await fetchCardDetailSafe(activeCard.cardId);
   const mergedDetail = remoteDetail || null;
@@ -6661,6 +6690,9 @@ async function getPrimaryCardForUser(userId: string) {
     const card = await prisma.card.findFirst({
       where: {
         OR: [{ userId }, ...(customerEmail ? [{ customerEmail }] : [])],
+        NOT: {
+          status: { in: ["terminated", "TERMINATED", "inactive", "INACTIVE", "cancelled", "CANCELLED", "closed", "CLOSED"] },
+        },
       },
       orderBy: { updatedAt: "desc" },
     });
@@ -6675,6 +6707,8 @@ async function getPrimaryCardForUser(userId: string) {
       orderBy: { updatedAt: "desc" },
     });
     if (!request?.cardId) return null;
+    const existingSameCard = await prisma.card.findUnique({ where: { cardId: String(request.cardId) } });
+    if (existingSameCard && isTerminatedStatus(existingSameCard.status || undefined)) return null;
     return {
       cardId: String(request.cardId),
       cardType: request.cardType,
@@ -6685,7 +6719,10 @@ async function getPrimaryCardForUser(userId: string) {
     } as any;
   }
 
-  const card = await Card.findOne({ userId })
+  const card = await Card.findOne({
+    userId,
+    status: { $nin: ["terminated", "TERMINATED", "inactive", "INACTIVE", "cancelled", "CANCELLED", "closed", "CLOSED"] },
+  })
     .sort({ updatedAt: -1 })
     .lean();
   if (card) return card;
@@ -6693,6 +6730,8 @@ async function getPrimaryCardForUser(userId: string) {
     .sort({ updatedAt: -1 })
     .lean();
   if (!request) return null;
+  const existingSameCard = await Card.findOne({ cardId: String(request.cardId) }).lean();
+  if (existingSameCard && isTerminatedStatus((existingSameCard as any)?.status)) return null;
   return {
     cardId: String(request.cardId),
     cardType: request.cardType,
