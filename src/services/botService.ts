@@ -28,6 +28,8 @@ type PendingAction =
   | { type: "card_request_verify"; method: PaymentMethod }
   | { type: "usdt_history" }
   | { type: "usdt_send" }
+  | { type: "wallet_card_topup_amount" }
+  | { type: "wallet_card_topup_pin" }
   | { type: "airtime" }
   | { type: "data_plans" }
   | { type: "internet_plans" };
@@ -254,6 +256,12 @@ const walletCardPaymentSessions = new Map<number, {
   walletBalance: number;
   feeUsd: number;
   loadAmountUsd: number;
+}>();
+const walletCardTopupSessions = new Map<number, {
+  cardId: string;
+  walletBalance: number;
+  cardBalance: number;
+  amountUsd?: number;
 }>();
 const recentCallbackActions = new Map<number, { action: string; at: number }>();
 const recentOutgoing = new Map<number, { key: string; at: number }>();
@@ -730,6 +738,7 @@ export async function initBot() {
     clearPendingAction(msg.chat.id);
     cardRequestSelections.delete(msg.chat.id);
     walletCardPaymentSessions.delete(msg.chat.id);
+    walletCardTopupSessions.delete(msg.chat.id);
     cardProfileSessions.delete(msg.chat.id);
     createCardSessions.delete(msg.chat.id);
     bankTransferSessions.delete(msg.chat.id);
@@ -924,6 +933,7 @@ export async function initBot() {
     if (action === "CANCEL") {
       clearPendingAction(chatId);
       walletCardPaymentSessions.delete(chatId);
+      walletCardTopupSessions.delete(chatId);
       cardProfileSessions.delete(chatId);
       createCardSessions.delete(chatId);
       await bot!.answerCallbackQuery(query.id, { text: "Cancelled" }).catch(() => { });
@@ -1075,6 +1085,67 @@ export async function initBot() {
       }
 
       await startVerificationFlow(chatId, method);
+      return;
+    }
+
+    if (action === "WALLET_CARD_TOPUP_CANCEL") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      walletCardTopupSessions.delete(chatId);
+      clearPendingAction(chatId);
+      await bot!.sendMessage(chatId, "Top-up cancelled.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      return;
+    }
+
+    if (action === "WALLET_CARD_TOPUP_CUSTOM") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      const session = walletCardTopupSessions.get(chatId);
+      if (!session) {
+        await bot!.sendMessage(chatId, "Top-up session expired. Please start again.", {
+          reply_markup: { inline_keyboard: [[{ text: "💳 Send to Card", callback_data: "WALLET_CARD_TOPUP" }, MENU_BUTTON]] },
+        });
+        return;
+      }
+      const key = chatKey(chatId);
+      if (key) pendingActions.set(key, { type: "wallet_card_topup_amount" });
+      await bot!.sendMessage(chatId, [
+        "✏️ Enter the amount you want to send to your card:",
+        "",
+        `(Available: $${session.walletBalance.toFixed(2)})`,
+      ].join("\n"), {
+        reply_markup: { force_reply: true },
+      });
+      return;
+    }
+
+    if (action.startsWith("WALLET_CARD_TOPUP_AMOUNT::")) {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      const amountRaw = Number(action.replace("WALLET_CARD_TOPUP_AMOUNT::", ""));
+      await proceedWalletTopupAmount(chatId, amountRaw);
+      return;
+    }
+
+    if (action === "WALLET_CARD_TOPUP_PIN") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      const session = walletCardTopupSessions.get(chatId);
+      if (!session || !Number.isFinite(session.amountUsd) || Number(session.amountUsd) <= 0) {
+        await bot!.sendMessage(chatId, "Top-up session expired. Please start again.", {
+          reply_markup: { inline_keyboard: [[{ text: "💳 Send to Card", callback_data: "WALLET_CARD_TOPUP" }, MENU_BUTTON]] },
+        });
+        return;
+      }
+      const key = chatKey(chatId);
+      if (key) pendingActions.set(key, { type: "wallet_card_topup_pin" });
+      await bot!.sendMessage(chatId, "Enter your PIN to confirm:", {
+        reply_markup: { force_reply: true },
+      });
+      return;
+    }
+
+    if (action === "WALLET_CARD_TOPUP_RETRY") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      await sendWalletCardTopupStart(chatId, query.message);
       return;
     }
 
@@ -1472,6 +1543,103 @@ export async function initBot() {
     } else if (pending.type === "usdt_send") {
       clearPendingAction(msg.chat.id);
       await handleUsdtSendRequest(msg.chat.id, text);
+    } else if (pending.type === "wallet_card_topup_amount") {
+      clearPendingAction(msg.chat.id);
+      const amount = Number(text.replace(/,/g, ""));
+      await proceedWalletTopupAmount(msg.chat.id, amount);
+    } else if (pending.type === "wallet_card_topup_pin") {
+      clearPendingAction(msg.chat.id);
+      const session = walletCardTopupSessions.get(msg.chat.id);
+      if (!session || !Number.isFinite(session.amountUsd) || Number(session.amountUsd) <= 0) {
+        await bot!.sendMessage(msg.chat.id, "Top-up session expired. Please start again.", {
+          reply_markup: { inline_keyboard: [[{ text: "💳 Send to Card", callback_data: "WALLET_CARD_TOPUP" }, MENU_BUTTON]] },
+        });
+        return;
+      }
+
+      const pin = parsePinValue(text);
+      const requiredPin = getWalletTopupPin();
+      if (!isValidPinFormat(pin)) {
+        await bot!.sendMessage(msg.chat.id, "❌ Invalid PIN format. Please enter 4 to 8 digits.", {
+          reply_markup: { inline_keyboard: [[{ text: "🔐 Enter PIN to Confirm", callback_data: "WALLET_CARD_TOPUP_PIN" }, { text: "❌ Cancel", callback_data: "WALLET_CARD_TOPUP_CANCEL" }]] },
+        });
+        return;
+      }
+      if (requiredPin && pin !== requiredPin) {
+        await bot!.sendMessage(msg.chat.id, "❌ Invalid PIN. Please try again.", {
+          reply_markup: { inline_keyboard: [[{ text: "🔐 Enter PIN to Confirm", callback_data: "WALLET_CARD_TOPUP_PIN" }, { text: "❌ Cancel", callback_data: "WALLET_CARD_TOPUP_CANCEL" }]] },
+        });
+        return;
+      }
+
+      const topupAmount = Number(session.amountUsd);
+      const now = new Date();
+      const nowLabel = formatUtcDateTime(now);
+      const reference = `TOPUP-${Date.now()}`;
+      const result = await executeWalletCardTopup({
+        userId: String(msg.chat.id),
+        cardId: session.cardId,
+        amountUsd: topupAmount,
+        reference,
+      });
+
+      if (!result.success) {
+        await bot!.sendMessage(msg.chat.id, [
+          "❌ Top-Up Failed",
+          "",
+          "Something went wrong.",
+          "Your wallet has NOT been debited.",
+          "",
+          "Please try again or contact support.",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "🔄 Try Again", callback_data: "WALLET_CARD_TOPUP_RETRY" },
+              { text: "🆘 Support", url: SUPPORT_URL },
+              MENU_BUTTON,
+            ]],
+          },
+        });
+        await bot!.sendMessage(msg.chat.id, [
+          "❌ Card Top-Up Failed",
+          "",
+          "Your wallet was not charged.",
+          "Please try again or contact support.",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        walletCardTopupSessions.delete(msg.chat.id);
+        return;
+      }
+
+      const newWalletBalance = roundMoney(Number(result.newWalletBalance ?? session.walletBalance - topupAmount));
+      walletCardTopupSessions.delete(msg.chat.id);
+      await bot!.sendMessage(msg.chat.id, [
+        "✅ Card Topped Up Successfully!",
+        "",
+        `💳 Amount sent to card:   $${topupAmount.toFixed(2)}`,
+        `💰 Remaining wallet:      $${newWalletBalance.toFixed(2)}`,
+        `📅 ${nowLabel}`,
+        `🔖 Ref: ${String(result.reference || reference)}`,
+      ].join("\n"), {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: "🔍 View My Card", callback_data: "MENU_MY_CARDS" },
+            { text: "🏠 Main Menu", callback_data: "MENU" },
+          ]],
+        },
+      });
+
+      await bot!.sendMessage(msg.chat.id, [
+        "✅ Card Top-Up Successful!",
+        "",
+        `💳 $${topupAmount.toFixed(2)} sent to your card`,
+        `💰 Wallet balance: $${newWalletBalance.toFixed(2)}`,
+        `📅 ${nowLabel}`,
+        `🔖 Ref: ${String(result.reference || reference)}`,
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
     } else if (pending.type === "verify") {
       const method = pending.method;
       if (!text) {
@@ -2917,7 +3085,7 @@ function buildWalletMenuKeyboard(): InlineKeyboardButton[][] {
       { text: "🧾 USDT History", callback_data: "WALLET_USDT_HISTORY" },
     ],
     [
-      { text: "💸 Send USDT", callback_data: "WALLET_USDT_SEND" },
+      { text: "💳 Send to Card", callback_data: "WALLET_CARD_TOPUP" },
     ],
     [
       { text: "📊 Transaction History", callback_data: "WALLET_TRANSACTIONS" },
@@ -3628,6 +3796,8 @@ async function handleMenuSelection(action: string, chatId: number, message?: any
       return sendUsdtBalance(chatId, message);
     case "WALLET_USDT_HISTORY":
       return sendUsdtHistory(chatId, undefined, message);
+    case "WALLET_CARD_TOPUP":
+      return sendWalletCardTopupStart(chatId, message);
     case "WALLET_USDT_SEND":
       return sendUsdtSendPrompt(chatId, message);
     case "WALLET_TRANSACTIONS":
@@ -3705,6 +3875,317 @@ async function getUserWalletBalanceUsd(userId: string) {
   }
   const user = await User.findOne({ userId }).lean();
   return Number(user?.balance ?? 0);
+}
+
+function parsePinValue(value: string) {
+  return String(value || "").trim();
+}
+
+function isValidPinFormat(value: string) {
+  return /^\d{4,8}$/.test(value);
+}
+
+function getWalletTopupPin() {
+  return String(process.env.WALLET_TOPUP_PIN || process.env.WALLET_TX_PIN || "").trim();
+}
+
+function buildWalletTopupAmountKeyboard() {
+  return [
+    [
+      { text: "$ 5", callback_data: "WALLET_CARD_TOPUP_AMOUNT::5" },
+      { text: "$ 10", callback_data: "WALLET_CARD_TOPUP_AMOUNT::10" },
+      { text: "$ 20", callback_data: "WALLET_CARD_TOPUP_AMOUNT::20" },
+    ],
+    [{ text: "✏️ Custom Amount", callback_data: "WALLET_CARD_TOPUP_CUSTOM" }],
+    [{ text: "❌ Cancel", callback_data: "WALLET_CARD_TOPUP_CANCEL" }],
+  ] as InlineKeyboardButton[][];
+}
+
+async function sendWalletCardTopupStart(chatId: number, message?: any) {
+  const userId = String(chatId);
+  const card = await getPrimaryCardForUser(userId);
+  if (!card?.cardId) {
+    await editOrSend(chatId, message, [
+      "❌ No Card Found",
+      "",
+      "You don't have an active card to top up.",
+      "",
+      "Would you like to request one?",
+    ].join("\n"), {
+      inline_keyboard: [
+        [
+          { text: "➕ Request Card", callback_data: "MENU_CREATE_CARD" },
+          MENU_BUTTON,
+        ],
+      ],
+    });
+    return;
+  }
+
+  const walletBalance = roundMoney(await getUserWalletBalanceUsd(userId));
+  if (walletBalance <= 0) {
+    await editOrSend(chatId, message, [
+      "❌ Insufficient Wallet Balance",
+      "",
+      `Your wallet balance: $${walletBalance.toFixed(2)}`,
+      "",
+      "You need funds in your wallet to top up your card.",
+    ].join("\n"), {
+      inline_keyboard: [
+        [
+          { text: "💰 Deposit First", callback_data: "WALLET_USDT_ADDRESS" },
+          MENU_BUTTON,
+        ],
+      ],
+    });
+    return;
+  }
+
+  const cardDetail = await fetchCardDetailSafe(String(card.cardId));
+  const cardBalance = roundMoney(Number(cardDetail?.available_balance ?? cardDetail?.balance ?? card?.balance ?? 0));
+  walletCardTopupSessions.set(chatId, {
+    cardId: String(card.cardId),
+    walletBalance,
+    cardBalance: Number.isFinite(cardBalance) ? cardBalance : 0,
+  });
+
+  await editOrSend(chatId, message, [
+    "💳 Send to Card",
+    "",
+    `Your wallet balance:    $${walletBalance.toFixed(2)}`,
+    `Your card balance:       $${(Number.isFinite(cardBalance) ? cardBalance : 0).toFixed(2)}`,
+    "",
+    "How much would you like to send to your card?",
+  ].join("\n"), {
+    inline_keyboard: buildWalletTopupAmountKeyboard(),
+  });
+}
+
+async function sendWalletTopupValidationError(chatId: number, text: string) {
+  await bot!.sendMessage(chatId, text, {
+    reply_markup: { inline_keyboard: [[{ text: "✏️ Custom Amount", callback_data: "WALLET_CARD_TOPUP_CUSTOM" }, { text: "❌ Cancel", callback_data: "WALLET_CARD_TOPUP_CANCEL" }]] },
+  });
+}
+
+async function proceedWalletTopupAmount(chatId: number, amountRaw: number) {
+  const session = walletCardTopupSessions.get(chatId);
+  if (!session) {
+    await bot!.sendMessage(chatId, "Top-up session expired. Please start again.", {
+      reply_markup: { inline_keyboard: [[{ text: "💳 Send to Card", callback_data: "WALLET_CARD_TOPUP" }, MENU_BUTTON]] },
+    });
+    return;
+  }
+
+  const amountUsd = roundMoney(Number(amountRaw));
+  if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
+    await sendWalletTopupValidationError(chatId, "❌ Please enter a valid amount greater than $0");
+    return;
+  }
+  if (amountUsd > session.walletBalance) {
+    await sendWalletTopupValidationError(chatId, `❌ Amount exceeds your wallet balance of $${session.walletBalance.toFixed(2)}`);
+    return;
+  }
+
+  session.amountUsd = amountUsd;
+  walletCardTopupSessions.set(chatId, session);
+  const walletAfter = roundMoney(session.walletBalance - amountUsd);
+  const cardAfter = roundMoney(session.cardBalance + amountUsd);
+
+  await bot!.sendMessage(chatId, [
+    "📋 Confirm Top-Up",
+    "",
+    "From:  💰 Wallet",
+    "To:    💳 Your Card",
+    "",
+    `Amount:              $${amountUsd.toFixed(2)}`,
+    `Wallet after:        $${walletAfter.toFixed(2)}`,
+    `Card balance after:  $${cardAfter.toFixed(2)}`,
+    "",
+    "⚠️ This action cannot be undone.",
+  ].join("\n"), {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: "🔐 Enter PIN to Confirm", callback_data: "WALLET_CARD_TOPUP_PIN" },
+        { text: "❌ Cancel", callback_data: "WALLET_CARD_TOPUP_CANCEL" },
+      ]],
+    },
+  });
+}
+
+async function executeWalletCardTopup(params: {
+  userId: string;
+  cardId: string;
+  amountUsd: number;
+  reference: string;
+}) {
+  const userId = String(params.userId);
+  const cardId = String(params.cardId);
+  const amountUsd = Number(params.amountUsd || 0);
+  const reference = String(params.reference || "").trim() || `TOPUP-${Date.now()}`;
+  if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
+    return { success: false, message: "Invalid top-up amount", reference };
+  }
+
+  const amountString = toStroAmountString(amountUsd);
+  const mode = normalizeMode(getDefaultMode());
+  const providerPayload = {
+    card_id: cardId,
+    amount: amountString,
+    ...(mode ? { mode } : {}),
+  };
+
+  if (isPrismaPersistenceEnabled()) {
+    let pendingTxId: string | null = null;
+    let walletAfterReserve = 0;
+    try {
+      const reserve = await prisma.$transaction(async (tx: any) => {
+        const decremented = await tx.user.updateMany({
+          where: { userId, balance: { gte: amountUsd } },
+          data: { balance: { decrement: amountUsd } },
+        });
+        if (!decremented?.count) {
+          throw new Error("Insufficient wallet balance");
+        }
+
+        const updatedUser = await tx.user.findUnique({ where: { userId } });
+        const pendingTx = await tx.transaction.create({
+          data: {
+            userId,
+            transactionType: "withdrawal",
+            paymentMethod: "wallet",
+            amount: amountUsd,
+            amountUsdt: amountUsd,
+            feeUsdt: 0,
+            currency: "USDT",
+            transactionNumber: reference,
+            referenceNumber: reference,
+            status: "pending",
+            verified: true,
+            metadata: { cardId, source: "wallet_card_topup" } as any,
+          },
+        });
+
+        return {
+          walletAfterReserve: Number(updatedUser?.balance || 0),
+          pendingTxId: String(pendingTx.id),
+        };
+      });
+
+      walletAfterReserve = reserve.walletAfterReserve;
+      pendingTxId = reserve.pendingTxId;
+    } catch (e: any) {
+      return { success: false, message: e?.message || "Card top-up failed", reference };
+    }
+
+    try {
+      const providerResponse = await callStroWallet("fund-card", "post", providerPayload);
+      await prisma.transaction.update({
+        where: { id: pendingTxId! },
+        data: {
+          status: "completed",
+          responseData: providerResponse as any,
+          metadata: { cardId, source: "wallet_card_topup", reference } as any,
+        },
+      });
+      return { success: true, newWalletBalance: walletAfterReserve, providerResponse, reference };
+    } catch (e: any) {
+      const message = e?.message || "Card top-up failed";
+      await prisma.$transaction(async (tx: any) => {
+        await tx.user.update({ where: { userId }, data: { balance: { increment: amountUsd } } });
+        await tx.transaction.update({
+          where: { id: pendingTxId! },
+          data: {
+            status: "failed",
+            responseData: { error: message } as any,
+            metadata: { cardId, source: "wallet_card_topup", refunded: true, failureReason: message, reference } as any,
+          },
+        });
+      });
+      return { success: false, message, reference };
+    }
+  }
+
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  let pendingTxId: any;
+  let walletAfterReserve = 0;
+  try {
+    const updatedUser = await User.findOneAndUpdate(
+      { userId, balance: { $gte: amountUsd } },
+      { $inc: { balance: -amountUsd } },
+      { new: true, session }
+    );
+    if (!updatedUser) {
+      throw new Error("Insufficient wallet balance");
+    }
+
+    const created = await Transaction.create([
+      {
+        userId,
+        transactionType: "withdrawal",
+        paymentMethod: "wallet",
+        amount: amountUsd,
+        amountUsdt: amountUsd,
+        feeUsdt: 0,
+        currency: "USDT",
+        transactionNumber: reference,
+        referenceNumber: reference,
+        status: "pending",
+        verified: true,
+        metadata: { cardId, source: "wallet_card_topup", reference },
+      },
+    ], { session });
+
+    pendingTxId = created?.[0]?._id;
+    walletAfterReserve = Number(updatedUser.balance || 0);
+    await session.commitTransaction();
+    session.endSession();
+  } catch (e: any) {
+    try {
+      await session.abortTransaction();
+    } catch {}
+    session.endSession();
+    return { success: false, message: e?.message || "Card top-up failed", reference };
+  }
+
+  try {
+    const providerResponse = await callStroWallet("fund-card", "post", providerPayload);
+    await Transaction.updateOne({ _id: pendingTxId }, {
+      $set: {
+        status: "completed",
+        responseData: providerResponse,
+        metadata: { cardId, source: "wallet_card_topup", reference },
+      },
+    });
+    return { success: true, newWalletBalance: walletAfterReserve, providerResponse, reference };
+  } catch (e: any) {
+    const message = e?.message || "Card top-up failed";
+    const refundSession = await mongoose.startSession();
+    refundSession.startTransaction();
+    try {
+      await User.updateOne({ userId }, { $inc: { balance: amountUsd } }, { session: refundSession });
+      await Transaction.updateOne(
+        { _id: pendingTxId },
+        {
+          $set: {
+            status: "failed",
+            responseData: { error: message },
+            metadata: { cardId, source: "wallet_card_topup", refunded: true, failureReason: message, reference },
+          },
+        },
+        { session: refundSession }
+      );
+      await refundSession.commitTransaction();
+    } catch (rollbackErr) {
+      try {
+        await refundSession.abortTransaction();
+      } catch {}
+      console.error("[bot] failed to rollback wallet after manual top-up error", rollbackErr);
+    } finally {
+      refundSession.endSession();
+    }
+    return { success: false, message, reference };
+  }
 }
 
 function computeDepositQuoteByEtb(amountEtb: number, rate: number) {
