@@ -19,6 +19,7 @@ import prisma from "../utils/prisma";
 import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
 let bot: TelegramBot | null = null;
+let botUsername: string | null = null;
 type PendingAction =
   | { type: "email" }
   | { type: "card" }
@@ -29,7 +30,9 @@ type PendingAction =
   | { type: "usdt_history" }
   | { type: "usdt_send" }
   | { type: "wallet_card_topup_amount" }
-  | { type: "wallet_card_topup_pin" }
+  | { type: "wallet_transfer_username" }
+  | { type: "wallet_transfer_phone" }
+  | { type: "wallet_transfer_amount" }
   | { type: "airtime" }
   | { type: "data_plans" }
   | { type: "internet_plans" };
@@ -93,6 +96,71 @@ function buildUsdtAddressMessage(address: string, created: boolean) {
     tip,
     body,
   ].join("\n");
+}
+
+function normalizeTelegramUsername(value?: string) {
+  let raw = String(value || "").trim();
+  if (!raw) return "";
+  raw = raw.replace(/^https?:\/\/t\.me\//i, "");
+  raw = raw.replace(/^@+/, "");
+  return raw.toLowerCase();
+}
+
+function normalizePhoneNumber(value?: string) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const hasPlus = raw.startsWith("+");
+  const digits = raw.replace(/\D+/g, "");
+  if (!digits) return "";
+  if (hasPlus) return `+${digits}`;
+  if (digits.startsWith("251")) return `+${digits}`;
+  if (digits.startsWith("0") && digits.length === 10) return `+251${digits.slice(1)}`;
+  return `+${digits}`;
+}
+
+function getPhoneLookupVariants(value?: string) {
+  const normalized = normalizePhoneNumber(value);
+  if (!normalized) return [] as string[];
+  const digits = normalized.replace(/\D+/g, "");
+  const variants = new Set<string>([normalized, digits, `+${digits}`]);
+  if (digits.startsWith("251") && digits.length >= 12) {
+    variants.add(`0${digits.slice(3)}`);
+  }
+  return Array.from(variants);
+}
+
+function formatRecipientTitle(name?: string, username?: string, phone?: string) {
+  if (username) return `@${username.replace(/^@+/, "")}`;
+  if (name) return name;
+  if (phone) return phone;
+  return "Recipient";
+}
+
+function buildUsdtWalletAddressesMessage(addresses: Array<{ network?: string; address?: string }>) {
+  const networkMeta: Record<string, { icon: string; label: string }> = {
+    TRC20: { icon: "🔵", label: "TRC20 (Tron Network)" },
+    BEP20: { icon: "🟡", label: "BEP20 (BNB Smart Chain)" },
+    POLYGON: { icon: "🟣", label: "Polygon (MATIC Network)" },
+  };
+  const order = ["TRC20", "BEP20", "POLYGON"];
+  const lines = ["🌐 Your USDT Wallet Addresses", ""];
+  for (const network of order) {
+    const item = addresses.find((entry) => String(entry.network || "TRC20").toUpperCase() === network);
+    if (!item?.address) continue;
+    const meta = networkMeta[network];
+    lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    lines.push(`${meta.icon} ${meta.label}`);
+    lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    lines.push(String(item.address));
+    lines.push("👆 Tap to copy");
+    lines.push("");
+  }
+  lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  lines.push("⚠️ Only send USDT on the matching");
+  lines.push("network to each address above.");
+  lines.push("Sending to wrong network = lost funds.");
+  lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  return lines.join("\n");
 }
 
 function clearPendingAction(value: number | string | undefined) {
@@ -261,6 +329,15 @@ const walletCardTopupSessions = new Map<number, {
   cardId: string;
   walletBalance: number;
   cardBalance: number;
+  amountUsd?: number;
+}>();
+const walletTransferSessions = new Map<number, {
+  mode?: "username" | "phone";
+  recipientUserId?: string;
+  recipientName?: string;
+  recipientUsername?: string;
+  recipientPhone?: string;
+  senderBalance?: number;
   amountUsd?: number;
 }>();
 const recentCallbackActions = new Map<number, { action: string; at: number }>();
@@ -452,6 +529,7 @@ export async function initBot() {
   bot = botRef;
   console.log("Telegram bot started");
   (botRef as any).getMe().then((me: any) => {
+    botUsername = me?.username ? String(me.username) : null;
     console.log(`Telegram bot identity: @${me.username} (${me.id})`);
   }).catch(() => { });
   if (useDbLock) {
@@ -483,7 +561,7 @@ export async function initBot() {
     { command: "verify", description: "Verify a payment transaction" },
   ]).catch(() => { });
 
-  botRef.onText(/^\/start(?:@[\w_]+)?(?:\s+.*)?$/i, async (msg: any) => {
+  botRef.onText(/^\/start(?:@[\w_]+)?(?:\s+(.*))?$/i, async (msg: any, match?: RegExpExecArray | null) => {
     const chatId = msg.chat.id;
     console.log("Telegram /start received", {
       chatId,
@@ -501,6 +579,16 @@ export async function initBot() {
       return;
     }
     const isNewUser = !existingUser;
+    const startArg = String(match?.[1] || "").trim();
+    const refMatch = startArg.match(/^ref_(\d+)$/i);
+
+    if (refMatch && refMatch[1] && String(refMatch[1]) !== String(chatId) && !isPrismaOnlyMode()) {
+      await TelegramLink.findOneAndUpdate(
+        { chatId },
+        { $setOnInsert: { referrerUserId: String(refMatch[1]), referredAt: new Date() } },
+        { upsert: true, new: true }
+      ).catch(() => {});
+    }
 
     try {
       if (isNewUser) {
@@ -739,6 +827,7 @@ export async function initBot() {
     cardRequestSelections.delete(msg.chat.id);
     walletCardPaymentSessions.delete(msg.chat.id);
     walletCardTopupSessions.delete(msg.chat.id);
+    walletTransferSessions.delete(msg.chat.id);
     cardProfileSessions.delete(msg.chat.id);
     createCardSessions.delete(msg.chat.id);
     bankTransferSessions.delete(msg.chat.id);
@@ -934,6 +1023,7 @@ export async function initBot() {
       clearPendingAction(chatId);
       walletCardPaymentSessions.delete(chatId);
       walletCardTopupSessions.delete(chatId);
+      walletTransferSessions.delete(chatId);
       cardProfileSessions.delete(chatId);
       createCardSessions.delete(chatId);
       await bot!.answerCallbackQuery(query.id, { text: "Cancelled" }).catch(() => { });
@@ -1126,7 +1216,7 @@ export async function initBot() {
       return;
     }
 
-    if (action === "WALLET_CARD_TOPUP_PIN") {
+    if (action === "WALLET_CARD_TOPUP_CONFIRM") {
       await bot!.answerCallbackQuery(query.id).catch(() => { });
       const session = walletCardTopupSessions.get(chatId);
       if (!session || !Number.isFinite(session.amountUsd) || Number(session.amountUsd) <= 0) {
@@ -1135,10 +1225,73 @@ export async function initBot() {
         });
         return;
       }
-      const key = chatKey(chatId);
-      if (key) pendingActions.set(key, { type: "wallet_card_topup_pin" });
-      await bot!.sendMessage(chatId, "Enter your PIN to confirm:", {
-        reply_markup: { force_reply: true },
+      const topupAmount = Number(session.amountUsd);
+      const now = new Date();
+      const nowLabel = formatUtcDateTime(now);
+      const reference = `TOPUP-${Date.now()}`;
+      const result = await executeWalletCardTopup({
+        userId: String(chatId),
+        cardId: session.cardId,
+        amountUsd: topupAmount,
+        reference,
+      });
+
+      if (!result.success) {
+        await bot!.sendMessage(chatId, [
+          "❌ Top-Up Failed",
+          "",
+          "Something went wrong.",
+          "Your wallet has NOT been debited.",
+          "",
+          "Please try again or contact support.",
+        ].join("\n"), {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "🔄 Try Again", callback_data: "WALLET_CARD_TOPUP_RETRY" },
+              { text: "🆘 Support", url: SUPPORT_URL },
+              MENU_BUTTON,
+            ]],
+          },
+        });
+        await bot!.sendMessage(chatId, [
+          "❌ Card Top-Up Failed",
+          "",
+          "Your wallet was not charged.",
+          "Please try again or contact support.",
+        ].join("\n"), {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        walletCardTopupSessions.delete(chatId);
+        return;
+      }
+
+      const newWalletBalance = roundMoney(Number(result.newWalletBalance ?? session.walletBalance - topupAmount));
+      walletCardTopupSessions.delete(chatId);
+      await bot!.sendMessage(chatId, [
+        "✅ Card Topped Up Successfully!",
+        "",
+        `💳 Amount sent to card:   $${topupAmount.toFixed(2)}`,
+        `💰 Remaining wallet:      $${newWalletBalance.toFixed(2)}`,
+        `📅 ${nowLabel}`,
+        `🔖 Ref: ${String(result.reference || reference)}`,
+      ].join("\n"), {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: "🔍 View My Card", callback_data: "MENU_MY_CARDS" },
+            { text: "🏠 Main Menu", callback_data: "MENU" },
+          ]],
+        },
+      });
+
+      await bot!.sendMessage(chatId, [
+        "✅ Card Top-Up Successful!",
+        "",
+        `💳 $${topupAmount.toFixed(2)} sent to your card`,
+        `💰 Wallet balance: $${newWalletBalance.toFixed(2)}`,
+        `📅 ${nowLabel}`,
+        `🔖 Ref: ${String(result.reference || reference)}`,
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
       return;
     }
@@ -1146,6 +1299,90 @@ export async function initBot() {
     if (action === "WALLET_CARD_TOPUP_RETRY") {
       await bot!.answerCallbackQuery(query.id).catch(() => { });
       await sendWalletCardTopupStart(chatId, query.message);
+      return;
+    }
+
+    if (action === "WALLET_TRANSFER_CANCEL") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      walletTransferSessions.delete(chatId);
+      clearPendingAction(chatId);
+      await bot!.sendMessage(chatId, "Transfer cancelled.", {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      return;
+    }
+
+    if (action === "WALLET_TRANSFER_CUSTOM") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      const session = walletTransferSessions.get(chatId);
+      if (!session?.recipientUserId) {
+        await bot!.sendMessage(chatId, "Transfer session expired. Please start again.", {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+      }
+      const key = chatKey(chatId);
+      if (key) pendingActions.set(key, { type: "wallet_transfer_amount" });
+      await bot!.sendMessage(chatId, `Enter the amount you want to send:\n\n(Your balance: $${Number(session.senderBalance ?? 0).toFixed(2)})`, {
+        reply_markup: { force_reply: true },
+      });
+      return;
+    }
+
+    if (action.startsWith("WALLET_TRANSFER_AMOUNT::")) {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      await proceedWalletTransferAmount(chatId, Number(action.replace("WALLET_TRANSFER_AMOUNT::", "")));
+      return;
+    }
+
+    if (action === "WALLET_TRANSFER_CONFIRM") {
+      await bot!.answerCallbackQuery(query.id).catch(() => { });
+      const session = walletTransferSessions.get(chatId);
+      if (!session?.recipientUserId || !Number.isFinite(session.amountUsd) || Number(session.amountUsd) <= 0) {
+        await bot!.sendMessage(chatId, "Transfer session expired. Please start again.", {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        return;
+      }
+      const amountUsd = Number(session.amountUsd);
+      const reference = `TRF-${Date.now()}`;
+      const result = await executeInternalWalletTransfer({
+        senderUserId: String(chatId),
+        recipientUserId: String(session.recipientUserId),
+        amountUsd,
+        reference,
+      });
+      if (!result.success) {
+        await bot!.sendMessage(chatId, `❌ ${result.message || "Transfer failed"}`, {
+          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+        });
+        walletTransferSessions.delete(chatId);
+        return;
+      }
+      const nowLabel = formatUtcDateTime(new Date());
+      const recipientLabel = formatRecipientTitle(session.recipientName, session.recipientUsername, session.recipientPhone);
+      await bot!.sendMessage(chatId, [
+        "✅ Transfer Successful!",
+        "",
+        `💸 $${amountUsd.toFixed(2)} sent to ${recipientLabel}`,
+        `💰 Your new balance: $${Number(result.senderBalance ?? 0).toFixed(2)}`,
+        `📅 ${nowLabel}`,
+        `🔖 Ref: ${reference}`,
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      });
+      await bot!.sendMessage(Number(session.recipientUserId), [
+        `💰 You received $${amountUsd.toFixed(2)}!`,
+        "",
+        `From: ${query.from?.username ? `@${String(query.from.username).replace(/^@+/, "")}` : String(chatId)}`,
+        `📅 ${nowLabel}`,
+        `🔖 Ref: ${reference}`,
+        "",
+        `Your new balance: $${Number(result.recipientBalance ?? 0).toFixed(2)}`,
+      ].join("\n"), {
+        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+      }).catch(() => {});
+      walletTransferSessions.delete(chatId);
       return;
     }
 
@@ -1547,99 +1784,16 @@ export async function initBot() {
       clearPendingAction(msg.chat.id);
       const amount = Number(text.replace(/,/g, ""));
       await proceedWalletTopupAmount(msg.chat.id, amount);
-    } else if (pending.type === "wallet_card_topup_pin") {
+    } else if (pending.type === "wallet_transfer_username") {
       clearPendingAction(msg.chat.id);
-      const session = walletCardTopupSessions.get(msg.chat.id);
-      if (!session || !Number.isFinite(session.amountUsd) || Number(session.amountUsd) <= 0) {
-        await bot!.sendMessage(msg.chat.id, "Top-up session expired. Please start again.", {
-          reply_markup: { inline_keyboard: [[{ text: "💳 Send to Card", callback_data: "WALLET_CARD_TOPUP" }, MENU_BUTTON]] },
-        });
-        return;
-      }
-
-      const pin = parsePinValue(text);
-      const requiredPin = getWalletTopupPin();
-      if (!isValidPinFormat(pin)) {
-        await bot!.sendMessage(msg.chat.id, "❌ Invalid PIN format. Please enter 4 to 8 digits.", {
-          reply_markup: { inline_keyboard: [[{ text: "🔐 Enter PIN to Confirm", callback_data: "WALLET_CARD_TOPUP_PIN" }, { text: "❌ Cancel", callback_data: "WALLET_CARD_TOPUP_CANCEL" }]] },
-        });
-        return;
-      }
-      if (requiredPin && pin !== requiredPin) {
-        await bot!.sendMessage(msg.chat.id, "❌ Invalid PIN. Please try again.", {
-          reply_markup: { inline_keyboard: [[{ text: "🔐 Enter PIN to Confirm", callback_data: "WALLET_CARD_TOPUP_PIN" }, { text: "❌ Cancel", callback_data: "WALLET_CARD_TOPUP_CANCEL" }]] },
-        });
-        return;
-      }
-
-      const topupAmount = Number(session.amountUsd);
-      const now = new Date();
-      const nowLabel = formatUtcDateTime(now);
-      const reference = `TOPUP-${Date.now()}`;
-      const result = await executeWalletCardTopup({
-        userId: String(msg.chat.id),
-        cardId: session.cardId,
-        amountUsd: topupAmount,
-        reference,
-      });
-
-      if (!result.success) {
-        await bot!.sendMessage(msg.chat.id, [
-          "❌ Top-Up Failed",
-          "",
-          "Something went wrong.",
-          "Your wallet has NOT been debited.",
-          "",
-          "Please try again or contact support.",
-        ].join("\n"), {
-          reply_markup: {
-            inline_keyboard: [[
-              { text: "🔄 Try Again", callback_data: "WALLET_CARD_TOPUP_RETRY" },
-              { text: "🆘 Support", url: SUPPORT_URL },
-              MENU_BUTTON,
-            ]],
-          },
-        });
-        await bot!.sendMessage(msg.chat.id, [
-          "❌ Card Top-Up Failed",
-          "",
-          "Your wallet was not charged.",
-          "Please try again or contact support.",
-        ].join("\n"), {
-          reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-        });
-        walletCardTopupSessions.delete(msg.chat.id);
-        return;
-      }
-
-      const newWalletBalance = roundMoney(Number(result.newWalletBalance ?? session.walletBalance - topupAmount));
-      walletCardTopupSessions.delete(msg.chat.id);
-      await bot!.sendMessage(msg.chat.id, [
-        "✅ Card Topped Up Successfully!",
-        "",
-        `💳 Amount sent to card:   $${topupAmount.toFixed(2)}`,
-        `💰 Remaining wallet:      $${newWalletBalance.toFixed(2)}`,
-        `📅 ${nowLabel}`,
-        `🔖 Ref: ${String(result.reference || reference)}`,
-      ].join("\n"), {
-        reply_markup: {
-          inline_keyboard: [[
-            { text: "🔍 View My Card", callback_data: "MENU_MY_CARDS" },
-            { text: "🏠 Main Menu", callback_data: "MENU" },
-          ]],
-        },
-      });
-
-      await bot!.sendMessage(msg.chat.id, [
-        "✅ Card Top-Up Successful!",
-        "",
-        `💳 $${topupAmount.toFixed(2)} sent to your card`,
-        `💰 Wallet balance: $${newWalletBalance.toFixed(2)}`,
-        `📅 ${nowLabel}`,
-        `🔖 Ref: ${String(result.reference || reference)}`,
-      ].join("\n"), {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
+      await continueWalletTransferWithRecipient(msg.chat.id, "username", text);
+    } else if (pending.type === "wallet_transfer_phone") {
+      clearPendingAction(msg.chat.id);
+      await continueWalletTransferWithRecipient(msg.chat.id, "phone", text);
+    } else if (pending.type === "wallet_transfer_amount") {
+      clearPendingAction(msg.chat.id);
+      const amount = Number(text.replace(/,/g, ""));
+      await proceedWalletTransferAmount(msg.chat.id, amount);
     } else if (pending.type === "verify") {
       const method = pending.method;
       if (!text) {
@@ -1740,197 +1894,21 @@ export async function initBot() {
             }
 
             const amountEtb = Number((selected as any)?.creditAmountEtb || amountNum);
-            const pricing = await loadPricingConfig();
-            const quote = quoteDeposit(amountEtb, pricing);
-            const primaryCard = await getPrimaryCardForUser(String(msg.chat.id));
-            if (!primaryCard?.cardId) {
-              await bot!.sendMessage(
-                msg.chat.id,
-                "❌ No active card found. Deposit was verified but cannot be applied to a card. Please create a card or contact support.",
-                { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
-              );
-              clearPendingAction(msg.chat.id);
-              return;
-            }
-            if (primaryCard.cardType && String(primaryCard.cardType).toLowerCase() !== "nfc") {
-              await bot!.sendMessage(
-                msg.chat.id,
-                "❌ Your saved card is not NFC-compatible. Please create a new NFC card and try again.",
-                { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
-              );
-              clearPendingAction(msg.chat.id);
-              return;
-            }
+            const depositResult = await creditVerifiedDeposit({
+              userId: String(msg.chat.id),
+              paymentMethod: method,
+              amountEtb,
+              transactionNumber: transactionKey,
+              referenceNumber: altKey,
+              responseData: b.raw ?? b,
+            });
 
-            let providerResponse: any;
-            try {
-              providerResponse = await callStroWallet("fund-card", "post", {
-                card_id: String(primaryCard.cardId),
-                amount: toStroAmountString(quote.creditedUsdt),
-                mode: normalizeMode(getDefaultMode()),
+            if (!depositResult.success) {
+              await bot!.sendMessage(msg.chat.id, `❌ ${depositResult.message || "Deposit could not be credited to your wallet."}`, {
+                reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
               });
-            } catch (fundErr: any) {
-              const reason = fundErr?.message || "Card funding is not available right now.";
-              const userId = String(msg.chat.id);
-              const baseTxData = {
-                userId,
-                transactionType: "deposit" as const,
-                paymentMethod: method,
-                amount: quote.creditedUsdt,
-                amountEtb,
-                amountUsdt: quote.creditedUsdt,
-                feeEtb: quote.feeEtb,
-                currency: "USDT",
-                rateSnapshot: quote.rate,
-                transactionNumber: transactionKey,
-                referenceNumber: altKey,
-                verified: true,
-                metadata: { cardId: String(primaryCard.cardId), destination: "card" } as any,
-              };
-              if (isPrismaPersistenceEnabled()) {
-                const hasReference = Boolean(altKey);
-                await prisma.transaction.upsert({
-                  where: hasReference
-                    ? {
-                        transactionType_referenceNumber_userId: {
-                          transactionType: "deposit",
-                          referenceNumber: altKey,
-                          userId,
-                        },
-                      }
-                    : {
-                        transactionType_transactionNumber_userId: {
-                          transactionType: "deposit",
-                          transactionNumber: transactionKey,
-                          userId,
-                        },
-                      },
-                  create: {
-                    ...baseTxData,
-                    status: "failed",
-                    responseData: { verification: b.raw ?? b, fundError: reason } as any,
-                  },
-                  update: {
-                    ...baseTxData,
-                    status: "failed",
-                    responseData: { verification: b.raw ?? b, fundError: reason } as any,
-                  },
-                });
-              } else {
-                await Transaction.findOneAndUpdate(
-                  {
-                    userId,
-                    transactionType: "deposit",
-                    $or: [
-                      { transactionNumber: transactionKey },
-                      ...(altKey ? [{ referenceNumber: altKey }] : []),
-                    ],
-                  },
-                  {
-                    $set: {
-                      ...baseTxData,
-                      status: "failed",
-                      responseData: { verification: b.raw ?? b, fundError: reason },
-                    },
-                  },
-                  { upsert: true, new: true }
-                );
-              }
-
-              const friendlyReason = reason.includes("was not found")
-                ? "Card not found on provider. Please create a new NFC card and try again."
-                : reason;
-
-              await bot!.sendMessage(
-                msg.chat.id,
-                `❌ Card top-up failed: ${friendlyReason}. Your wallet balance was not credited. Please contact support.`,
-                { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
-              );
               clearPendingAction(msg.chat.id);
               return;
-            }
-
-            if (isPrismaPersistenceEnabled()) {
-              const userId = String(msg.chat.id);
-              const hasReference = Boolean(altKey);
-              await prisma.transaction.upsert({
-                where: hasReference
-                  ? {
-                      transactionType_referenceNumber_userId: {
-                        transactionType: "deposit",
-                        referenceNumber: altKey,
-                        userId,
-                      },
-                    }
-                  : {
-                      transactionType_transactionNumber_userId: {
-                        transactionType: "deposit",
-                        transactionNumber: transactionKey,
-                        userId,
-                      },
-                    },
-                create: {
-                  userId,
-                  transactionType: "deposit",
-                  paymentMethod: method,
-                  amount: quote.creditedUsdt,
-                  amountEtb,
-                  amountUsdt: quote.creditedUsdt,
-                  feeEtb: quote.feeEtb,
-                  currency: "USDT",
-                  rateSnapshot: quote.rate,
-                  transactionNumber: transactionKey,
-                  referenceNumber: altKey,
-                  status: "completed",
-                  verified: true,
-                  responseData: { verification: b.raw ?? b, fundResponse: providerResponse } as any,
-                  metadata: { cardId: String(primaryCard.cardId), destination: "card" } as any,
-                },
-                update: {
-                  paymentMethod: method,
-                  amount: quote.creditedUsdt,
-                  amountEtb,
-                  amountUsdt: quote.creditedUsdt,
-                  feeEtb: quote.feeEtb,
-                  currency: "USDT",
-                  rateSnapshot: quote.rate,
-                  transactionNumber: transactionKey,
-                  referenceNumber: altKey,
-                  status: "completed",
-                  verified: true,
-                  responseData: { verification: b.raw ?? b, fundResponse: providerResponse } as any,
-                  metadata: { cardId: String(primaryCard.cardId), destination: "card" } as any,
-                },
-              });
-            } else {
-              await Transaction.findOneAndUpdate(
-                {
-                  userId: String(msg.chat.id),
-                  transactionType: "deposit",
-                  $or: [
-                    { transactionNumber: transactionKey },
-                    ...(altKey ? [{ referenceNumber: altKey }] : []),
-                  ],
-                },
-                {
-                  $set: {
-                    paymentMethod: method,
-                    amount: quote.creditedUsdt,
-                    amountEtb,
-                    amountUsdt: quote.creditedUsdt,
-                    feeEtb: quote.feeEtb,
-                    currency: "USDT",
-                    rateSnapshot: quote.rate,
-                    transactionNumber: transactionKey,
-                    referenceNumber: altKey,
-                    status: "completed",
-                    verified: true,
-                    responseData: { verification: b.raw ?? b, fundResponse: providerResponse },
-                    metadata: { cardId: String(primaryCard.cardId), destination: "card" },
-                  },
-                },
-                { upsert: true, new: true }
-              );
             }
 
             if (isPrismaPersistenceEnabled()) {
@@ -1960,22 +1938,15 @@ export async function initBot() {
             }
             await bot!.sendMessage(msg.chat.id, lines.join("\n"), { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
             depositSelections.delete(msg.chat.id);
-
-            const autoTopupMessage = `Deposited to card: ${quote.creditedUsdt.toFixed(2)} USDT`;
-
-            // Show latest card data and wallet after deposit/top-up.
-            const liveCardDetail = primaryCard?.cardId ? await fetchCardDetailSafe(String(primaryCard.cardId)) : null;
-            const liveCardBalance = liveCardDetail?.available_balance || liveCardDetail?.balance;
-            const liveCardCurrency = (liveCardDetail?.currency || primaryCard?.currency || "USD").toUpperCase();
             await bot!.sendMessage(
               msg.chat.id,
               [
                 "✅ Payment Verified",
-                autoTopupMessage,
-                liveCardBalance != null
-                  ? `Card balance: ${Number(liveCardBalance).toFixed(2)} ${liveCardCurrency}`
-                  : "Your card balance will update shortly once the credit is posted.",
-                "Note: this deposit was applied directly to your card.",
+                `💰 Deposited to wallet: ${Number(depositResult.creditedUsdt ?? 0).toFixed(2)} USDT`,
+                depositResult.newBalance != null
+                  ? `Wallet balance: ${Number(depositResult.newBalance).toFixed(2)} USDT`
+                  : undefined,
+                "You can now top up your card from your wallet.",
               ].filter(Boolean).join("\n"),
               { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } }
             );
@@ -1983,7 +1954,7 @@ export async function initBot() {
             await notifyLowStroWalletBalanceIfNeeded({
               userId: String(msg.chat.id),
               paymentMethod: method,
-              creditedUsdt: Number(quote.creditedUsdt || 0),
+              creditedUsdt: Number(depositResult.creditedUsdt || 0),
             });
           } catch (createErr: any) {
             if (createErr?.code === 11000) {
@@ -2670,13 +2641,11 @@ async function sendDepositMenu(chatId: number, message?: any) {
 function buildTransferMenuKeyboard(): InlineKeyboardButton[][] {
   return [
     [
-      { text: "📱 To Phone Number", callback_data: "TRANSFER_PHONE" },
-      { text: "💳 To Card Number", callback_data: "TRANSFER_CARD" },
+      { text: "@Username", callback_data: "TRANSFER_USERNAME" },
+      { text: "📱 Phone Number", callback_data: "TRANSFER_PHONE" },
     ],
-    [
-      { text: "👤 To Username", callback_data: "TRANSFER_USERNAME" },
-      { text: "🏦 To Bank Account", callback_data: "TRANSFER_BANK" },
-    ],
+    [{ text: "🏦 To Bank Account", callback_data: "TRANSFER_BANK" }],
+    [{ text: "💳 To Card Number", callback_data: "TRANSFER_CARD" }],
     [MENU_BUTTON],
   ];
 }
@@ -3745,9 +3714,11 @@ async function handleMenuSelection(action: string, chatId: number, message?: any
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
     case "TRANSFER_PHONE":
-    case "TRANSFER_CARD":
+      return startWalletTransferRecipientPrompt(chatId, "phone");
     case "TRANSFER_USERNAME":
-      return bot!.sendMessage(chatId, "Only bank transfers are available right now.", {
+      return startWalletTransferRecipientPrompt(chatId, "username");
+    case "TRANSFER_CARD":
+      return bot!.sendMessage(chatId, "Card-number transfers are not available yet.", {
         reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
       });
     case "TRANSFER_BANK":
@@ -3811,9 +3782,7 @@ async function handleMenuSelection(action: string, chatId: number, message?: any
     case "WALLET_DATA_PLANS":
       return sendDataPlans(chatId, "mtn-data", message);
     case "MENU_INVITE":
-      return bot!.sendMessage(chatId, "Invite friends and earn rewards: share your referral link from the app.", {
-        reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
-      });
+      return sendInviteReferral(chatId, message);
     default:
       return bot!.sendMessage(chatId, "Action not recognized. Use the menu again.", { reply_markup: { inline_keyboard: [[MENU_BUTTON]] } });
   }
@@ -3877,16 +3846,219 @@ async function getUserWalletBalanceUsd(userId: string) {
   return Number(user?.balance ?? 0);
 }
 
-function parsePinValue(value: string) {
-  return String(value || "").trim();
+async function findInternalTransferRecipient(params: { mode: "username" | "phone"; value: string; senderUserId: string }) {
+  const senderUserId = String(params.senderUserId);
+  if (params.mode === "username") {
+    const username = normalizeTelegramUsername(params.value);
+    if (!username) return null;
+    if (isPrismaPersistenceEnabled()) {
+      const candidates = await prisma.user.findMany({
+        where: {
+          OR: [{ username }, { username: `@${username}` }, { userId: username }],
+        },
+        take: 5,
+      });
+      const user = candidates.find((item) => String(item.userId) !== senderUserId) || null;
+      if (!user) return null;
+      return {
+        userId: String(user.userId),
+        username: normalizeTelegramUsername(user.username || username),
+        phoneNumber: user.phoneNumber || undefined,
+        name: [user.firstName, user.lastName].filter(Boolean).join(" ") || user.username || "User",
+      };
+    }
+    const user = await User.findOne({
+      userId: { $ne: senderUserId },
+      $or: [{ username }, { username: `@${username}` }],
+    }).lean();
+    if (!user) return null;
+    return {
+      userId: String(user.userId),
+      username: normalizeTelegramUsername(user.username || username),
+      phoneNumber: user.phoneNumber || undefined,
+      name: [user.firstName, user.lastName].filter(Boolean).join(" ") || user.username || "User",
+    };
+  }
+
+  const variants = getPhoneLookupVariants(params.value);
+  if (!variants.length) return null;
+  if (isPrismaPersistenceEnabled()) {
+    const candidates = await prisma.user.findMany({
+      where: {
+        userId: { not: senderUserId },
+        OR: variants.map((phoneNumber) => ({ phoneNumber })),
+      },
+      take: 5,
+    });
+    const user = candidates[0] || null;
+    if (!user) return null;
+    return {
+      userId: String(user.userId),
+      username: normalizeTelegramUsername(user.username || ""),
+      phoneNumber: user.phoneNumber || variants[0],
+      name: [user.firstName, user.lastName].filter(Boolean).join(" ") || user.username || "User",
+    };
+  }
+  const user = await User.findOne({
+    userId: { $ne: senderUserId },
+    phoneNumber: { $in: variants },
+  }).lean();
+  if (!user) return null;
+  return {
+    userId: String(user.userId),
+    username: normalizeTelegramUsername(user.username || ""),
+    phoneNumber: user.phoneNumber || variants[0],
+    name: [user.firstName, user.lastName].filter(Boolean).join(" ") || user.username || "User",
+  };
 }
 
-function isValidPinFormat(value: string) {
-  return /^\d{4,8}$/.test(value);
+async function sendInviteReferral(chatId: number, message?: any) {
+  const username = botUsername || process.env.TELEGRAM_BOT_USERNAME || "";
+  const cleaned = username.replace(/^@+/, "").trim();
+  const link = cleaned ? `https://t.me/${cleaned}?start=ref_${chatId}` : `ref_${chatId}`;
+  await editOrSend(chatId, message, [
+    "👫 Invite Friends & Earn!",
+    "",
+    "Share your personal referral link:",
+    "",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    `🔗 ${link}`,
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    "👆 Tap to copy your link",
+    "",
+    "💡 Every friend who joins using",
+    "your link will be tracked to you.",
+  ].join("\n"), {
+    inline_keyboard: [[MENU_BUTTON]],
+  });
 }
 
-function getWalletTopupPin() {
-  return String(process.env.WALLET_TOPUP_PIN || process.env.WALLET_TX_PIN || "").trim();
+async function executeInternalWalletTransfer(params: {
+  senderUserId: string;
+  recipientUserId: string;
+  amountUsd: number;
+  reference: string;
+}) {
+  const senderUserId = String(params.senderUserId);
+  const recipientUserId = String(params.recipientUserId);
+  const amountUsd = Number(params.amountUsd || 0);
+  const reference = String(params.reference || "");
+  if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
+    return { success: false, message: "Invalid transfer amount" };
+  }
+  if (senderUserId === recipientUserId) {
+    return { success: false, message: "You cannot transfer to yourself" };
+  }
+
+  if (isPrismaPersistenceEnabled()) {
+    try {
+      const result = await prisma.$transaction(async (tx: any) => {
+        const senderUpdate = await tx.user.updateMany({
+          where: { userId: senderUserId, balance: { gte: amountUsd } },
+          data: { balance: { decrement: amountUsd } },
+        });
+        if (!senderUpdate?.count) throw new Error("Insufficient wallet balance");
+        const sender = await tx.user.findUnique({ where: { userId: senderUserId } });
+        const recipient = await tx.user.findUnique({ where: { userId: recipientUserId } });
+        if (!recipient) throw new Error("Recipient not found");
+        const updatedRecipient = await tx.user.update({
+          where: { userId: recipientUserId },
+          data: { balance: { increment: amountUsd } },
+        });
+        await tx.transaction.create({
+          data: {
+            userId: senderUserId,
+            transactionType: "withdrawal",
+            paymentMethod: "system",
+            amount: amountUsd,
+            amountUsdt: amountUsd,
+            currency: "USDT",
+            transactionNumber: reference,
+            referenceNumber: reference,
+            status: "completed",
+            verified: true,
+            metadata: { kind: "p2p_transfer", direction: "debit", recipientUserId } as any,
+          },
+        });
+        await tx.transaction.create({
+          data: {
+            userId: recipientUserId,
+            transactionType: "deposit",
+            paymentMethod: "system",
+            amount: amountUsd,
+            amountUsdt: amountUsd,
+            currency: "USDT",
+            transactionNumber: `${reference}-RCV`,
+            referenceNumber: reference,
+            status: "completed",
+            verified: true,
+            metadata: { kind: "p2p_transfer", direction: "credit", senderUserId } as any,
+          },
+        });
+        return {
+          senderBalance: Number(sender?.balance ?? 0),
+          recipientBalance: Number(updatedRecipient?.balance ?? 0),
+        };
+      });
+      return { success: true, senderBalance: roundMoney(result.senderBalance), recipientBalance: roundMoney(result.recipientBalance) };
+    } catch (e: any) {
+      return { success: false, message: e?.message || "Transfer failed" };
+    }
+  }
+
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const sender = await User.findOneAndUpdate(
+      { userId: senderUserId, balance: { $gte: amountUsd } },
+      { $inc: { balance: -amountUsd } },
+      { new: true, session }
+    ).lean();
+    if (!sender) throw new Error("Insufficient wallet balance");
+    const recipient = await User.findOneAndUpdate(
+      { userId: recipientUserId },
+      { $inc: { balance: amountUsd } },
+      { new: true, session }
+    ).lean();
+    if (!recipient) throw new Error("Recipient not found");
+    await Transaction.create([
+      {
+        userId: senderUserId,
+        transactionType: "withdrawal",
+        paymentMethod: "system",
+        amount: amountUsd,
+        amountUsdt: amountUsd,
+        currency: "USDT",
+        transactionNumber: reference,
+        referenceNumber: reference,
+        status: "completed",
+        verified: true,
+        metadata: { kind: "p2p_transfer", direction: "debit", recipientUserId },
+      },
+      {
+        userId: recipientUserId,
+        transactionType: "deposit",
+        paymentMethod: "system",
+        amount: amountUsd,
+        amountUsdt: amountUsd,
+        currency: "USDT",
+        transactionNumber: `${reference}-RCV`,
+        referenceNumber: reference,
+        status: "completed",
+        verified: true,
+        metadata: { kind: "p2p_transfer", direction: "credit", senderUserId },
+      },
+    ], { session });
+    await session.commitTransaction();
+    session.endSession();
+    return { success: true, senderBalance: roundMoney(Number(sender.balance ?? 0)), recipientBalance: roundMoney(Number(recipient.balance ?? 0)) };
+  } catch (e: any) {
+    try {
+      await session.abortTransaction();
+    } catch {}
+    session.endSession();
+    return { success: false, message: e?.message || "Transfer failed" };
+  }
 }
 
 function buildWalletTopupAmountKeyboard() {
@@ -3899,6 +4071,118 @@ function buildWalletTopupAmountKeyboard() {
     [{ text: "✏️ Custom Amount", callback_data: "WALLET_CARD_TOPUP_CUSTOM" }],
     [{ text: "❌ Cancel", callback_data: "WALLET_CARD_TOPUP_CANCEL" }],
   ] as InlineKeyboardButton[][];
+}
+
+function buildWalletTransferAmountKeyboard() {
+  return [
+    [
+      { text: "$5", callback_data: "WALLET_TRANSFER_AMOUNT::5" },
+      { text: "$10", callback_data: "WALLET_TRANSFER_AMOUNT::10" },
+      { text: "$15", callback_data: "WALLET_TRANSFER_AMOUNT::15" },
+    ],
+    [{ text: "✏️ Custom Amount", callback_data: "WALLET_TRANSFER_CUSTOM" }],
+    [{ text: "❌ Cancel", callback_data: "WALLET_TRANSFER_CANCEL" }],
+  ] as InlineKeyboardButton[][];
+}
+
+async function startWalletTransferRecipientPrompt(chatId: number, mode: "username" | "phone") {
+  const key = chatKey(chatId);
+  if (key) pendingActions.set(key, { type: mode === "username" ? "wallet_transfer_username" : "wallet_transfer_phone" });
+  walletTransferSessions.set(chatId, { mode });
+  await bot!.sendMessage(
+    chatId,
+    mode === "username"
+      ? "Enter the recipient's Telegram username:\nExample: @hailetak12"
+      : "Enter the recipient's phone number:\nExample: 0917894722 or +251917894722",
+    { reply_markup: { force_reply: true } }
+  );
+}
+
+async function continueWalletTransferWithRecipient(chatId: number, mode: "username" | "phone", value: string) {
+  const senderUserId = String(chatId);
+  const recipient = await findInternalTransferRecipient({ mode, value, senderUserId });
+  if (!recipient) {
+    await bot!.sendMessage(chatId, [
+      "❌ User Not Found",
+      "",
+      `No account found for ${value}.`,
+      "The recipient must be a registered",
+      "user of this bot.",
+    ].join("\n"), {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "🔄 Try Again", callback_data: mode === "username" ? "TRANSFER_USERNAME" : "TRANSFER_PHONE" },
+          { text: "❌ Cancel", callback_data: "WALLET_TRANSFER_CANCEL" },
+        ]],
+      },
+    });
+    return;
+  }
+
+  const senderBalance = roundMoney(await getUserWalletBalanceUsd(senderUserId));
+  walletTransferSessions.set(chatId, {
+    mode,
+    recipientUserId: recipient.userId,
+    recipientName: recipient.name,
+    recipientUsername: recipient.username || undefined,
+    recipientPhone: recipient.phoneNumber || undefined,
+    senderBalance,
+  });
+
+  await bot!.sendMessage(chatId, [
+    "✅ User Found!",
+    "",
+    `👤 Recipient: ${recipient.name}`,
+    recipient.username ? `📱 @${recipient.username}` : recipient.phoneNumber ? `📱 ${recipient.phoneNumber}` : undefined,
+    "",
+    "How much would you like to send?",
+    "",
+    `(Your balance: $${senderBalance.toFixed(2)})`,
+  ].filter(Boolean).join("\n"), {
+    reply_markup: { inline_keyboard: buildWalletTransferAmountKeyboard() },
+  });
+}
+
+async function proceedWalletTransferAmount(chatId: number, amountRaw: number) {
+  const session = walletTransferSessions.get(chatId);
+  if (!session?.recipientUserId) {
+    await bot!.sendMessage(chatId, "Transfer session expired. Please start again.", {
+      reply_markup: { inline_keyboard: [[MENU_BUTTON]] },
+    });
+    return;
+  }
+  const amountUsd = roundMoney(Number(amountRaw));
+  const senderBalance = roundMoney(Number(session.senderBalance ?? await getUserWalletBalanceUsd(String(chatId))));
+  if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
+    await bot!.sendMessage(chatId, "❌ Please enter a valid amount greater than $0", {
+      reply_markup: { inline_keyboard: [[{ text: "✏️ Custom Amount", callback_data: "WALLET_TRANSFER_CUSTOM" }, { text: "❌ Cancel", callback_data: "WALLET_TRANSFER_CANCEL" }]] },
+    });
+    return;
+  }
+  if (amountUsd > senderBalance) {
+    await bot!.sendMessage(chatId, `❌ Amount exceeds your wallet balance of $${senderBalance.toFixed(2)}`, {
+      reply_markup: { inline_keyboard: [[{ text: "✏️ Custom Amount", callback_data: "WALLET_TRANSFER_CUSTOM" }, { text: "❌ Cancel", callback_data: "WALLET_TRANSFER_CANCEL" }]] },
+    });
+    return;
+  }
+  session.amountUsd = amountUsd;
+  session.senderBalance = senderBalance;
+  walletTransferSessions.set(chatId, session);
+  const recipientLabel = formatRecipientTitle(session.recipientName, session.recipientUsername, session.recipientPhone);
+  await bot!.sendMessage(chatId, [
+    "📋 Confirm Transfer",
+    "",
+    `To:       ${recipientLabel}${session.recipientName && recipientLabel !== session.recipientName ? ` (${session.recipientName})` : ""}`,
+    `Amount:   $${amountUsd.toFixed(2)}`,
+    `Your balance after: $${roundMoney(senderBalance - amountUsd).toFixed(2)}`,
+  ].join("\n"), {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: "✅ Confirm", callback_data: "WALLET_TRANSFER_CONFIRM" },
+        { text: "❌ Cancel", callback_data: "WALLET_TRANSFER_CANCEL" },
+      ]],
+    },
+  });
 }
 
 async function sendWalletCardTopupStart(chatId: number, message?: any) {
@@ -4005,7 +4289,7 @@ async function proceedWalletTopupAmount(chatId: number, amountRaw: number) {
   ].join("\n"), {
     reply_markup: {
       inline_keyboard: [[
-        { text: "🔐 Enter PIN to Confirm", callback_data: "WALLET_CARD_TOPUP_PIN" },
+        { text: "✅ Confirm", callback_data: "WALLET_CARD_TOPUP_CONFIRM" },
         { text: "❌ Cancel", callback_data: "WALLET_CARD_TOPUP_CANCEL" },
       ]],
     },
@@ -5387,7 +5671,7 @@ async function sendWalletSummary(chatId: number, message?: any) {
         { text: "📊 USDT Balance", callback_data: "WALLET_USDT_BALANCE" },
         { text: "🧾 USDT History", callback_data: "WALLET_USDT_HISTORY" },
       ],
-      [{ text: "💸 Send USDT", callback_data: "WALLET_USDT_SEND" }],
+      [{ text: "💳 Send to Card", callback_data: "WALLET_CARD_TOPUP" }],
       [
         { text: "📱 Buy Airtime", callback_data: "WALLET_AIRTIME" },
         { text: "📶 Data Plans", callback_data: "WALLET_DATA_PLANS" },
@@ -5445,34 +5729,34 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
     const payload = { userId: String(chatId), ...(options?.forceCreate ? { forceCreate: true } : {}) };
     const existingResp = await callStroWallet("usdt/address", "get", { userId: String(chatId) });
     const existingData: any = existingResp?.data ?? existingResp;
-    const existingRecord = existingData?.address ?? existingData;
-    const existingAddress = existingRecord?.address ? String(existingRecord.address) : null;
-    if (existingAddress) {
-      await editOrSend(chatId, message, buildUsdtAddressMessage(existingAddress, Boolean(options?.forceCreate)), {
+    const existingAddresses = Array.isArray(existingData?.addresses)
+      ? existingData.addresses
+      : (existingData?.address ? [existingData.address] : []);
+    if (existingAddresses.length) {
+      await editOrSend(chatId, message, buildUsdtWalletAddressesMessage(existingAddresses), {
         inline_keyboard: [
           [
             { text: "📊 USDT Balance", callback_data: "WALLET_USDT_BALANCE" },
             { text: "🧾 USDT History", callback_data: "WALLET_USDT_HISTORY" },
           ],
-          [{ text: "💸 Send USDT", callback_data: "WALLET_USDT_SEND" }],
           [MENU_BUTTON],
         ],
-      }, "HTML");
+      });
       return;
     }
 
     const resp = await callStroWallet("usdt/address", "post", payload);
     const data: any = resp?.data ?? resp;
-    const created = Boolean(data?.created) || !existingAddress;
-    const record = data?.address ?? data;
-    const address = record?.address ? String(record.address) : existingAddress;
+    const addresses = Array.isArray(data?.addresses)
+      ? data.addresses
+      : (data?.address ? [data.address] : []);
     if (data?.pending) {
       await editOrSend(chatId, message, "USDT address creation is already in progress. Please wait a moment and try again.", {
         inline_keyboard: [[MENU_BUTTON]],
       });
       return;
     }
-    if (!address) {
+    if (!addresses.length) {
       await editOrSend(chatId, message, "No USDT address found yet. Tap below to create one.", {
         inline_keyboard: [
           [{ text: "➕ Create USDT Address", callback_data: "WALLET_CREATE_USDT_ADDRESS" }],
@@ -5480,23 +5764,21 @@ async function sendUsdtAddress(chatId: number, message?: any, options?: { forceC
             { text: "📊 USDT Balance", callback_data: "WALLET_USDT_BALANCE" },
             { text: "🧾 USDT History", callback_data: "WALLET_USDT_HISTORY" },
           ],
-          [{ text: "💸 Send USDT", callback_data: "WALLET_USDT_SEND" }],
           [MENU_BUTTON],
         ],
       });
       return;
     }
 
-    await editOrSend(chatId, message, buildUsdtAddressMessage(address, created), {
+    await editOrSend(chatId, message, buildUsdtWalletAddressesMessage(addresses), {
       inline_keyboard: [
         [
           { text: "📊 USDT Balance", callback_data: "WALLET_USDT_BALANCE" },
           { text: "🧾 USDT History", callback_data: "WALLET_USDT_HISTORY" },
         ],
-        [{ text: "💸 Send USDT", callback_data: "WALLET_USDT_SEND" }],
         [MENU_BUTTON],
       ],
-    }, "HTML");
+    });
   } catch (err: any) {
     const message = err?.response?.data?.error || err?.response?.data?.message || err?.message || "Unexpected error";
     if (String(message).toLowerCase().includes("email")) {
@@ -5517,7 +5799,7 @@ async function resolveUsdtAddress(chatId: number) {
   try {
     const resp = await callStroWallet("usdt/address", "get", { userId: String(chatId) });
     const data: any = resp?.data ?? resp;
-    const record = data?.address ?? data;
+    const record = Array.isArray(data?.addresses) ? data.addresses[0] : (data?.address ?? data);
     const address = record?.address;
     return address ? String(address) : null;
   } catch {

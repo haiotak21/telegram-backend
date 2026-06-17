@@ -13,6 +13,8 @@ import { isPrismaPersistenceEnabled } from "../utils/persistence";
 
 const router = express.Router();
 const prismaAny = prisma as any;
+const SUPPORTED_USDT_NETWORKS = ["TRC20", "BEP20", "POLYGON"] as const;
+type UsdtNetwork = typeof SUPPORTED_USDT_NETWORKS[number];
 const VIRTUAL_ACCOUNT_CREATE_TTL_MS = Number(process.env.VIRTUAL_ACCOUNT_CREATE_TTL_MS || 60000);
 const USDT_ADDRESS_CREATE_TTL_MS = Number(process.env.USDT_ADDRESS_CREATE_TTL_MS || 60000);
 const virtualAccountCreateLocks = new Map<string, { startedAt: number; account?: any }>();
@@ -39,17 +41,27 @@ async function queryLatestUsdtAddressRow(userId: string) {
   return Array.isArray(rows) && rows.length ? rows[0] : null;
 }
 
+async function queryUsdtAddressRows(userId: string) {
+  if (!isPrismaPersistenceEnabled()) return [];
+  const rows = await prismaAny.$queryRawUnsafe(
+    'SELECT * FROM "UsdtAddress" WHERE "userId" = $1 ORDER BY "createdAt" DESC',
+    userId
+  );
+  return Array.isArray(rows) ? rows : [];
+}
+
 async function upsertUsdtAddressRow(params: {
   userId: string;
   address: string;
   label?: string;
+  network?: string;
   responseData: any;
 }) {
   if (!isPrismaPersistenceEnabled()) return null;
   const responseDataJson = JSON.stringify(params.responseData ?? {});
   const rows = await prismaAny.$queryRawUnsafe(
     `INSERT INTO "UsdtAddress" ("id", "userId", "address", "label", "network", "status", "responseData", "createdAt", "updatedAt")
-     VALUES ($1, $2, $3, $4, 'TRC20', 'active', $5::jsonb, NOW(), NOW())
+     VALUES ($1, $2, $3, $4, $5, 'active', $6::jsonb, NOW(), NOW())
      ON CONFLICT ("address") DO UPDATE SET
        "userId" = EXCLUDED."userId",
        "label" = EXCLUDED."label",
@@ -62,6 +74,7 @@ async function upsertUsdtAddressRow(params: {
     params.userId,
     params.address,
     params.label || null,
+    params.network || "TRC20",
     responseDataJson
   );
   return Array.isArray(rows) && rows.length ? rows[0] : null;
@@ -436,6 +449,7 @@ const UsdtAddressSchema = z.object({
   userId: z.union([z.string(), z.number()]).transform((v) => String(v)),
   label: z.string().optional(),
   email: z.string().email().optional(),
+  network: z.enum(SUPPORTED_USDT_NETWORKS).optional(),
   webhookUrl: z.string().url().optional(),
   mode: z.string().optional(),
   forceCreate: z.boolean().optional(),
@@ -543,6 +557,21 @@ async function findExistingUsdtAddress(userId: string) {
   if (!isMongoReady()) return null;
   const UsdtAddress = getUsdtAddressModel();
   return UsdtAddress.findOne({ userId }).sort({ createdAt: -1 }).lean();
+}
+
+async function findExistingUsdtAddresses(userId: string) {
+  const rows = await queryUsdtAddressRows(userId);
+  if (rows.length) return rows;
+  if (!isMongoReady()) return [];
+  const UsdtAddress = getUsdtAddressModel();
+  return UsdtAddress.find({ userId }).sort({ createdAt: -1 }).lean();
+}
+
+function normalizeUsdtNetwork(value?: string): UsdtNetwork {
+  const raw = String(value || "TRC20").trim().toUpperCase();
+  if (raw === "BEP20") return "BEP20";
+  if (raw === "POLYGON") return "POLYGON";
+  return "TRC20";
 }
 
 function extractUsdtAddress(payload: any) {
@@ -1317,13 +1346,14 @@ router.get("/usdt/address", async (req, res) => {
   try {
     const userId = String(req.query.userId || "").trim();
     if (!userId) return fail(res, "userId is required", 400);
-    const existing = await findExistingUsdtAddress(userId);
-    if (!existing) {
+    const existing = await findExistingUsdtAddresses(userId);
+    if (!existing.length) {
       const cached = usdtAddressCreateLocks.get(userId);
-      if (cached?.address) return ok(res, { address: cached.address }, 200);
+      if (cached?.address) return ok(res, { addresses: Array.isArray(cached.address) ? cached.address : [cached.address], address: Array.isArray(cached.address) ? cached.address[0] : cached.address }, 200);
     }
-    if (!existing) return ok(res, { address: null }, 200);
-    return ok(res, { address: existing }, 200);
+    if (!existing.length) return ok(res, { address: null, addresses: [] }, 200);
+    const ordered = SUPPORTED_USDT_NETWORKS.map((network) => existing.find((row: any) => normalizeUsdtNetwork(row?.network) === network)).filter(Boolean);
+    return ok(res, { address: ordered[0], addresses: ordered }, 200);
   } catch (e) {
     const { status, message } = normalizeError(e);
     return fail(res, message, status);
@@ -1337,10 +1367,19 @@ router.post("/usdt/address", async (req, res) => {
       const cached = usdtAddressCreateLocks.get(body.userId);
       return ok(res, { address: cached?.address ?? null, pending: true }, 200);
     }
-    const existing = await findExistingUsdtAddress(body.userId);
-    if (existing) return ok(res, { address: existing, created: false }, 200);
+    const existing = await findExistingUsdtAddresses(body.userId);
+    const requestedNetworks = body.network ? [normalizeUsdtNetwork(body.network)] : [...SUPPORTED_USDT_NETWORKS];
+    const existingByNetwork = requestedNetworks
+      .map((network) => existing.find((row: any) => normalizeUsdtNetwork(row?.network) === network))
+      .filter(Boolean);
+    if (existingByNetwork.length === requestedNetworks.length) {
+      return ok(res, { address: existingByNetwork[0], addresses: existingByNetwork, created: false }, 200);
+    }
     const cachedExisting = usdtAddressCreateLocks.get(body.userId);
-    if (cachedExisting?.address) return ok(res, { address: cachedExisting.address, created: false }, 200);
+    if (cachedExisting?.address) {
+      const cachedList = Array.isArray(cachedExisting.address) ? cachedExisting.address : [cachedExisting.address];
+      return ok(res, { address: cachedList[0] || null, addresses: cachedList, created: false }, 200);
+    }
 
     if (body.forceCreate) {
       usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now() });
@@ -1353,80 +1392,78 @@ router.post("/usdt/address", async (req, res) => {
     const public_key = requirePublicKey();
     const label = body.label || `user:${body.userId}`;
     const webhook_url = body.webhookUrl || getWebhookUrl("/api/webhook/strowallet");
-    const params = {
-      public_key,
-      label,
-      email,
-      webhook_url,
-      mode: body.mode || getDefaultMode(),
-    };
-    if (shouldDebugStroWallet()) {
-      console.log("[strowallet] usdt address request", {
-        userId: body.userId,
+    const createdAddresses: any[] = [];
+    const rawResponses: any[] = [];
+
+    for (const network of requestedNetworks) {
+      const existingForNetwork = existing.find((row: any) => normalizeUsdtNetwork(row?.network) === network);
+      if (existingForNetwork) {
+        createdAddresses.push(existingForNetwork);
+        continue;
+      }
+
+      const params: Record<string, any> = {
+        public_key,
         label,
-        email: maskValue(email, 3, 3),
+        email,
         webhook_url,
-        mode: params.mode,
-        public_key: maskValue(public_key, 4, 4),
-      });
-    }
-    let data: any = {};
-    try {
-      const resp = await api.post("generate-address", undefined, { params });
-      data = resp.data || {};
-    } catch (providerErr: any) {
-      const providerMessage = String(providerErr?.response?.data?.message || providerErr?.response?.data?.error || providerErr?.message || "");
-      if (providerMessage.toLowerCase().includes("address already exists")) {
-        const existing = await findExistingUsdtAddress(body.userId);
-        if (existing) {
-          return ok(res, { address: existing, raw: providerErr?.response?.data || null, created: false }, 200);
-        }
-      }
-      throw providerErr;
-    }
-    if (shouldDebugStroWallet()) {
-      console.log("[strowallet] usdt address response", data);
-    }
-    const address = extractUsdtAddress(data);
-    if (!address) {
+        mode: body.mode || getDefaultMode(),
+        network,
+      };
       if (shouldDebugStroWallet()) {
-        console.warn("[strowallet] usdt address missing from response", data);
-      }
-      return ok(res, { address: null, raw: data }, 200);
-    }
-
-    if (isPrismaPersistenceEnabled()) {
-      const saved = await upsertUsdtAddressRow({
-        userId: body.userId,
-        address,
-        label,
-        responseData: data,
-      });
-      const response = { address: saved ?? { userId: body.userId, address, label, network: "TRC20", status: "active" }, raw: data, created: true };
-      usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: response.address });
-      return ok(res, response, 200);
-    }
-
-    if (!isMongoReady()) {
-      const response = { address: { address, userId: body.userId, label, network: "TRC20", status: "active" }, raw: data, created: true };
-      usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: response.address });
-      return ok(res, response, 200);
-    }
-
-    const UsdtAddress = getUsdtAddressModel();
-    const saved = await UsdtAddress.findOneAndUpdate(
-      { address },
-      {
-        $set: {
+        console.log("[strowallet] usdt address request", {
           userId: body.userId,
           label,
-          responseData: data,
-        },
-      },
-      { upsert: true, new: true }
-    );
-    const response = { address: saved, raw: data, created: true };
-    usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: response.address });
+          email: maskValue(email, 3, 3),
+          webhook_url,
+          mode: params.mode,
+          network,
+          public_key: maskValue(public_key, 4, 4),
+        });
+      }
+      let data: any = {};
+      try {
+        const resp = await api.post("generate-address", undefined, { params });
+        data = resp.data || {};
+      } catch (providerErr: any) {
+        const providerMessage = String(providerErr?.response?.data?.message || providerErr?.response?.data?.error || providerErr?.message || "");
+        if (providerMessage.toLowerCase().includes("address already exists")) {
+          const refreshed = await findExistingUsdtAddresses(body.userId);
+          const recovered = refreshed.find((row: any) => normalizeUsdtNetwork(row?.network) === network);
+          if (recovered) {
+            createdAddresses.push(recovered);
+            continue;
+          }
+        }
+        rawResponses.push({ network, error: providerErr?.response?.data || providerMessage });
+        continue;
+      }
+      rawResponses.push({ network, data });
+      if (shouldDebugStroWallet()) {
+        console.log("[strowallet] usdt address response", { network, data });
+      }
+      const address = extractUsdtAddress(data);
+      if (!address) continue;
+
+      if (isPrismaPersistenceEnabled()) {
+        const saved = await upsertUsdtAddressRow({ userId: body.userId, address, label, network, responseData: data });
+        createdAddresses.push(saved ?? { userId: body.userId, address, label, network, status: "active" });
+      } else if (!isMongoReady()) {
+        createdAddresses.push({ address, userId: body.userId, label, network, status: "active", responseData: data });
+      } else {
+        const UsdtAddress = getUsdtAddressModel();
+        const saved = await UsdtAddress.findOneAndUpdate(
+          { address },
+          { $set: { userId: body.userId, label, network, responseData: data } },
+          { upsert: true, new: true }
+        );
+        createdAddresses.push(saved);
+      }
+    }
+
+    const ordered = SUPPORTED_USDT_NETWORKS.map((network) => createdAddresses.find((row: any) => normalizeUsdtNetwork(row?.network) === network)).filter(Boolean);
+    const response = { address: ordered[0] || null, addresses: ordered, raw: rawResponses, created: ordered.length > 0 };
+    usdtAddressCreateLocks.set(body.userId, { startedAt: Date.now(), address: ordered });
     return ok(res, response, 200);
   } catch (e) {
     if (req?.body?.userId) usdtAddressCreateLocks.delete(String(req.body.userId));
@@ -1460,9 +1497,10 @@ router.get("/usdt/balance", async (req, res) => {
     if (userId) {
       const shouldSync = String(req.query.sync ?? "true").toLowerCase() !== "false";
       if (shouldSync) {
-        const addressRow = await findExistingUsdtAddress(userId);
-        const address = addressRow?.address ? String(addressRow.address) : "";
-        if (address) {
+        const addressRows = await findExistingUsdtAddresses(userId);
+        for (const addressRow of addressRows) {
+          const address = addressRow?.address ? String(addressRow.address) : "";
+          if (!address) continue;
           await syncUserUsdtDepositsFromProvider(userId, address, 30).catch((err) => {
             if (shouldDebugStroWallet()) {
               console.warn("[strowallet] usdt balance sync failed", {
@@ -1531,9 +1569,10 @@ router.get("/usdt/transactions", async (req, res) => {
     const limit = Number(req.query.limit || 10);
     const shouldSync = String(req.query.sync ?? "true").toLowerCase() !== "false";
     if (shouldSync) {
-      const addressRow = await findExistingUsdtAddress(userId);
-      const address = addressRow?.address ? String(addressRow.address) : "";
-      if (address) {
+      const addressRows = await findExistingUsdtAddresses(userId);
+      for (const addressRow of addressRows) {
+        const address = addressRow?.address ? String(addressRow.address) : "";
+        if (!address) continue;
         await syncUserUsdtDepositsFromProvider(userId, address, Math.max(20, Number(limit) || 10)).catch((err) => {
           if (shouldDebugStroWallet()) {
             console.warn("[strowallet] usdt transactions sync failed", {
