@@ -576,11 +576,16 @@ router.post("/usdt/reset-addresses", requireAdmin, async (req, res) => {
       at: nowIso,
     });
 
+    const deletedAny = deleted > 0;
+
     return ok(res, {
       userId,
       networks: networks.length ? networks : ["TRC20", "BEP20", "POLYGON"],
       deleted,
-      message: "USDT addresses reset successfully",
+      status: deletedAny ? "reset" : "noop",
+      message: deletedAny
+        ? "USDT addresses reset successfully"
+        : "No local USDT addresses found for this user. If provider reports existing addresses, use Bind USDT Addresses.",
     }, 200);
   } catch (e) {
     const { status, message } = normalizeError(e);

@@ -634,6 +634,15 @@ function inferUsdtNetwork(input: any): UsdtNetwork | undefined {
   return undefined;
 }
 
+function inferUsdtNetworkFromKey(input: any): UsdtNetwork | undefined {
+  const value = String(input || "").trim().toLowerCase();
+  if (!value) return undefined;
+  if (value.includes("trc20") || value.includes("tron")) return "TRC20";
+  if (value.includes("bep20") || value.includes("bsc") || value.includes("binance")) return "BEP20";
+  if (value.includes("polygon") || value.includes("matic")) return "POLYGON";
+  return undefined;
+}
+
 function collectUsdtAddressRecords(payload: any): Array<{ address: string; network?: UsdtNetwork }> {
   const out: Array<{ address: string; network?: UsdtNetwork }> = [];
   const seenNodes = new Set<any>();
@@ -653,6 +662,12 @@ function collectUsdtAddressRecords(payload: any): Array<{ address: string; netwo
       asAny.depositAddress,
       asAny.usdtAddress,
       asAny.usdt_address,
+      asAny.trc20Address,
+      asAny.bep20Address,
+      asAny.polygonAddress,
+      asAny.trc20,
+      asAny.bep20,
+      asAny.polygon,
     ];
 
     for (const item of candidates) {
@@ -660,6 +675,16 @@ function collectUsdtAddressRecords(payload: any): Array<{ address: string; netwo
       if (!isLikelyUsdtWalletAddress(address) || seenAddress.has(address)) continue;
       const network = inferUsdtNetwork(asAny.network || asAny.chain || asAny.blockchain || asAny.protocol)
         || (address.startsWith("T") ? "TRC20" : undefined);
+      out.push({ address, network });
+      seenAddress.add(address);
+    }
+
+    // Fallback for payloads that expose addresses as key-value pairs, e.g. trc20Address: "..."
+    for (const [key, value] of Object.entries(asAny)) {
+      if (typeof value !== "string") continue;
+      const address = String(value || "").trim();
+      if (!isLikelyUsdtWalletAddress(address) || seenAddress.has(address)) continue;
+      const network = inferUsdtNetworkFromKey(key) || (address.startsWith("T") ? "TRC20" : undefined);
       out.push({ address, network });
       seenAddress.add(address);
     }
@@ -678,55 +703,95 @@ function collectUsdtAddressRecords(payload: any): Array<{ address: string; netwo
 
 async function syncUsdtAddressesFromProvider(userId: string, email?: string) {
   const customerEmail = String(email || "").trim();
-  if (!customerEmail) return [] as any[];
+  const user = await findUserById(userId);
+  const customerId = String(
+    (user as any)?.customerId ||
+    (user as any)?.customer_id ||
+    (user as any)?.strowalletCustomerId ||
+    (user as any)?.strowallet_customer_id ||
+    ""
+  ).trim();
+  if (!customerEmail && !customerId) return [] as any[];
   const public_key = requirePublicKey();
+  const mode = normalizeMode(getDefaultMode());
 
-  let payload: any = null;
-  try {
-    const lookup = await bitvcard.get("getcardholder/", {
-      params: { public_key, customerEmail },
-    });
-    payload = lookup?.data || null;
-  } catch {
-    return [];
+  const lookupParamCandidates: Array<Record<string, any>> = [];
+  if (customerId) {
+    lookupParamCandidates.push({ public_key, customerId, ...(mode ? { mode } : {}) });
+    lookupParamCandidates.push({ public_key, customer_id: customerId, ...(mode ? { mode } : {}) });
+  }
+  if (customerEmail) {
+    lookupParamCandidates.push({ public_key, customerEmail, ...(mode ? { mode } : {}) });
+    lookupParamCandidates.push({ public_key, customer_email: customerEmail, ...(mode ? { mode } : {}) });
+    lookupParamCandidates.push({ public_key, email: customerEmail, ...(mode ? { mode } : {}) });
   }
 
-  const found = collectUsdtAddressRecords(payload);
-  if (!found.length) return [];
-
-  const savedRows: any[] = [];
-  for (const entry of found) {
-    if (isPrismaPersistenceEnabled()) {
-      const saved = await upsertUsdtAddressRow({
-        userId,
-        address: entry.address,
-        label: `user:${userId}`,
-        network: entry.network || "TRC20",
-        responseData: payload,
-      });
-      savedRows.push(saved ?? { userId, address: entry.address, network: entry.network || "TRC20", status: "active" });
-    } else if (!isMongoReady()) {
-      savedRows.push({ userId, address: entry.address, network: entry.network || "TRC20", status: "active", responseData: payload });
-    } else {
-      const UsdtAddress = getUsdtAddressModel();
-      const saved = await UsdtAddress.findOneAndUpdate(
-        { address: entry.address },
-        {
-          $set: {
+  let payload: any = null;
+  for (const params of lookupParamCandidates) {
+    try {
+      const lookup = await bitvcard.get("getcardholder/", { params });
+      payload = lookup?.data || null;
+      const found = collectUsdtAddressRecords(payload);
+      if (found.length) {
+        if (shouldDebugStroWallet()) {
+          console.log("[strowallet] usdt lookup recovered addresses", {
             userId,
-            label: `user:${userId}`,
-            network: entry.network || "TRC20",
-            responseData: payload,
-            status: "active",
-          },
-        },
-        { upsert: true, new: true }
-      );
-      savedRows.push(saved);
+            email: maskValue(customerEmail, 3, 3),
+            customerId: maskValue(customerId, 3, 3),
+            paramsUsed: Object.keys(params),
+            count: found.length,
+          });
+        }
+
+        const savedRows: any[] = [];
+        for (const entry of found) {
+          if (isPrismaPersistenceEnabled()) {
+            const saved = await upsertUsdtAddressRow({
+              userId,
+              address: entry.address,
+              label: `user:${userId}`,
+              network: entry.network || "TRC20",
+              responseData: payload,
+            });
+            savedRows.push(saved ?? { userId, address: entry.address, network: entry.network || "TRC20", status: "active" });
+          } else if (!isMongoReady()) {
+            savedRows.push({ userId, address: entry.address, network: entry.network || "TRC20", status: "active", responseData: payload });
+          } else {
+            const UsdtAddress = getUsdtAddressModel();
+            const saved = await UsdtAddress.findOneAndUpdate(
+              { address: entry.address },
+              {
+                $set: {
+                  userId,
+                  label: `user:${userId}`,
+                  network: entry.network || "TRC20",
+                  responseData: payload,
+                  status: "active",
+                },
+              },
+              { upsert: true, new: true }
+            );
+            savedRows.push(saved);
+          }
+        }
+
+        return savedRows;
+      }
+    } catch {
+      // Continue with other lookup parameter styles.
     }
   }
 
-  return savedRows;
+  if (shouldDebugStroWallet()) {
+    console.warn("[strowallet] usdt lookup found no addresses", {
+      userId,
+      email: maskValue(customerEmail, 3, 3),
+      customerId: maskValue(customerId, 3, 3),
+      attemptedLookups: lookupParamCandidates.length,
+      sampleKeys: payload && typeof payload === "object" ? Object.keys(payload).slice(0, 20) : [],
+    });
+  }
+  return [];
 }
 
 function normalizeError(e: any) {
@@ -1564,8 +1629,11 @@ router.post("/usdt/address", async (req, res) => {
   try {
     const body = UsdtAddressSchema.parse(req.body || {});
     const requestedNetworks = body.network ? [normalizeUsdtNetwork(body.network)] : [...SUPPORTED_USDT_NETWORKS];
+    if (body.forceCreate) {
+      usdtProviderConflictLocks.delete(body.userId);
+    }
     const activeProviderConflict = usdtProviderConflictLocks.get(body.userId);
-    if (activeProviderConflict) {
+    if (!body.forceCreate && activeProviderConflict) {
       if (Date.now() - activeProviderConflict.startedAt <= USDT_PROVIDER_CONFLICT_TTL_MS) {
         const relevant = requestedNetworks.every((network) => activeProviderConflict.networks.includes(network));
         if (relevant) {
@@ -1583,7 +1651,7 @@ router.post("/usdt/address", async (req, res) => {
       }
     }
 
-    if (shouldSkipCreate(usdtAddressCreateLocks, body.userId, USDT_ADDRESS_CREATE_TTL_MS)) {
+    if (!body.forceCreate && shouldSkipCreate(usdtAddressCreateLocks, body.userId, USDT_ADDRESS_CREATE_TTL_MS)) {
       const cached = usdtAddressCreateLocks.get(body.userId);
       return ok(res, { address: cached?.address ?? null, pending: true }, 200);
     }
